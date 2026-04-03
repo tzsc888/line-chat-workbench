@@ -1,0 +1,142 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum CustomerStage {
+  NEW
+  FIRST_CONTACT
+  FOLLOWING_UP
+  INTERESTED
+  NEGOTIATING
+  WAITING_PAYMENT
+  PAID
+  AFTER_SALES
+  LOST
+}
+
+enum MessageRole {
+  CUSTOMER
+  OPERATOR
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+}
+
+enum MessageSource {
+  LINE
+  MANUAL
+  AI_SUGGESTION
+}
+
+enum SuggestionVariant {
+  STABLE
+  ADVANCING
+}
+
+model Customer {
+  id                String        @id @default(cuid())
+  lineUserId        String?       @unique
+  remarkName        String?
+  originalName      String
+  avatarUrl         String?
+  stage             CustomerStage @default(NEW)
+  isVip             Boolean       @default(false)
+
+  aiCustomerInfo    String?
+  aiCurrentStrategy String?
+  aiLastAnalyzedAt  DateTime?
+
+  lastMessageAt         DateTime?
+  lastInboundMessageAt  DateTime?
+  lastOutboundMessageAt DateTime?
+
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  tags              CustomerTag[]
+  messages          Message[]
+  replyDraftSets    ReplyDraftSet[]
+
+  @@index([stage])
+  @@index([isVip])
+  @@index([lastMessageAt(sort: Desc)])
+  @@index([originalName])
+  @@index([remarkName])
+}
+
+model Tag {
+  id          String        @id @default(cuid())
+  name        String        @unique
+  color       String?
+  sortOrder   Int           @default(0)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  customers   CustomerTag[]
+
+  @@index([sortOrder])
+}
+
+model CustomerTag {
+  customerId  String
+  tagId       String
+  createdAt   DateTime @default(now())
+
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  tag         Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([customerId, tagId])
+  @@index([tagId])
+}
+
+model Message {
+  id              String        @id @default(cuid())
+  customerId      String
+  role            MessageRole
+  type            MessageType   @default(TEXT)
+  source          MessageSource
+  lineMessageId   String?       @unique
+
+  japaneseText    String
+  chineseText     String?
+  imageUrl        String?
+
+  sentAt          DateTime      @default(now())
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  customer        Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, sentAt(sort: Asc)])
+  @@index([customerId, role, sentAt(sort: Desc)])
+}
+
+model ReplyDraftSet {
+  id                    String            @id @default(cuid())
+  customerId            String
+
+  extraRequirement      String?
+
+  stableJapanese        String
+  stableChinese         String
+
+  advancingJapanese     String
+  advancingChinese      String
+
+  modelName             String
+  selectedVariant       SuggestionVariant?
+  selectedAt            DateTime?
+
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  customer              Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, createdAt(sort: Desc)])
+}
