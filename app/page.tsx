@@ -99,9 +99,18 @@ type RewriteResult = {
 };
 
 type CustomerContextMenuState = {
-  customerId: string;
+  customer: CustomerListItem;
   x: number;
   y: number;
+};
+
+type PresetSnippet = {
+  id: string;
+  title: string;
+  content: string;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
 };
 
 function getDisplayName(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null | undefined) {
@@ -112,6 +121,19 @@ function getDisplayName(customer: Pick<CustomerListItem, "remarkName" | "origina
 function getAvatarText(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null) {
   const text = getDisplayName(customer);
   return text.slice(0, 1).toUpperCase();
+}
+
+function getSecondaryName(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null | undefined) {
+  if (!customer) return "";
+  const remark = customer.remarkName?.trim() || "";
+  if (remark) return "";
+  return customer.originalName || "";
+}
+
+function getListMetaText(customer: Pick<CustomerListItem, "stage" | "isVip">) {
+  if (customer.isVip) return "VIP";
+  if (customer.stage === "NEW") return "";
+  return customer.stage || "";
 }
 
 function formatListTime(dateString: string | null) {
@@ -187,6 +209,14 @@ export default function Home() {
   const [customReply, setCustomReply] = useState<RewriteResult | null>(null);
   const [customerContextMenu, setCustomerContextMenu] =
     useState<CustomerContextMenuState | null>(null);
+  const [isComposerMenuOpen, setIsComposerMenuOpen] = useState(false);
+  const [isPresetPanelOpen, setIsPresetPanelOpen] = useState(false);
+  const [presetSnippets, setPresetSnippets] = useState<PresetSnippet[]>([]);
+  const [isPresetLoading, setIsPresetLoading] = useState(false);
+  const [isPresetSaving, setIsPresetSaving] = useState(false);
+  const [editingPresetId, setEditingPresetId] = useState("");
+  const [presetTitle, setPresetTitle] = useState("");
+  const [presetContent, setPresetContent] = useState("");
 
   const [isListLoading, setIsListLoading] = useState(true);
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
@@ -205,6 +235,26 @@ export default function Home() {
   const realtimeRefreshTimerRef = useRef<number | null>(null);
   const ablyClientRef = useRef<Ably.Realtime | null>(null);
   const markReadInFlightRef = useRef(new Set<string>());
+  const composerMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const loadPresetSnippets = useCallback(async () => {
+    try {
+      setIsPresetLoading(true);
+      const response = await fetch("/api/preset-messages", { cache: "no-store" });
+      const data = await response.json();
+
+      if (!response.ok || !data.ok) {
+        throw new Error(data?.error || "读取预设信息失败");
+      }
+
+      setPresetSnippets(data.items || []);
+    } catch (error) {
+      console.error(error);
+      window.alert("读取预设信息失败，请看终端报错");
+    } finally {
+      setIsPresetLoading(false);
+    }
+  }, []);
 
   const loadCustomers = useCallback(async (options?: { silent?: boolean }) => {
     try {
@@ -390,6 +440,17 @@ export default function Home() {
   useEffect(() => {
     selectedCustomerIdRef.current = selectedCustomerId;
   }, [selectedCustomerId]);
+
+  useEffect(() => {
+    function handleDocumentClick(event: MouseEvent) {
+      if (!composerMenuRef.current) return;
+      if (composerMenuRef.current.contains(event.target as Node)) return;
+      setIsComposerMenuOpen(false);
+    }
+
+    document.addEventListener("mousedown", handleDocumentClick);
+    return () => document.removeEventListener("mousedown", handleDocumentClick);
+  }, []);
 
   useEffect(() => {
     const selectedCustomer = customers.find((item) => item.id === selectedCustomerId);
@@ -698,8 +759,97 @@ export default function Home() {
     }
   }
 
+  function openPresetPanel() {
+    setIsComposerMenuOpen(false);
+    setIsPresetPanelOpen(true);
+    setEditingPresetId("");
+    setPresetTitle("");
+    setPresetContent("");
+    void loadPresetSnippets();
+  }
+
+  function applyPresetSnippet(item: PresetSnippet) {
+    setManualReply(item.content);
+    setIsPresetPanelOpen(false);
+  }
+
+  function startEditPreset(item: PresetSnippet) {
+    setEditingPresetId(item.id);
+    setPresetTitle(item.title);
+    setPresetContent(item.content);
+  }
+
+  function resetPresetForm() {
+    setEditingPresetId("");
+    setPresetTitle("");
+    setPresetContent("");
+  }
+
+  async function handleSavePreset() {
+    if (!presetTitle.trim()) {
+      window.alert("预设名称不能为空");
+      return;
+    }
+
+    if (!presetContent.trim()) {
+      window.alert("预设内容不能为空");
+      return;
+    }
+
+    try {
+      setIsPresetSaving(true);
+      const response = await fetch(
+        editingPresetId ? `/api/preset-messages/${editingPresetId}` : "/api/preset-messages",
+        {
+          method: editingPresetId ? "PATCH" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: presetTitle,
+            content: presetContent,
+          }),
+        }
+      );
+
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data?.error || "保存预设信息失败");
+      }
+
+      resetPresetForm();
+      await loadPresetSnippets();
+    } catch (error) {
+      console.error(error);
+      window.alert("保存预设信息失败，请看终端报错");
+    } finally {
+      setIsPresetSaving(false);
+    }
+  }
+
+  async function handleDeletePreset(id: string) {
+    if (!window.confirm("确认删除这条预设信息吗？")) return;
+
+    try {
+      const response = await fetch(`/api/preset-messages/${id}`, {
+        method: "DELETE",
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data?.error || "删除预设信息失败");
+      }
+
+      if (editingPresetId === id) {
+        resetPresetForm();
+      }
+      await loadPresetSnippets();
+    } catch (error) {
+      console.error(error);
+      window.alert("删除预设信息失败，请看终端报错");
+    }
+  }
+
   function handleAddImage() {
-    window.alert("图片发送会放到下一步功能里，这一步先做聊天体验。");
+    setIsComposerMenuOpen(false);
+    window.alert("图片发送会在第二步下一包接入，这一步先完成 + 按钮和预设信息。");
   }
 
   async function handleManualSend() {
@@ -829,13 +979,11 @@ export default function Home() {
     }
   }
 
-  const contextMenuCustomer = customerContextMenu
-    ? customers.find((item) => item.id === customerContextMenu.customerId) || null
-    : null;
+  const contextMenuCustomer = customerContextMenu?.customer || null;
 
   return (
     <div className="h-screen bg-gray-100 flex">
-      <div className="w-[24%] bg-white border-r border-gray-200 p-4 overflow-y-auto">
+      <div className="w-[24%] bg-gray-50 border-r border-gray-200 p-4 overflow-y-auto">
         <h2 className="text-lg font-bold mb-3">顾客列表</h2>
 
         <input
@@ -843,7 +991,7 @@ export default function Home() {
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
           placeholder="搜索备注、昵称、标签、最后一条消息"
-          className="w-full border rounded-lg px-3 py-2 text-sm mb-4"
+          className="w-full border border-gray-200 bg-white rounded-xl px-3 py-2 text-sm mb-4 shadow-sm outline-none focus:border-green-300"
         />
 
         {pageError ? (
@@ -853,7 +1001,7 @@ export default function Home() {
         {isListLoading ? (
           <div className="text-sm text-gray-500">顾客列表加载中...</div>
         ) : (
-          <div className="space-y-3">
+          <div className="space-y-2">
             {filteredCustomers.map((customer) => {
               const isActive = customer.id === currentListCustomer?.id;
               const latestPreview = customer.latestMessage?.previewText || "暂时还没有消息";
@@ -865,60 +1013,52 @@ export default function Home() {
                   onContextMenu={(event) => {
                     event.preventDefault();
                     setCustomerContextMenu({
-                      customerId: customer.id,
+                      customer,
                       x: event.clientX,
                       y: event.clientY,
                     });
                   }}
-                  className={`p-3 rounded-xl cursor-pointer border transition ${
+                  className={`group h-[76px] px-3 rounded-xl cursor-pointer border transition-all shadow-sm ${
                     isActive
-                      ? "bg-gray-100 border-gray-300"
-                      : "bg-white border-gray-200"
+                      ? "bg-green-50 border-green-200 shadow-green-100/80"
+                      : "bg-white border-gray-200 hover:bg-gray-50 hover:border-gray-300"
                   }`}
                 >
-                  <div className="flex items-start gap-3">
-                    <div className="relative h-11 w-11 shrink-0 rounded-full bg-pink-100 text-pink-700 flex items-center justify-center font-semibold">
+                  <div className="h-full flex items-center gap-3">
+                    <div className="relative h-10 w-10 shrink-0 rounded-full bg-pink-100 text-pink-700 flex items-center justify-center text-sm font-semibold">
                       {getAvatarText(customer)}
                       {customer.unreadCount > 0 ? (
-                        <div className="absolute -top-1 -right-1 min-w-5 h-5 px-1 rounded-full bg-green-500 text-white text-[11px] flex items-center justify-center font-medium">
+                        <div className="absolute -top-1.5 -right-1.5 min-w-5 h-5 px-1 rounded-full bg-green-500 text-white text-[11px] flex items-center justify-center font-medium">
                           {customer.unreadCount > 99 ? "99+" : customer.unreadCount}
                         </div>
                       ) : null}
                     </div>
 
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="font-medium truncate flex items-center gap-1">
-                            {customer.pinnedAt ? <span className="text-xs">📌</span> : null}
-                            <span>{getDisplayName(customer)}</span>
-                          </div>
-                          <div className="text-xs text-gray-500 truncate">
-                            原昵称：{customer.originalName}
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 flex items-center gap-1.5">
+                          {customer.pinnedAt ? (
+                            <span className="text-[12px] leading-none" title="已置顶">📌</span>
+                          ) : null}
+                          <div className="truncate text-[14px] font-semibold text-gray-900">
+                            {getDisplayName(customer)}
                           </div>
                         </div>
-                        <div className="text-[11px] text-gray-400 shrink-0">
+                        <div className="shrink-0 text-[11px] text-gray-400">
                           {formatListTime(customer.lastMessageAt)}
                         </div>
                       </div>
 
-                      <div className="mt-2 text-sm text-gray-700 truncate">{latestPreview}</div>
-                      <div className="text-[11px] text-gray-500 mt-1">
-                        {customer.stage} · {customer.isVip ? "VIP" : "普通"}
-                      </div>
-
-                      {customer.tags.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-2">
-                          {customer.tags.map((tag) => (
-                            <span
-                              key={tag.id}
-                              className="text-[10px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-100"
-                            >
-                              {tag.name}
-                            </span>
-                          ))}
+                      <div className="mt-1 flex items-center gap-2">
+                        <div className="min-w-0 flex-1 truncate text-[12px] text-gray-500">
+                          {latestPreview}
                         </div>
-                      )}
+                        {customer.isVip ? (
+                          <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 border border-amber-200">
+                            VIP
+                          </span>
+                        ) : null}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -935,9 +1075,9 @@ export default function Home() {
       <div className="w-[46%] flex flex-col bg-gray-50">
         <div className="p-4 border-b bg-white">
           <div className="font-bold">{getDisplayName(workspace?.customer || null)}</div>
-          {workspace?.customer ? (
+          {workspace?.customer && getSecondaryName(workspace.customer) ? (
             <div className="text-xs text-gray-500 mt-1">
-              原昵称：{workspace.customer.originalName}
+              {getSecondaryName(workspace.customer)}
             </div>
           ) : null}
         </div>
@@ -1026,28 +1166,148 @@ export default function Home() {
           )}
         </div>
 
-        <div className="p-4 border-t bg-white">
-          <div className="flex gap-2">
-            <button
-              onClick={handleAddImage}
-              className="border rounded-lg px-3 py-2 text-sm bg-white"
-            >
-              添加图片
-            </button>
+        <div className="p-4 border-t bg-white relative">
+          <div className="flex gap-2 items-end">
+            <div className="relative" ref={composerMenuRef}>
+              <button
+                onClick={() => setIsComposerMenuOpen((prev) => !prev)}
+                className="h-10 w-10 rounded-full border border-gray-300 bg-white text-xl text-gray-700 hover:bg-gray-50"
+                title="更多操作"
+              >
+                +
+              </button>
+
+              {isComposerMenuOpen ? (
+                <div className="absolute bottom-12 left-0 z-20 w-44 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden">
+                  <button
+                    onClick={handleAddImage}
+                    className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50"
+                  >
+                    添加图片
+                    <div className="text-[11px] text-gray-400 mt-1">下一包接入</div>
+                  </button>
+                  <button
+                    onClick={openPresetPanel}
+                    className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50 border-t border-gray-100"
+                  >
+                    预设信息
+                    <div className="text-[11px] text-gray-400 mt-1">点一下填入输入框</div>
+                  </button>
+                </div>
+              ) : null}
+            </div>
+
             <input
               type="text"
               value={manualReply}
               onChange={(e) => setManualReply(e.target.value)}
-              className="flex-1 border rounded-lg px-4 py-2"
+              placeholder="输入要发送给顾客的日语内容…"
+              className="flex-1 border rounded-xl px-4 py-2.5"
             />
             <button
               onClick={handleManualSend}
               disabled={isSendingManual || !workspace}
-              className="bg-green-600 text-white px-4 py-2 rounded-lg disabled:opacity-60"
+              className="bg-green-600 text-white px-4 py-2.5 rounded-xl disabled:opacity-60"
             >
               {isSendingManual ? "发送中..." : "发送"}
             </button>
           </div>
+
+          {isPresetPanelOpen ? (
+            <div className="absolute bottom-20 left-4 z-30 w-[420px] max-w-[calc(100%-2rem)] rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3 border-b bg-gray-50">
+                <div>
+                  <div className="font-semibold text-gray-900">预设信息</div>
+                  <div className="text-xs text-gray-500 mt-1">点击左侧预设，可直接填入输入框</div>
+                </div>
+                <button
+                  onClick={() => {
+                    setIsPresetPanelOpen(false);
+                    resetPresetForm();
+                  }}
+                  className="text-sm text-gray-500 hover:text-gray-800"
+                >
+                  关闭
+                </button>
+              </div>
+
+              <div className="grid grid-cols-[1.2fr_1fr] max-h-[440px]">
+                <div className="border-r border-gray-100 overflow-y-auto p-3 space-y-2">
+                  {isPresetLoading ? (
+                    <div className="text-sm text-gray-500 px-2 py-3">读取中...</div>
+                  ) : presetSnippets.length === 0 ? (
+                    <div className="text-sm text-gray-500 px-2 py-3">还没有预设信息，右侧先新增一条。</div>
+                  ) : (
+                    presetSnippets.map((item) => (
+                      <div key={item.id} className="rounded-xl border border-gray-200 bg-white p-3 hover:border-gray-300">
+                        <button
+                          onClick={() => applyPresetSnippet(item)}
+                          className="w-full text-left"
+                        >
+                          <div className="font-medium text-sm text-gray-900 truncate">{item.title}</div>
+                          <div className="mt-1 text-xs text-gray-500 line-clamp-2 break-all">{item.content}</div>
+                        </button>
+                        <div className="mt-3 flex gap-2">
+                          <button
+                            onClick={() => startEditPreset(item)}
+                            className="text-xs px-2 py-1 rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100"
+                          >
+                            编辑
+                          </button>
+                          <button
+                            onClick={() => handleDeletePreset(item.id)}
+                            className="text-xs px-2 py-1 rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100"
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="p-3 space-y-3 bg-gray-50/60">
+                  <div className="text-sm font-medium text-gray-900">
+                    {editingPresetId ? "编辑预设" : "新增预设"}
+                  </div>
+                  <div>
+                    <div className="text-xs text-gray-500 mb-1">名称（只给你自己看）</div>
+                    <input
+                      type="text"
+                      value={presetTitle}
+                      onChange={(e) => setPresetTitle(e.target.value)}
+                      className="w-full rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm"
+                      placeholder="例如：报价链接"
+                    />
+                  </div>
+                  <div>
+                    <div className="text-xs text-gray-500 mb-1">内容（点击预设会填入输入框）</div>
+                    <textarea
+                      value={presetContent}
+                      onChange={(e) => setPresetContent(e.target.value)}
+                      className="w-full min-h-[160px] rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm resize-none"
+                      placeholder="例如：这里填写固定报价说明或链接"
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleSavePreset}
+                      disabled={isPresetSaving}
+                      className="flex-1 rounded-xl bg-gray-900 px-3 py-2 text-sm text-white disabled:opacity-60"
+                    >
+                      {isPresetSaving ? "保存中..." : editingPresetId ? "保存修改" : "新增预设"}
+                    </button>
+                    <button
+                      onClick={resetPresetForm}
+                      className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700"
+                    >
+                      清空
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
 
