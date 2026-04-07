@@ -52,35 +52,38 @@ enum AutomationJobStatus {
 }
 
 model Customer {
-  id                String        @id @default(cuid())
-  lineUserId        String?       @unique
-  remarkName        String?
-  originalName      String
-  avatarUrl         String?
-  stage             CustomerStage @default(NEW)
-  isVip             Boolean       @default(false)
+  id                     String        @id @default(cuid())
+  lineUserId             String?       @unique
+  remarkName             String?
+  originalName           String
+  avatarUrl              String?
+  stage                  CustomerStage @default(NEW)
+  isVip                  Boolean       @default(false)
+  pinnedAt               DateTime?
+  unreadCount            Int           @default(0)
 
-  aiCustomerInfo    String?
-  aiCurrentStrategy String?
-  aiLastAnalyzedAt  DateTime?
+  aiCustomerInfo         String?
+  aiCurrentStrategy      String?
+  aiLastAnalyzedAt       DateTime?
 
-  lastMessageAt         DateTime?
-  lastInboundMessageAt  DateTime?
-  lastOutboundMessageAt DateTime?
+  lastMessageAt          DateTime?
+  lastInboundMessageAt   DateTime?
+  lastOutboundMessageAt  DateTime?
 
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
 
-  tags              CustomerTag[]
-  messages          Message[]
-  replyDraftSets    ReplyDraftSet[]
-  automationJobs    AutomationJob[]
+  tags                   CustomerTag[]
+  messages               Message[]
+  replyDraftSets         ReplyDraftSet[]
+  automationJobs         AutomationJob[]
 
   @@index([stage])
   @@index([isVip])
   @@index([lastMessageAt(sort: Desc)])
   @@index([originalName])
   @@index([remarkName])
+  @@index([pinnedAt(sort: Desc)])
 }
 
 model Tag {
@@ -131,46 +134,46 @@ model Message {
 }
 
 model ReplyDraftSet {
-  id                    String            @id @default(cuid())
-  customerId            String
+  id                      String            @id @default(cuid())
+  customerId              String
   targetCustomerMessageId String?
 
-  extraRequirement      String?
+  extraRequirement        String?
 
-  stableJapanese        String
-  stableChinese         String
+  stableJapanese          String
+  stableChinese           String
 
-  advancingJapanese     String
-  advancingChinese      String
+  advancingJapanese       String
+  advancingChinese        String
 
-  modelName             String
-  selectedVariant       SuggestionVariant?
-  selectedAt            DateTime?
+  modelName               String
+  selectedVariant         SuggestionVariant?
+  selectedAt              DateTime?
 
-  createdAt             DateTime          @default(now())
-  updatedAt             DateTime          @updatedAt
+  createdAt               DateTime          @default(now())
+  updatedAt               DateTime          @updatedAt
 
-  customer              Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer                Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
   @@index([customerId, createdAt(sort: Desc)])
   @@index([customerId, targetCustomerMessageId])
 }
 
 model AutomationJob {
-  id             String              @id @default(cuid())
-  customerId     String
+  id              String              @id @default(cuid())
+  customerId      String
   targetMessageId String
-  kind           AutomationJobKind
-  status         AutomationJobStatus @default(PENDING)
-  scheduledFor   DateTime?
-  startedAt      DateTime?
-  finishedAt     DateTime?
-  attemptCount   Int                 @default(0)
-  lastError      String?
-  createdAt      DateTime            @default(now())
-  updatedAt      DateTime            @updatedAt
+  kind            AutomationJobKind
+  status          AutomationJobStatus @default(PENDING)
+  scheduledFor    DateTime?
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  attemptCount    Int                 @default(0)
+  lastError       String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
 
-  customer       Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer        Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
   @@unique([customerId, targetMessageId, kind])
   @@index([status, scheduledFor])
@@ -178,9 +181,9 @@ model AutomationJob {
 }
 
 model OperatorPresence {
-  id                String   @id
+  id                 String   @id
   selectedCustomerId String?
-  lastSeenAt        DateTime
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  lastSeenAt         DateTime
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 }

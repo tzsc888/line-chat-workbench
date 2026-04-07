@@ -59,6 +59,35 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (lineMessageId) {
+      const existingMessage = await prisma.message.findUnique({
+        where: { lineMessageId },
+      });
+
+      if (existingMessage) {
+        const existingCustomer = await prisma.customer.findUnique({
+          where: { id: existingMessage.customerId },
+          select: {
+            id: true,
+            lineUserId: true,
+            originalName: true,
+            remarkName: true,
+            avatarUrl: true,
+          },
+        });
+
+        return NextResponse.json({
+          ok: true,
+          line: "重复消息，已跳过重复入库",
+          model: helperModel || "",
+          translated: !!existingMessage.chineseText,
+          translateError: "",
+          customer: existingCustomer,
+          message: existingMessage,
+        });
+      }
+    }
+
     const now = new Date();
 
     const customer = await prisma.customer.upsert({
@@ -71,6 +100,9 @@ export async function POST(req: NextRequest) {
         avatarUrl: avatar.startsWith("http") ? avatar : undefined,
         lastMessageAt: now,
         lastInboundMessageAt: now,
+        unreadCount: {
+          increment: 1,
+        },
       },
       create: {
         lineUserId,
@@ -79,34 +111,10 @@ export async function POST(req: NextRequest) {
         avatarUrl: avatar.startsWith("http") ? avatar : null,
         lastMessageAt: now,
         lastInboundMessageAt: now,
+        unreadCount: 1,
       },
     });
 
-    if (lineMessageId) {
-      const existingMessage = await prisma.message.findUnique({
-        where: { lineMessageId },
-      });
-
-      if (existingMessage) {
-        return NextResponse.json({
-          ok: true,
-          line: "重复消息，已跳过重复入库",
-          model: helperModel || "",
-          translated: !!existingMessage.chineseText,
-          translateError: "",
-          customer: {
-            id: customer.id,
-            lineUserId: customer.lineUserId,
-            originalName: customer.originalName,
-            remarkName: customer.remarkName,
-            avatarUrl: customer.avatarUrl,
-          },
-          message: existingMessage,
-        });
-      }
-    }
-
-    // 第一步：先保存消息，保证消息立刻可见
     const message = await prisma.message.create({
       data: {
         customerId: customer.id,
@@ -120,7 +128,6 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    // 如果要求跳过翻译，这里直接返回，让外层先推送页面
     if (skipTranslate) {
       return NextResponse.json({
         ok: true,
@@ -139,7 +146,6 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 第二步：非快模式下，继续同步翻译
     let chinese = "";
     let translated = false;
     let line = "";

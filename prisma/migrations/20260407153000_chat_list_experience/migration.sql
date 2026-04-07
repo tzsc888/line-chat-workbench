@@ -1,0 +1,5 @@
+ALTER TABLE "Customer"
+  ADD COLUMN IF NOT EXISTS "pinnedAt" TIMESTAMP(3),
+  ADD COLUMN IF NOT EXISTS "unreadCount" INTEGER NOT NULL DEFAULT 0;
+
+CREATE INDEX IF NOT EXISTS "Customer_pinnedAt_idx" ON "Customer"("pinnedAt" DESC);

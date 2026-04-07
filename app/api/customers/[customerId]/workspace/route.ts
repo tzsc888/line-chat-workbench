@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { publishRealtimeRefresh } from "@/lib/ably";
 import { prisma } from "@/lib/prisma";
 
 type Props = {
@@ -52,6 +53,8 @@ export async function GET(_: Request, { params }: Props) {
           avatarUrl: customer.avatarUrl,
           stage: customer.stage,
           isVip: customer.isVip,
+          pinnedAt: customer.pinnedAt,
+          unreadCount: customer.unreadCount,
           aiCustomerInfo: customer.aiCustomerInfo,
           aiCurrentStrategy: customer.aiCurrentStrategy,
           aiLastAnalyzedAt: customer.aiLastAnalyzedAt,
@@ -75,5 +78,66 @@ export async function GET(_: Request, { params }: Props) {
   } catch (error) {
     console.error("GET /api/customers/[customerId]/workspace error:", error);
     return NextResponse.json({ ok: false, error: "读取顾客工作台失败" }, { status: 500 });
+  }
+}
+
+export async function PATCH(req: NextRequest, { params }: Props) {
+  try {
+    const { customerId } = await params;
+    const body = await req.json();
+
+    const remarkNameInput = Object.prototype.hasOwnProperty.call(body, "remarkName")
+      ? String(body.remarkName ?? "").trim()
+      : undefined;
+    const pinnedInput = typeof body.pinned === "boolean" ? body.pinned : undefined;
+    const markReadInput = body.markRead === true;
+
+    const data: {
+      remarkName?: string | null;
+      pinnedAt?: Date | null;
+      unreadCount?: number;
+    } = {};
+
+    if (remarkNameInput !== undefined) {
+      data.remarkName = remarkNameInput || null;
+    }
+
+    if (pinnedInput !== undefined) {
+      data.pinnedAt = pinnedInput ? new Date() : null;
+    }
+
+    if (markReadInput) {
+      data.unreadCount = 0;
+    }
+
+    if (Object.keys(data).length === 0) {
+      return NextResponse.json({ ok: false, error: "缺少可更新字段" }, { status: 400 });
+    }
+
+    const updatedCustomer = await prisma.customer.update({
+      where: { id: customerId },
+      data,
+      select: {
+        id: true,
+        remarkName: true,
+        originalName: true,
+        pinnedAt: true,
+        unreadCount: true,
+      },
+    });
+
+    try {
+      await publishRealtimeRefresh({ customerId, reason: "customer-meta-updated" });
+    } catch (error) {
+      console.error("Ably publish customer-meta-updated error:", error);
+    }
+
+    return NextResponse.json({
+      ok: true,
+      customer: updatedCustomer,
+    });
+  } catch (error) {
+    console.error("PATCH /api/customers/[customerId]/workspace error:", error);
+    return NextResponse.json({ ok: false, error: "更新顾客信息失败" }, { status: 500 });
   }
 }

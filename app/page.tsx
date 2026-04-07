@@ -11,6 +11,8 @@ type CustomerListItem = {
   avatarUrl: string | null;
   stage: string;
   isVip: boolean;
+  pinnedAt: string | null;
+  unreadCount: number;
   aiCustomerInfo: string | null;
   aiCurrentStrategy: string | null;
   aiLastAnalyzedAt: string | null;
@@ -28,6 +30,7 @@ type CustomerListItem = {
     japaneseText: string;
     chineseText: string | null;
     sentAt: string;
+    previewText: string;
   } | null;
 };
 
@@ -71,6 +74,8 @@ type WorkspaceData = {
     avatarUrl: string | null;
     stage: string;
     isVip: boolean;
+    pinnedAt: string | null;
+    unreadCount: number;
     aiCustomerInfo: string | null;
     aiCurrentStrategy: string | null;
     aiLastAnalyzedAt: string | null;
@@ -93,6 +98,84 @@ type RewriteResult = {
   suggestion2Zh: string;
 };
 
+type CustomerContextMenuState = {
+  customerId: string;
+  x: number;
+  y: number;
+};
+
+function getDisplayName(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null | undefined) {
+  if (!customer) return "未选择顾客";
+  return customer.remarkName?.trim() || customer.originalName || "未命名顾客";
+}
+
+function getAvatarText(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null) {
+  const text = getDisplayName(customer);
+  return text.slice(0, 1).toUpperCase();
+}
+
+function formatListTime(dateString: string | null) {
+  if (!dateString) return "";
+  const date = new Date(dateString);
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+
+  if (sameDay) {
+    return date.toLocaleTimeString("ja-JP", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  }
+
+  const sameYear = date.getFullYear() === now.getFullYear();
+  return date.toLocaleString("ja-JP", {
+    month: "numeric",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function formatBubbleTime(dateString: string) {
+  return new Date(dateString).toLocaleTimeString("ja-JP", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function formatDividerTime(dateString: string) {
+  const date = new Date(dateString);
+  const now = new Date();
+  const sameYear = date.getFullYear() === now.getFullYear();
+
+  return date.toLocaleString("ja-JP", {
+    ...(sameYear ? {} : { year: "numeric" }),
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function shouldShowMessageDivider(previousMessage: WorkspaceMessage | null, currentMessage: WorkspaceMessage) {
+  if (!previousMessage) return true;
+
+  const previousDate = new Date(previousMessage.sentAt);
+  const currentDate = new Date(currentMessage.sentAt);
+  const previousDayKey = `${previousDate.getFullYear()}-${previousDate.getMonth()}-${previousDate.getDate()}`;
+  const currentDayKey = `${currentDate.getFullYear()}-${currentDate.getMonth()}-${currentDate.getDate()}`;
+
+  if (previousDayKey !== currentDayKey) return true;
+
+  const gap = currentDate.getTime() - previousDate.getTime();
+  return gap >= 30 * 60 * 1000;
+}
+
 export default function Home() {
   const [customers, setCustomers] = useState<CustomerListItem[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
@@ -102,15 +185,15 @@ export default function Home() {
   const [rewriteInput, setRewriteInput] = useState("");
   const [manualReply, setManualReply] = useState("");
   const [customReply, setCustomReply] = useState<RewriteResult | null>(null);
+  const [customerContextMenu, setCustomerContextMenu] =
+    useState<CustomerContextMenuState | null>(null);
 
   const [isListLoading, setIsListLoading] = useState(true);
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSendingManual, setIsSendingManual] = useState(false);
-  const [isSendingAi, setIsSendingAi] = useState<"stable" | "advancing" | "">(
-    ""
-  );
+  const [isSendingAi, setIsSendingAi] = useState<"stable" | "advancing" | "">("");
 
   const [pageError, setPageError] = useState("");
   const [apiError, setApiError] = useState("");
@@ -121,6 +204,7 @@ export default function Home() {
   const selectedCustomerIdRef = useRef("");
   const realtimeRefreshTimerRef = useRef<number | null>(null);
   const ablyClientRef = useRef<Ably.Realtime | null>(null);
+  const markReadInFlightRef = useRef(new Set<string>());
 
   const loadCustomers = useCallback(async (options?: { silent?: boolean }) => {
     try {
@@ -157,6 +241,27 @@ export default function Home() {
     }
   }, []);
 
+  const markCustomerRead = useCallback(async (customerId: string) => {
+    if (!customerId || markReadInFlightRef.current.has(customerId)) return;
+
+    markReadInFlightRef.current.add(customerId);
+    try {
+      await fetch(`/api/customers/${customerId}/workspace`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          markRead: true,
+        }),
+      });
+    } catch (error) {
+      console.error("mark customer read error:", error);
+    } finally {
+      markReadInFlightRef.current.delete(customerId);
+    }
+  }, []);
+
   const loadWorkspace = useCallback(
     async (customerId: string, options?: { preserveUi?: boolean }) => {
       if (!customerId) {
@@ -175,8 +280,7 @@ export default function Home() {
         previousScrollTop = container.scrollTop;
         previousScrollHeight = container.scrollHeight;
         wasNearBottom =
-          container.scrollHeight - container.scrollTop - container.clientHeight <
-          80;
+          container.scrollHeight - container.scrollTop - container.clientHeight < 80;
         isSilentRefreshingRef.current = true;
       }
 
@@ -201,7 +305,23 @@ export default function Home() {
           throw new Error(data?.error || "读取顾客工作台失败");
         }
 
-        setWorkspace(data.workspace || null);
+        const nextWorkspace: WorkspaceData | null = data.workspace || null;
+        setWorkspace(nextWorkspace);
+
+        if (nextWorkspace?.customer) {
+          setCustomers((prev) =>
+            prev.map((item) =>
+              item.id === nextWorkspace.customer.id
+                ? {
+                    ...item,
+                    remarkName: nextWorkspace.customer.remarkName,
+                    pinnedAt: nextWorkspace.customer.pinnedAt,
+                    unreadCount: nextWorkspace.customer.unreadCount,
+                  }
+                : item
+            )
+          );
+        }
 
         if (preserveUi) {
           requestAnimationFrame(() => {
@@ -232,6 +352,32 @@ export default function Home() {
     []
   );
 
+  const patchCustomerMeta = useCallback(
+    async (
+      customerId: string,
+      payload: { pinned?: boolean; remarkName?: string | null; markRead?: boolean }
+    ) => {
+      const response = await fetch(`/api/customers/${customerId}/workspace`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data?.error || "更新顾客信息失败");
+      }
+
+      await loadCustomers({ silent: true });
+      if (selectedCustomerIdRef.current === customerId) {
+        await loadWorkspace(customerId, { preserveUi: true });
+      }
+    },
+    [loadCustomers, loadWorkspace]
+  );
+
   useEffect(() => {
     loadCustomers();
   }, [loadCustomers]);
@@ -244,6 +390,29 @@ export default function Home() {
   useEffect(() => {
     selectedCustomerIdRef.current = selectedCustomerId;
   }, [selectedCustomerId]);
+
+  useEffect(() => {
+    const selectedCustomer = customers.find((item) => item.id === selectedCustomerId);
+    if (!selectedCustomerId || !selectedCustomer?.unreadCount) return;
+
+    setCustomers((prev) =>
+      prev.map((item) =>
+        item.id === selectedCustomerId ? { ...item, unreadCount: 0 } : item
+      )
+    );
+    void markCustomerRead(selectedCustomerId);
+  }, [customers, selectedCustomerId, markCustomerRead]);
+
+  useEffect(() => {
+    const handleCloseContextMenu = () => setCustomerContextMenu(null);
+
+    window.addEventListener("click", handleCloseContextMenu);
+    window.addEventListener("resize", handleCloseContextMenu);
+    return () => {
+      window.removeEventListener("click", handleCloseContextMenu);
+      window.removeEventListener("resize", handleCloseContextMenu);
+    };
+  }, []);
 
   useEffect(() => {
     let timer: number | null = null;
@@ -339,13 +508,14 @@ export default function Home() {
     if (!keyword) return customers;
 
     return customers.filter((customer) => {
-      const displayName =
-        customer.remarkName?.trim() || customer.originalName || "";
+      const displayName = getDisplayName(customer);
       const tagText = customer.tags.map((tag) => tag.name).join(" ");
+      const latestPreview = customer.latestMessage?.previewText || "";
       return (
         displayName.toLowerCase().includes(keyword) ||
         customer.originalName.toLowerCase().includes(keyword) ||
-        tagText.toLowerCase().includes(keyword)
+        tagText.toLowerCase().includes(keyword) ||
+        latestPreview.toLowerCase().includes(keyword)
       );
     });
   }, [customers, searchText]);
@@ -363,18 +533,6 @@ export default function Home() {
       setSelectedCustomerId(currentListCustomer.id);
     }
   }, [currentListCustomer, selectedCustomerId]);
-
-  function displayName() {
-    if (!workspace?.customer) return "未选择顾客";
-    return (
-      workspace.customer.remarkName?.trim() || workspace.customer.originalName
-    );
-  }
-
-  function avatarText(customer: CustomerListItem | null) {
-    const text = customer?.remarkName?.trim() || customer?.originalName || "?";
-    return text.slice(0, 1);
-  }
 
   const displayedSuggestion1Ja =
     customReply?.suggestion1Ja ||
@@ -541,7 +699,7 @@ export default function Home() {
   }
 
   function handleAddImage() {
-    window.alert("图片正式接入放到后面，这一轮先不动。");
+    window.alert("图片发送会放到下一步功能里，这一步先做聊天体验。");
   }
 
   async function handleManualSend() {
@@ -560,7 +718,6 @@ export default function Home() {
     try {
       setIsSendingManual(true);
 
-      // 第一步：先真实发送并写入聊天，不等待翻译
       const sendResponse = await fetch(
         `/api/customers/${workspace.customer.id}/messages`,
         {
@@ -586,7 +743,6 @@ export default function Home() {
 
       const messageId = String(sendData?.message?.id || "").trim();
 
-      // 第二步：翻译在后台后补，不阻塞发送
       if (messageId) {
         void (async () => {
           try {
@@ -632,6 +788,51 @@ export default function Home() {
     }
   }
 
+  function handleSelectCustomer(customerId: string) {
+    setSelectedCustomerId(customerId);
+    setCustomerContextMenu(null);
+    setCustomers((prev) =>
+      prev.map((item) =>
+        item.id === customerId ? { ...item, unreadCount: 0 } : item
+      )
+    );
+  }
+
+  async function handleTogglePin(customer: CustomerListItem) {
+    setCustomerContextMenu(null);
+    try {
+      await patchCustomerMeta(customer.id, {
+        pinned: !customer.pinnedAt,
+      });
+    } catch (error) {
+      console.error(error);
+      window.alert("置顶状态更新失败");
+    }
+  }
+
+  async function handleRenameCustomer(customer: CustomerListItem) {
+    setCustomerContextMenu(null);
+    const nextRemarkName = window.prompt(
+      "请输入备注名（留空会清除备注）",
+      customer.remarkName || ""
+    );
+
+    if (nextRemarkName === null) return;
+
+    try {
+      await patchCustomerMeta(customer.id, {
+        remarkName: nextRemarkName,
+      });
+    } catch (error) {
+      console.error(error);
+      window.alert("备注名更新失败");
+    }
+  }
+
+  const contextMenuCustomer = customerContextMenu
+    ? customers.find((item) => item.id === customerContextMenu.customerId) || null
+    : null;
+
   return (
     <div className="h-screen bg-gray-100 flex">
       <div className="w-[24%] bg-white border-r border-gray-200 p-4 overflow-y-auto">
@@ -641,7 +842,7 @@ export default function Home() {
           type="text"
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
-          placeholder="搜索备注、昵称、标签"
+          placeholder="搜索备注、昵称、标签、最后一条消息"
           className="w-full border rounded-lg px-3 py-2 text-sm mb-4"
         />
 
@@ -655,30 +856,54 @@ export default function Home() {
           <div className="space-y-3">
             {filteredCustomers.map((customer) => {
               const isActive = customer.id === currentListCustomer?.id;
+              const latestPreview = customer.latestMessage?.previewText || "暂时还没有消息";
 
               return (
                 <div
                   key={customer.id}
-                  onClick={() => setSelectedCustomerId(customer.id)}
+                  onClick={() => handleSelectCustomer(customer.id)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setCustomerContextMenu({
+                      customerId: customer.id,
+                      x: event.clientX,
+                      y: event.clientY,
+                    });
+                  }}
                   className={`p-3 rounded-xl cursor-pointer border transition ${
                     isActive
                       ? "bg-gray-100 border-gray-300"
                       : "bg-white border-gray-200"
                   }`}
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="h-10 w-10 rounded-full bg-pink-100 text-pink-700 flex items-center justify-center font-semibold">
-                      {avatarText(customer)}
+                  <div className="flex items-start gap-3">
+                    <div className="relative h-11 w-11 shrink-0 rounded-full bg-pink-100 text-pink-700 flex items-center justify-center font-semibold">
+                      {getAvatarText(customer)}
+                      {customer.unreadCount > 0 ? (
+                        <div className="absolute -top-1 -right-1 min-w-5 h-5 px-1 rounded-full bg-green-500 text-white text-[11px] flex items-center justify-center font-medium">
+                          {customer.unreadCount > 99 ? "99+" : customer.unreadCount}
+                        </div>
+                      ) : null}
                     </div>
 
                     <div className="min-w-0 flex-1">
-                      <div className="font-medium truncate">
-                        {customer.remarkName?.trim() || customer.originalName}
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-medium truncate flex items-center gap-1">
+                            {customer.pinnedAt ? <span className="text-xs">📌</span> : null}
+                            <span>{getDisplayName(customer)}</span>
+                          </div>
+                          <div className="text-xs text-gray-500 truncate">
+                            原昵称：{customer.originalName}
+                          </div>
+                        </div>
+                        <div className="text-[11px] text-gray-400 shrink-0">
+                          {formatListTime(customer.lastMessageAt)}
+                        </div>
                       </div>
-                      <div className="text-xs text-gray-500 truncate">
-                        原昵称：{customer.originalName}
-                      </div>
-                      <div className="text-xs text-gray-500">
+
+                      <div className="mt-2 text-sm text-gray-700 truncate">{latestPreview}</div>
+                      <div className="text-[11px] text-gray-500 mt-1">
                         {customer.stage} · {customer.isVip ? "VIP" : "普通"}
                       </div>
 
@@ -708,7 +933,14 @@ export default function Home() {
       </div>
 
       <div className="w-[46%] flex flex-col bg-gray-50">
-        <div className="p-4 border-b bg-white font-bold">{displayName()}</div>
+        <div className="p-4 border-b bg-white">
+          <div className="font-bold">{getDisplayName(workspace?.customer || null)}</div>
+          {workspace?.customer ? (
+            <div className="text-xs text-gray-500 mt-1">
+              原昵称：{workspace.customer.originalName}
+            </div>
+          ) : null}
+        </div>
 
         <div
           ref={chatScrollRef}
@@ -721,57 +953,76 @@ export default function Home() {
           ) : workspace.messages.length === 0 ? (
             <div className="text-sm text-gray-500">当前顾客还没有聊天记录</div>
           ) : (
-            workspace.messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={`flex ${
-                  msg.role === "CUSTOMER" ? "justify-start" : "justify-end"
-                }`}
-              >
-                <div
-                  className={`p-3 rounded-2xl shadow text-sm max-w-md ${
-                    msg.role === "CUSTOMER"
-                      ? "bg-white text-black"
-                      : "bg-green-500 text-white"
-                  }`}
-                >
-                  {msg.type === "TEXT" ? (
-                    <>
-                      <div className="whitespace-pre-wrap">
-                        {msg.japaneseText}
+            workspace.messages.map((msg, index) => {
+              const previousMessage = index > 0 ? workspace.messages[index - 1] : null;
+              const showDivider = shouldShowMessageDivider(previousMessage, msg);
+
+              return (
+                <div key={msg.id}>
+                  {showDivider ? (
+                    <div className="flex justify-center mb-3">
+                      <div className="text-[11px] text-gray-500 bg-white border border-gray-200 rounded-full px-3 py-1 shadow-sm">
+                        {formatDividerTime(msg.sentAt)}
                       </div>
+                    </div>
+                  ) : null}
+
+                  <div
+                    className={`flex ${
+                      msg.role === "CUSTOMER" ? "justify-start" : "justify-end"
+                    }`}
+                  >
+                    <div className="max-w-md">
                       <div
-                        className={`mt-2 text-xs ${
+                        className={`p-3 rounded-2xl shadow text-sm ${
                           msg.role === "CUSTOMER"
-                            ? "text-gray-500"
-                            : "text-green-100"
+                            ? "bg-white text-black"
+                            : "bg-green-500 text-white"
                         }`}
                       >
-                        {msg.chineseText || ""}
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="rounded-lg bg-gray-200 h-36 w-56 flex items-center justify-center text-gray-600">
-                        图片示例
-                      </div>
-                      <div className="mt-2 whitespace-pre-wrap">
-                        {msg.japaneseText}
+                        {msg.type === "TEXT" ? (
+                          <>
+                            <div className="whitespace-pre-wrap">{msg.japaneseText}</div>
+                            <div
+                              className={`mt-2 text-xs ${
+                                msg.role === "CUSTOMER"
+                                  ? "text-gray-500"
+                                  : "text-green-100"
+                              }`}
+                            >
+                              {msg.chineseText || ""}
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="rounded-lg bg-gray-200 h-36 w-56 flex items-center justify-center text-gray-600">
+                              图片示例
+                            </div>
+                            <div className="mt-2 whitespace-pre-wrap">{msg.japaneseText}</div>
+                            <div
+                              className={`mt-2 text-xs ${
+                                msg.role === "CUSTOMER"
+                                  ? "text-gray-500"
+                                  : "text-green-100"
+                              }`}
+                            >
+                              {msg.chineseText || ""}
+                            </div>
+                          </>
+                        )}
                       </div>
                       <div
-                        className={`mt-2 text-xs ${
-                          msg.role === "CUSTOMER"
-                            ? "text-gray-500"
-                            : "text-green-100"
+                        className={`mt-1 text-[11px] text-gray-400 ${
+                          msg.role === "CUSTOMER" ? "text-left" : "text-right"
                         }`}
                       >
-                        {msg.chineseText || ""}
+                        {formatBubbleTime(msg.sentAt)}
                       </div>
-                    </>
-                  )}
+                    </div>
+                  </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
 
@@ -787,7 +1038,6 @@ export default function Home() {
               type="text"
               value={manualReply}
               onChange={(e) => setManualReply(e.target.value)}
-              placeholder=""
               className="flex-1 border rounded-lg px-4 py-2"
             />
             <button
@@ -818,23 +1068,31 @@ export default function Home() {
             </div>
             <div className="text-sm text-amber-900/90">
               <div>{workspace?.customer.aiCustomerInfo || ""}</div>
-              <div className="mt-2">
-                {workspace?.customer.aiCurrentStrategy || ""}
-              </div>
+              <div className="mt-2">{workspace?.customer.aiCurrentStrategy || ""}</div>
             </div>
             {helperError ? (
-              <div className="text-xs text-red-500 mt-2 break-all">
-                {helperError}
-              </div>
+              <div className="text-xs text-red-500 mt-2 break-all">{helperError}</div>
             ) : null}
           </div>
 
-          <div className={`rounded-xl border p-4 ${shouldDimDraft ? "border-gray-200 bg-gray-50 opacity-70" : "border-gray-200 bg-white"}`}>
+          <div
+            className={`rounded-xl border p-4 ${
+              shouldDimDraft ? "border-gray-200 bg-gray-50 opacity-70" : "border-gray-200 bg-white"
+            }`}
+          >
             <div className="font-semibold mb-2">更稳回复</div>
-            <div className={`text-sm p-3 rounded-lg whitespace-pre-wrap min-h-[72px] ${shouldDimDraft ? "bg-gray-200 text-gray-600" : "bg-gray-100"}`}>
+            <div
+              className={`text-sm p-3 rounded-lg whitespace-pre-wrap min-h-[72px] ${
+                shouldDimDraft ? "bg-gray-200 text-gray-600" : "bg-gray-100"
+              }`}
+            >
               {displayedSuggestion1Ja}
             </div>
-            <div className={`text-sm p-3 rounded-lg mt-2 whitespace-pre-wrap min-h-[72px] ${shouldDimDraft ? "bg-gray-100 text-gray-500" : "bg-gray-50 text-gray-700"}`}>
+            <div
+              className={`text-sm p-3 rounded-lg mt-2 whitespace-pre-wrap min-h-[72px] ${
+                shouldDimDraft ? "bg-gray-100 text-gray-500" : "bg-gray-50 text-gray-700"
+              }`}
+            >
               {displayedSuggestion1Zh}
             </div>
             <button
@@ -850,16 +1108,34 @@ export default function Home() {
               }
               className="w-full mt-3 bg-blue-600 text-white py-2 rounded-lg disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500"
             >
-              {isSendingAi === "stable" ? "发送中..." : isLatestDraftUsed ? "已使用" : isLatestDraftStale ? "已失效" : "发送"}
+              {isSendingAi === "stable"
+                ? "发送中..."
+                : isLatestDraftUsed
+                  ? "已使用"
+                  : isLatestDraftStale
+                    ? "已失效"
+                    : "发送"}
             </button>
           </div>
 
-          <div className={`rounded-xl border p-4 ${shouldDimDraft ? "border-gray-200 bg-gray-50 opacity-70" : "border-gray-200 bg-white"}`}>
+          <div
+            className={`rounded-xl border p-4 ${
+              shouldDimDraft ? "border-gray-200 bg-gray-50 opacity-70" : "border-gray-200 bg-white"
+            }`}
+          >
             <div className="font-semibold mb-2">更推进成交</div>
-            <div className={`text-sm p-3 rounded-lg whitespace-pre-wrap min-h-[72px] ${shouldDimDraft ? "bg-gray-200 text-gray-600" : "bg-gray-100"}`}>
+            <div
+              className={`text-sm p-3 rounded-lg whitespace-pre-wrap min-h-[72px] ${
+                shouldDimDraft ? "bg-gray-200 text-gray-600" : "bg-gray-100"
+              }`}
+            >
               {displayedSuggestion2Ja}
             </div>
-            <div className={`text-sm p-3 rounded-lg mt-2 whitespace-pre-wrap min-h-[72px] ${shouldDimDraft ? "bg-gray-100 text-gray-500" : "bg-gray-50 text-gray-700"}`}>
+            <div
+              className={`text-sm p-3 rounded-lg mt-2 whitespace-pre-wrap min-h-[72px] ${
+                shouldDimDraft ? "bg-gray-100 text-gray-500" : "bg-gray-50 text-gray-700"
+              }`}
+            >
               {displayedSuggestion2Zh}
             </div>
             <button
@@ -875,7 +1151,13 @@ export default function Home() {
               }
               className="w-full mt-3 bg-blue-600 text-white py-2 rounded-lg disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500"
             >
-              {isSendingAi === "advancing" ? "发送中..." : isLatestDraftUsed ? "已使用" : isLatestDraftStale ? "已失效" : "发送"}
+              {isSendingAi === "advancing"
+                ? "发送中..."
+                : isLatestDraftUsed
+                  ? "已使用"
+                  : isLatestDraftStale
+                    ? "已失效"
+                    : "发送"}
             </button>
           </div>
 
@@ -896,13 +1178,32 @@ export default function Home() {
               {isGenerating ? "生成中..." : "重新生成"}
             </button>
             {apiError ? (
-              <div className="text-xs text-red-500 mt-2 break-all">
-                {apiError}
-              </div>
+              <div className="text-xs text-red-500 mt-2 break-all">{apiError}</div>
             ) : null}
           </div>
         </div>
       </div>
+
+      {customerContextMenu && contextMenuCustomer ? (
+        <div
+          className="fixed z-50 min-w-40 rounded-xl border border-gray-200 bg-white shadow-xl py-2"
+          style={{ top: customerContextMenu.y, left: customerContextMenu.x }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            onClick={() => handleTogglePin(contextMenuCustomer)}
+            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50"
+          >
+            {contextMenuCustomer.pinnedAt ? "取消置顶" : "置顶到顶部"}
+          </button>
+          <button
+            onClick={() => handleRenameCustomer(contextMenuCustomer)}
+            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50"
+          >
+            备注名字
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
