@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
 type DbMessage = {
+  id: string;
   type: "TEXT" | "IMAGE";
   role: "CUSTOMER" | "OPERATOR";
   source?: "LINE" | "MANUAL" | "AI_SUGGESTION";
@@ -80,12 +81,11 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const customerId = String(body.customerId || "").trim();
     const rewriteInput = String(body.rewriteInput || "").trim();
+    const requestedTargetMessageId = String(body.targetCustomerMessageId || "").trim() || null;
+    const autoMode = body.autoMode === true;
 
     if (!customerId) {
-      return NextResponse.json(
-        { ok: false, error: "缺少 customerId" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "缺少 customerId" }, { status: 400 });
     }
 
     const customer = await prisma.customer.findUnique({
@@ -102,23 +102,43 @@ export async function POST(req: NextRequest) {
           },
           take: 80,
         },
+        replyDraftSets: {
+          orderBy: {
+            createdAt: "desc",
+          },
+          take: 1,
+        },
       },
     });
 
     if (!customer) {
-      return NextResponse.json(
-        { ok: false, error: "客户不存在" },
-        { status: 404 }
-      );
+      return NextResponse.json({ ok: false, error: "客户不存在" }, { status: 404 });
     }
 
     const messages = [...(customer.messages as DbMessage[])].reverse();
-    const latestCustomerMessage = [...messages]
-      .reverse()
-      .find((msg) => msg.role === "CUSTOMER");
-    const latestOperatorMessage = [...messages]
-      .reverse()
-      .find((msg) => msg.role === "OPERATOR");
+    const latestCustomerMessage = [...messages].reverse().find((msg) => msg.role === "CUSTOMER");
+    const latestOperatorMessage = [...messages].reverse().find((msg) => msg.role === "OPERATOR");
+    const targetCustomerMessageId = requestedTargetMessageId || latestCustomerMessage?.id || null;
+    const existingDraft = customer.replyDraftSets[0] ?? null;
+
+    if (
+      autoMode &&
+      !rewriteInput &&
+      existingDraft &&
+      existingDraft.targetCustomerMessageId === targetCustomerMessageId &&
+      !existingDraft.selectedVariant
+    ) {
+      return NextResponse.json({
+        ok: true,
+        line: "已存在当前有效建议，跳过重复生成",
+        model,
+        suggestion1Ja: existingDraft.stableJapanese,
+        suggestion1Zh: existingDraft.stableChinese,
+        suggestion2Ja: existingDraft.advancingJapanese,
+        suggestion2Zh: existingDraft.advancingChinese,
+        draftSetId: existingDraft.id,
+      });
+    }
 
     const conversationText = formatConversation(messages);
     const tagText = customer.tags.map((item) => item.tag.name).join("、") || "无";
@@ -217,6 +237,7 @@ JSON 格式必须严格如下：
 - 当前思路摘要：${customer.aiCurrentStrategy || "无"}
 - 顾客最新一句：${latestCustomerMessage?.japaneseText || "无"}
 - 我方最近一句：${latestOperatorMessage?.japaneseText || "无"}
+- 当前建议对应的顾客消息：${targetCustomerMessageId || "无"}
 
 聊天上下文：
 ${conversationText}
@@ -294,6 +315,7 @@ ${rewriteInput || "无"}
     const draftSet = await prisma.replyDraftSet.create({
       data: {
         customerId,
+        targetCustomerMessageId,
         extraRequirement: rewriteInput || null,
         stableJapanese: suggestion1Ja,
         stableChinese: suggestion1Zh,

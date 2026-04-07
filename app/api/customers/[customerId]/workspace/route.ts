@@ -19,7 +19,7 @@ export async function GET(_: Request, { params }: Props) {
         },
         messages: {
           orderBy: {
-            sentAt: "asc",
+            sentAt: "desc",
           },
           take: 100,
         },
@@ -33,14 +33,13 @@ export async function GET(_: Request, { params }: Props) {
     });
 
     if (!customer) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "客户不存在",
-        },
-        { status: 404 }
-      );
+      return NextResponse.json({ ok: false, error: "客户不存在" }, { status: 404 });
     }
+
+    const messages = [...customer.messages].reverse();
+    const latestCustomerMessage = [...messages]
+      .reverse()
+      .find((message) => message.role === "CUSTOMER") || null;
 
     return NextResponse.json({
       ok: true,
@@ -63,19 +62,18 @@ export async function GET(_: Request, { params }: Props) {
           name: item.tag.name,
           color: item.tag.color,
         })),
-        messages: customer.messages,
-        latestReplyDraftSet: customer.replyDraftSets[0] ?? null,
+        messages,
+        latestCustomerMessageId: latestCustomerMessage?.id || null,
+        latestReplyDraftSet: customer.replyDraftSets[0]
+          ? {
+              ...customer.replyDraftSets[0],
+              targetCustomerMessageId: customer.replyDraftSets[0].targetCustomerMessageId,
+            }
+          : null,
       },
     });
   } catch (error) {
     console.error("GET /api/customers/[customerId]/workspace error:", error);
-
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "读取顾客工作台失败",
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: "读取顾客工作台失败" }, { status: 500 });
   }
 }

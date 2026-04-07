@@ -39,6 +39,18 @@ enum SuggestionVariant {
   ADVANCING
 }
 
+enum AutomationJobKind {
+  INBOUND_WORKFLOW
+}
+
+enum AutomationJobStatus {
+  PENDING
+  RUNNING
+  DONE
+  SKIPPED
+  FAILED
+}
+
 model Customer {
   id                String        @id @default(cuid())
   lineUserId        String?       @unique
@@ -62,6 +74,7 @@ model Customer {
   tags              CustomerTag[]
   messages          Message[]
   replyDraftSets    ReplyDraftSet[]
+  automationJobs    AutomationJob[]
 
   @@index([stage])
   @@index([isVip])
@@ -120,6 +133,7 @@ model Message {
 model ReplyDraftSet {
   id                    String            @id @default(cuid())
   customerId            String
+  targetCustomerMessageId String?
 
   extraRequirement      String?
 
@@ -139,4 +153,34 @@ model ReplyDraftSet {
   customer              Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
   @@index([customerId, createdAt(sort: Desc)])
+  @@index([customerId, targetCustomerMessageId])
+}
+
+model AutomationJob {
+  id             String              @id @default(cuid())
+  customerId     String
+  targetMessageId String
+  kind           AutomationJobKind
+  status         AutomationJobStatus @default(PENDING)
+  scheduledFor   DateTime?
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  attemptCount   Int                 @default(0)
+  lastError      String?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  customer       Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([customerId, targetMessageId, kind])
+  @@index([status, scheduledFor])
+  @@index([customerId, updatedAt(sort: Desc)])
+}
+
+model OperatorPresence {
+  id                String   @id
+  selectedCustomerId String?
+  lastSeenAt        DateTime
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 }

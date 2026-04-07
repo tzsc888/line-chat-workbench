@@ -49,6 +49,7 @@ type WorkspaceMessage = {
 type ReplyDraftSet = {
   id: string;
   customerId: string;
+  targetCustomerMessageId: string | null;
   extraRequirement: string | null;
   stableJapanese: string;
   stableChinese: string;
@@ -81,6 +82,7 @@ type WorkspaceData = {
     color: string | null;
   }[];
   messages: WorkspaceMessage[];
+  latestCustomerMessageId: string | null;
   latestReplyDraftSet: ReplyDraftSet | null;
 };
 
@@ -244,6 +246,48 @@ export default function Home() {
   }, [selectedCustomerId]);
 
   useEffect(() => {
+    let timer: number | null = null;
+
+    const pingPresence = async () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        return;
+      }
+
+      try {
+        await fetch("/api/operator-presence", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            selectedCustomerId: selectedCustomerIdRef.current || null,
+          }),
+        });
+      } catch (error) {
+        console.error("operator presence ping error:", error);
+      }
+    };
+
+    void pingPresence();
+    timer = window.setInterval(() => {
+      void pingPresence();
+    }, 15000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void pingPresence();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      if (timer) window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [selectedCustomerId]);
+
+  useEffect(() => {
     const client = new Ably.Realtime({
       authUrl: "/api/ably/token",
       authMethod: "GET",
@@ -348,6 +392,15 @@ export default function Home() {
     customReply?.suggestion2Zh ||
     workspace?.latestReplyDraftSet?.advancingChinese ||
     "";
+
+  const latestDraft = workspace?.latestReplyDraftSet || null;
+  const isLatestDraftUsed = !!latestDraft?.selectedVariant;
+  const isLatestDraftStale =
+    !!latestDraft &&
+    !!workspace?.latestCustomerMessageId &&
+    !!latestDraft.targetCustomerMessageId &&
+    latestDraft.targetCustomerMessageId !== workspace.latestCustomerMessageId;
+  const shouldDimDraft = isLatestDraftUsed || isLatestDraftStale;
 
   async function handleRewrite() {
     if (!workspace) {
@@ -466,6 +519,8 @@ export default function Home() {
             chineseText: replyZh,
             source: "AI_SUGGESTION",
             type: "TEXT",
+            replyDraftSetId: workspace.latestReplyDraftSet?.id || "",
+            suggestionVariant: variant === "stable" ? "STABLE" : "ADVANCING",
           }),
         }
       );
@@ -774,12 +829,12 @@ export default function Home() {
             ) : null}
           </div>
 
-          <div className="rounded-xl border border-gray-200 p-4 bg-white">
+          <div className={`rounded-xl border p-4 ${shouldDimDraft ? "border-gray-200 bg-gray-50 opacity-70" : "border-gray-200 bg-white"}`}>
             <div className="font-semibold mb-2">更稳回复</div>
-            <div className="text-sm bg-gray-100 p-3 rounded-lg whitespace-pre-wrap min-h-[72px]">
+            <div className={`text-sm p-3 rounded-lg whitespace-pre-wrap min-h-[72px] ${shouldDimDraft ? "bg-gray-200 text-gray-600" : "bg-gray-100"}`}>
               {displayedSuggestion1Ja}
             </div>
-            <div className="text-sm bg-gray-50 p-3 rounded-lg mt-2 whitespace-pre-wrap text-gray-700 min-h-[72px]">
+            <div className={`text-sm p-3 rounded-lg mt-2 whitespace-pre-wrap min-h-[72px] ${shouldDimDraft ? "bg-gray-100 text-gray-500" : "bg-gray-50 text-gray-700"}`}>
               {displayedSuggestion1Zh}
             </div>
             <button
@@ -791,20 +846,20 @@ export default function Home() {
                 )
               }
               disabled={
-                !workspace || !displayedSuggestion1Ja || isSendingAi !== ""
+                !workspace || !displayedSuggestion1Ja || isSendingAi !== "" || shouldDimDraft
               }
-              className="w-full mt-3 bg-blue-600 text-white py-2 rounded-lg disabled:opacity-60"
+              className="w-full mt-3 bg-blue-600 text-white py-2 rounded-lg disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500"
             >
-              {isSendingAi === "stable" ? "发送中..." : "发送"}
+              {isSendingAi === "stable" ? "发送中..." : isLatestDraftUsed ? "已使用" : isLatestDraftStale ? "已失效" : "发送"}
             </button>
           </div>
 
-          <div className="rounded-xl border border-gray-200 p-4 bg-white">
+          <div className={`rounded-xl border p-4 ${shouldDimDraft ? "border-gray-200 bg-gray-50 opacity-70" : "border-gray-200 bg-white"}`}>
             <div className="font-semibold mb-2">更推进成交</div>
-            <div className="text-sm bg-gray-100 p-3 rounded-lg whitespace-pre-wrap min-h-[72px]">
+            <div className={`text-sm p-3 rounded-lg whitespace-pre-wrap min-h-[72px] ${shouldDimDraft ? "bg-gray-200 text-gray-600" : "bg-gray-100"}`}>
               {displayedSuggestion2Ja}
             </div>
-            <div className="text-sm bg-gray-50 p-3 rounded-lg mt-2 whitespace-pre-wrap text-gray-700 min-h-[72px]">
+            <div className={`text-sm p-3 rounded-lg mt-2 whitespace-pre-wrap min-h-[72px] ${shouldDimDraft ? "bg-gray-100 text-gray-500" : "bg-gray-50 text-gray-700"}`}>
               {displayedSuggestion2Zh}
             </div>
             <button
@@ -816,11 +871,11 @@ export default function Home() {
                 )
               }
               disabled={
-                !workspace || !displayedSuggestion2Ja || isSendingAi !== ""
+                !workspace || !displayedSuggestion2Ja || isSendingAi !== "" || shouldDimDraft
               }
-              className="w-full mt-3 bg-blue-600 text-white py-2 rounded-lg disabled:opacity-60"
+              className="w-full mt-3 bg-blue-600 text-white py-2 rounded-lg disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500"
             >
-              {isSendingAi === "advancing" ? "发送中..." : "发送"}
+              {isSendingAi === "advancing" ? "发送中..." : isLatestDraftUsed ? "已使用" : isLatestDraftStale ? "已失效" : "发送"}
             </button>
           </div>
 

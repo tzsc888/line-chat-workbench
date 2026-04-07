@@ -79,43 +79,27 @@ export async function POST(req: NextRequest) {
     const customerId = String(body.customerId || "").trim();
 
     if (!customerId) {
-      return NextResponse.json(
-        { ok: false, error: "缺少 customerId" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "缺少 customerId" }, { status: 400 });
     }
 
     const customer = await prisma.customer.findUnique({
       where: { id: customerId },
       include: {
-        tags: {
-          include: {
-            tag: true,
-          },
-        },
+        tags: { include: { tag: true } },
         messages: {
-          orderBy: {
-            sentAt: "desc",
-          },
+          orderBy: { sentAt: "desc" },
           take: 80,
         },
       },
     });
 
     if (!customer) {
-      return NextResponse.json(
-        { ok: false, error: "客户不存在" },
-        { status: 404 }
-      );
+      return NextResponse.json({ ok: false, error: "客户不存在" }, { status: 404 });
     }
 
     const messages = [...(customer.messages as DbMessage[])].reverse();
-    const latestCustomerMessage = [...messages]
-      .reverse()
-      .find((msg) => msg.role === "CUSTOMER");
-    const latestOperatorMessage = [...messages]
-      .reverse()
-      .find((msg) => msg.role === "OPERATOR");
+    const latestCustomerMessage = [...messages].reverse().find((msg) => msg.role === "CUSTOMER");
+    const latestOperatorMessage = [...messages].reverse().find((msg) => msg.role === "OPERATOR");
 
     const conversationText = formatConversation(messages);
     const tagText = customer.tags.map((item) => item.tag.name).join("、") || "无";
@@ -212,11 +196,9 @@ ${conversationText}
       });
 
       const text = await response.text();
-
       if (!response.ok) {
         throw new Error(`HTTP ${response.status} - ${text}`);
       }
-
       return JSON.parse(text);
     }
 
@@ -225,13 +207,11 @@ ${conversationText}
 
     try {
       const data = await requestOnce(baseUrl);
-      const content = data?.choices?.[0]?.message?.content || "";
-      parsed = parseModelJson<AnalyzeResult>(content);
+      parsed = parseModelJson<AnalyzeResult>(data?.choices?.[0]?.message?.content || "");
     } catch (mainError) {
       try {
         const data = await requestOnce(backupBaseUrl);
-        const content = data?.choices?.[0]?.message?.content || "";
-        parsed = parseModelJson<AnalyzeResult>(content);
+        parsed = parseModelJson<AnalyzeResult>(data?.choices?.[0]?.message?.content || "");
         line = "主线路失败，已切到备用线路成功";
       } catch (backupError) {
         return NextResponse.json(
@@ -269,13 +249,6 @@ ${conversationText}
     });
   } catch (error) {
     console.error("POST /api/analyze-customer error:", error);
-
-    return NextResponse.json(
-      {
-        ok: false,
-        error: String(error),
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: String(error) }, { status: 500 });
   }
 }
