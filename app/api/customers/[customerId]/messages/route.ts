@@ -7,7 +7,7 @@ type Props = {
   params: Promise<{ customerId: string }>;
 };
 
-async function pushLineTextMessage(to: string, text: string) {
+async function pushLineMessages(to: string, messages: unknown[]) {
   const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 
   if (!accessToken) {
@@ -22,7 +22,7 @@ async function pushLineTextMessage(to: string, text: string) {
     },
     body: JSON.stringify({
       to,
-      messages: [{ type: "text", text }],
+      messages,
     }),
   });
 
@@ -55,6 +55,7 @@ export async function POST(req: Request, { params }: Props) {
 
     const japaneseText = String(body.japaneseText || "").trim();
     const chineseText = typeof body.chineseText === "string" ? body.chineseText.trim() : null;
+    const imageUrl = typeof body.imageUrl === "string" ? body.imageUrl.trim() : "";
     const type = body.type === "IMAGE" ? MessageType.IMAGE : MessageType.TEXT;
     const source = body.source === "AI_SUGGESTION" ? MessageSource.AI_SUGGESTION : MessageSource.MANUAL;
     const replyDraftSetId = typeof body.replyDraftSetId === "string" ? body.replyDraftSetId.trim() : "";
@@ -64,8 +65,12 @@ export async function POST(req: Request, { params }: Props) {
         ? suggestionVariantRaw
         : null;
 
-    if (!japaneseText && type === MessageType.TEXT) {
+    if (type === MessageType.TEXT && !japaneseText) {
       return NextResponse.json({ ok: false, error: "japaneseText 不能为空" }, { status: 400 });
+    }
+
+    if (type === MessageType.IMAGE && !imageUrl) {
+      return NextResponse.json({ ok: false, error: "图片消息缺少 imageUrl" }, { status: 400 });
     }
 
     const customer = await prisma.customer.findUnique({
@@ -81,11 +86,24 @@ export async function POST(req: Request, { params }: Props) {
       return NextResponse.json({ ok: false, error: "当前客户没有 LINE userId，无法发送" }, { status: 400 });
     }
 
-    const now = new Date();
+    const lineMessages: any[] = [];
 
     if (type === MessageType.TEXT) {
-      await pushLineTextMessage(customer.lineUserId, japaneseText);
+      lineMessages.push({ type: "text", text: japaneseText });
+    } else {
+      lineMessages.push({
+        type: "image",
+        originalContentUrl: imageUrl,
+        previewImageUrl: imageUrl,
+      });
+
+      if (japaneseText) {
+        lineMessages.push({ type: "text", text: japaneseText });
+      }
     }
+
+    const now = new Date();
+    await pushLineMessages(customer.lineUserId, lineMessages);
 
     const message = await prisma.message.create({
       data: {
@@ -95,6 +113,7 @@ export async function POST(req: Request, { params }: Props) {
         source,
         japaneseText,
         chineseText,
+        imageUrl: type === MessageType.IMAGE ? imageUrl : null,
         sentAt: now,
       },
     });

@@ -48,13 +48,29 @@ export async function POST(req: NextRequest) {
     const originalName = String(body.originalName || "").trim();
     const remarkName = String(body.noteName || "").trim();
     const avatar = String(body.avatar || "").trim();
+    const type = body.type === "IMAGE" ? MessageType.IMAGE : MessageType.TEXT;
     const japanese = String(body.japanese || "").trim();
+    const imageUrl = String(body.imageUrl || "").trim();
     const lineMessageId = String(body.lineMessageId || "").trim();
     const skipTranslate = body.skipTranslate === true;
 
-    if (!lineUserId || !japanese) {
+    if (!lineUserId) {
       return NextResponse.json(
-        { ok: false, error: "缺少 customerId 或 japanese" },
+        { ok: false, error: "缺少 customerId" },
+        { status: 400 }
+      );
+    }
+
+    if (type === MessageType.TEXT && !japanese) {
+      return NextResponse.json(
+        { ok: false, error: "TEXT 消息缺少 japanese" },
+        { status: 400 }
+      );
+    }
+
+    if (type === MessageType.IMAGE && !imageUrl && !japanese) {
+      return NextResponse.json(
+        { ok: false, error: "IMAGE 消息缺少 imageUrl" },
         { status: 400 }
       );
     }
@@ -119,19 +135,20 @@ export async function POST(req: NextRequest) {
       data: {
         customerId: customer.id,
         role: MessageRole.CUSTOMER,
-        type: MessageType.TEXT,
+        type,
         source: MessageSource.LINE,
         lineMessageId: lineMessageId || null,
         japaneseText: japanese,
         chineseText: null,
+        imageUrl: type === MessageType.IMAGE ? imageUrl || null : null,
         sentAt: now,
       },
     });
 
-    if (skipTranslate) {
+    if (skipTranslate || type === MessageType.IMAGE) {
       return NextResponse.json({
         ok: true,
-        line: "已快速入库，跳过同步翻译",
+        line: skipTranslate ? "已快速入库，跳过同步翻译" : "图片消息已入库",
         model: helperModel || "",
         translated: false,
         translateError: "",
@@ -158,15 +175,7 @@ export async function POST(req: NextRequest) {
       const systemPrompt =
         "你是一个日语到中文的翻译助手，只输出中文翻译结果。";
 
-      const userPrompt = `请把下面这句日语自然地翻译成简洁准确的中文。
-要求：
-1. 只输出中文
-2. 不要解释
-3. 不要加引号
-4. 保留语气和情绪
-
-日语：
-${japanese}`;
+      const userPrompt = `请把下面这句日语自然地翻译成简洁准确的中文。\n要求：\n1. 只输出中文\n2. 不要解释\n3. 不要加引号\n4. 保留语气和情绪\n\n日语：\n${japanese}`;
 
       try {
         let data;
@@ -232,13 +241,6 @@ ${japanese}`;
     });
   } catch (error) {
     console.error("POST /api/ingest-customer-message error:", error);
-
-    return NextResponse.json(
-      {
-        ok: false,
-        error: String(error),
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: String(error) }, { status: 500 });
   }
 }

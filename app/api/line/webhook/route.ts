@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import crypto from "crypto";
+import { put } from "@vercel/blob";
 import { publishRealtimeRefresh } from "@/lib/ably";
 import { runInboundAutomation } from "@/lib/inbound-automation";
 
@@ -28,6 +29,62 @@ async function getLineProfile(userId: string) {
   }
 }
 
+async function getLineMessageContent(messageId: string) {
+  const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+  if (!accessToken) {
+    throw new Error("缺少 LINE_CHANNEL_ACCESS_TOKEN");
+  }
+
+  const response = await fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`读取 LINE 消息内容失败: HTTP ${response.status} - ${text}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  return {
+    buffer: Buffer.from(arrayBuffer),
+    contentType: response.headers.get("content-type") || "application/octet-stream",
+  };
+}
+
+function getExtByContentType(contentType: string) {
+  if (contentType.includes("png")) return "png";
+  if (contentType.includes("webp")) return "webp";
+  if (contentType.includes("gif")) return "gif";
+  return "jpg";
+}
+
+async function uploadInboundImageToBlob(params: {
+  customerId: string;
+  lineMessageId: string;
+  contentType: string;
+  buffer: Buffer;
+}) {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    return null;
+  }
+
+  const ext = getExtByContentType(params.contentType);
+  const blob = await put(
+    `line-inbound/${params.customerId}/${params.lineMessageId}.${ext}`,
+    params.buffer,
+    {
+      access: "public",
+      addRandomSuffix: false,
+      contentType: params.contentType,
+    }
+  );
+
+  return blob.url;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const channelSecret = process.env.LINE_CHANNEL_SECRET;
@@ -49,14 +106,14 @@ export async function POST(req: NextRequest) {
 
     for (const event of events) {
       if (event.type !== "message") continue;
-      if (event.message?.type !== "text") continue;
       if (event.source?.type !== "user") continue;
 
-      const userId = String(event.source.userId || "").trim();
-      const japanese = String(event.message.text || "").trim();
-      const lineMessageId = String(event.message.id || "").trim();
+      const lineType = String(event.message?.type || "").trim();
+      if (!["text", "image", "sticker"].includes(lineType)) continue;
 
-      if (!userId || !japanese) continue;
+      const userId = String(event.source.userId || "").trim();
+      const lineMessageId = String(event.message?.id || "").trim();
+      if (!userId || !lineMessageId) continue;
 
       const profile = await getLineProfile(userId);
       const originalName =
@@ -65,21 +122,80 @@ export async function POST(req: NextRequest) {
           : userId;
       const avatar = typeof profile?.pictureUrl === "string" ? profile.pictureUrl : "";
 
+      let ingestPayload: Record<string, unknown> | null = null;
+      let shouldRunAutomation = false;
+
+      if (lineType === "text") {
+        const japanese = String(event.message?.text || "").trim();
+        if (!japanese) continue;
+
+        ingestPayload = {
+          customerId: userId,
+          originalName,
+          noteName: "",
+          avatar,
+          type: "TEXT",
+          japanese,
+          lineMessageId,
+          skipTranslate: true,
+        };
+        shouldRunAutomation = true;
+      } else if (lineType === "image") {
+        try {
+          const content = await getLineMessageContent(lineMessageId);
+          const imageUrl = await uploadInboundImageToBlob({
+            customerId: userId,
+            lineMessageId,
+            contentType: content.contentType,
+            buffer: content.buffer,
+          });
+
+          ingestPayload = {
+            customerId: userId,
+            originalName,
+            noteName: "",
+            avatar,
+            type: imageUrl ? "IMAGE" : "TEXT",
+            japanese: imageUrl ? "" : "[图片]",
+            imageUrl: imageUrl || "",
+            lineMessageId,
+            skipTranslate: true,
+          };
+        } catch (error) {
+          console.error("LINE image content fetch/upload error:", error);
+          ingestPayload = {
+            customerId: userId,
+            originalName,
+            noteName: "",
+            avatar,
+            type: "TEXT",
+            japanese: "[图片]",
+            lineMessageId,
+            skipTranslate: true,
+          };
+        }
+      } else if (lineType === "sticker") {
+        ingestPayload = {
+          customerId: userId,
+          originalName,
+          noteName: "",
+          avatar,
+          type: "TEXT",
+          japanese: "[贴图]",
+          lineMessageId,
+          skipTranslate: true,
+        };
+      }
+
+      if (!ingestPayload) continue;
+
       let ingestJson: any = null;
 
       try {
         const ingestResponse = await fetch(`${internalBaseUrl}/api/ingest-customer-message`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            customerId: userId,
-            originalName,
-            noteName: "",
-            avatar,
-            japanese,
-            lineMessageId,
-            skipTranslate: true,
-          }),
+          body: JSON.stringify(ingestPayload),
         });
 
         ingestJson = await ingestResponse.json();
@@ -101,13 +217,15 @@ export async function POST(req: NextRequest) {
         console.error("Ably publish inbound-message error:", error);
       }
 
-      after(async () => {
-        await runInboundAutomation({
-          customerId,
-          targetMessageId: messageId,
-          internalBaseUrl,
+      if (shouldRunAutomation) {
+        after(async () => {
+          await runInboundAutomation({
+            customerId,
+            targetMessageId: messageId,
+            internalBaseUrl,
+          });
         });
-      });
+      }
     }
 
     return NextResponse.json({ ok: true });

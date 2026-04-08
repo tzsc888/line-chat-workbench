@@ -1,7 +1,7 @@
 "use client";
 
 import * as Ably from "ably";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 
 type CustomerListItem = {
   id: string;
@@ -113,6 +113,13 @@ type PresetSnippet = {
   updatedAt: string;
 };
 
+type PendingUploadImage = {
+  url: string;
+  originalName: string;
+  size: number;
+  contentType: string | null;
+};
+
 function getDisplayName(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null | undefined) {
   if (!customer) return "未选择顾客";
   return customer.remarkName?.trim() || customer.originalName || "未命名顾客";
@@ -217,6 +224,9 @@ export default function Home() {
   const [editingPresetId, setEditingPresetId] = useState("");
   const [presetTitle, setPresetTitle] = useState("");
   const [presetContent, setPresetContent] = useState("");
+  const [pendingImage, setPendingImage] = useState<PendingUploadImage | null>(null);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [isComposerDragOver, setIsComposerDragOver] = useState(false);
 
   const [isListLoading, setIsListLoading] = useState(true);
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
@@ -236,6 +246,7 @@ export default function Home() {
   const ablyClientRef = useRef<Ably.Realtime | null>(null);
   const markReadInFlightRef = useRef(new Set<string>());
   const composerMenuRef = useRef<HTMLDivElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadPresetSnippets = useCallback(async () => {
     try {
@@ -341,6 +352,7 @@ export default function Home() {
           setCustomReply(null);
           setRewriteInput("");
           setManualReply("");
+          setPendingImage(null);
           setApiError("");
           setHelperError("");
         }
@@ -849,7 +861,72 @@ export default function Home() {
 
   function handleAddImage() {
     setIsComposerMenuOpen(false);
-    window.alert("图片发送会在第二步下一包接入，这一步先完成 + 按钮和预设信息。");
+    imageInputRef.current?.click();
+  }
+
+  async function uploadImageFile(file: File) {
+    if (!file.type.startsWith("image/")) {
+      window.alert("只能上传图片文件");
+      return;
+    }
+
+    try {
+      setIsUploadingImage(true);
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch("/api/uploads/images", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await response.json();
+
+      if (!response.ok || !data.ok || !data.image?.url) {
+        throw new Error(data?.error || "上传图片失败");
+      }
+
+      setPendingImage({
+        url: data.image.url,
+        originalName: data.image.originalName || file.name,
+        size: Number(data.image.size || file.size || 0),
+        contentType: typeof data.image.contentType === "string" ? data.image.contentType : file.type,
+      });
+      setIsComposerMenuOpen(false);
+    } catch (error) {
+      console.error(error);
+      window.alert("上传图片失败，请检查 Blob 配置或终端报错");
+    } finally {
+      setIsUploadingImage(false);
+    }
+  }
+
+  function handleImageInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    void uploadImageFile(file);
+    event.target.value = "";
+  }
+
+  function clearPendingImage() {
+    setPendingImage(null);
+  }
+
+  function handleComposerDragOver(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setIsComposerDragOver(true);
+  }
+
+  function handleComposerDragLeave(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setIsComposerDragOver(false);
+  }
+
+  function handleComposerDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setIsComposerDragOver(false);
+    const file = event.dataTransfer.files?.[0];
+    if (!file) return;
+    void uploadImageFile(file);
   }
 
   async function handleManualSend() {
@@ -858,12 +935,13 @@ export default function Home() {
       return;
     }
 
-    if (!manualReply.trim()) {
-      window.alert("你还没有输入日语回复内容");
+    if (!manualReply.trim() && !pendingImage) {
+      window.alert("请先输入文本或选择图片");
       return;
     }
 
     const japaneseText = manualReply.trim();
+    const sendingType = pendingImage ? "IMAGE" : "TEXT";
 
     try {
       setIsSendingManual(true);
@@ -877,8 +955,9 @@ export default function Home() {
           },
           body: JSON.stringify({
             japaneseText,
+            imageUrl: pendingImage?.url || "",
             source: "MANUAL",
-            type: "TEXT",
+            type: sendingType,
           }),
         }
       );
@@ -890,10 +969,11 @@ export default function Home() {
       }
 
       setManualReply("");
+      setPendingImage(null);
 
       const messageId = String(sendData?.message?.id || "").trim();
 
-      if (messageId) {
+      if (messageId && japaneseText) {
         void (async () => {
           try {
             const translateResponse = await fetch("/api/translate-message", {
@@ -1135,19 +1215,33 @@ export default function Home() {
                           </>
                         ) : (
                           <>
-                            <div className="rounded-lg bg-gray-200 h-36 w-56 flex items-center justify-center text-gray-600">
-                              图片示例
-                            </div>
-                            <div className="mt-2 whitespace-pre-wrap">{msg.japaneseText}</div>
-                            <div
-                              className={`mt-2 text-xs ${
-                                msg.role === "CUSTOMER"
-                                  ? "text-gray-500"
-                                  : "text-green-100"
-                              }`}
-                            >
-                              {msg.chineseText || ""}
-                            </div>
+                            {msg.imageUrl ? (
+                              <a href={msg.imageUrl} target="_blank" rel="noreferrer" className="block">
+                                <img
+                                  src={msg.imageUrl}
+                                  alt="聊天图片"
+                                  className="rounded-xl max-h-72 w-auto max-w-[240px] object-cover border border-black/5"
+                                />
+                              </a>
+                            ) : (
+                              <div className="rounded-lg bg-gray-200 h-36 w-56 flex items-center justify-center text-gray-600">
+                                图片不可用
+                              </div>
+                            )}
+                            {msg.japaneseText ? (
+                              <div className="mt-2 whitespace-pre-wrap">{msg.japaneseText}</div>
+                            ) : null}
+                            {msg.chineseText ? (
+                              <div
+                                className={`mt-2 text-xs ${
+                                  msg.role === "CUSTOMER"
+                                    ? "text-gray-500"
+                                    : "text-green-100"
+                                }`}
+                              >
+                                {msg.chineseText}
+                              </div>
+                            ) : null}
                           </>
                         )}
                       </div>
@@ -1167,50 +1261,91 @@ export default function Home() {
         </div>
 
         <div className="p-4 border-t bg-white relative">
-          <div className="flex gap-2 items-end">
-            <div className="relative" ref={composerMenuRef}>
-              <button
-                onClick={() => setIsComposerMenuOpen((prev) => !prev)}
-                className="h-10 w-10 rounded-full border border-gray-300 bg-white text-xl text-gray-700 hover:bg-gray-50"
-                title="更多操作"
-              >
-                +
-              </button>
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handleImageInputChange}
+          />
 
-              {isComposerMenuOpen ? (
-                <div className="absolute bottom-12 left-0 z-20 w-44 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden">
+          <div
+            onDragOver={handleComposerDragOver}
+            onDragLeave={handleComposerDragLeave}
+            onDrop={handleComposerDrop}
+            className={`rounded-2xl transition ${
+              isComposerDragOver ? "bg-green-50 ring-2 ring-green-300" : ""
+            }`}
+          >
+            {pendingImage ? (
+              <div className="mb-3 rounded-2xl border border-gray-200 bg-gray-50 p-3">
+                <div className="flex items-start gap-3">
+                  <img
+                    src={pendingImage.url}
+                    alt={pendingImage.originalName}
+                    className="h-20 w-20 rounded-xl object-cover border border-gray-200 bg-white"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium text-gray-900 truncate">{pendingImage.originalName}</div>
+                    <div className="mt-1 text-xs text-gray-500">
+                      已上传，可直接发送给顾客
+                    </div>
+                  </div>
                   <button
-                    onClick={handleAddImage}
-                    className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50"
+                    onClick={clearPendingImage}
+                    className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 hover:bg-gray-50"
                   >
-                    添加图片
-                    <div className="text-[11px] text-gray-400 mt-1">下一包接入</div>
-                  </button>
-                  <button
-                    onClick={openPresetPanel}
-                    className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50 border-t border-gray-100"
-                  >
-                    预设信息
-                    <div className="text-[11px] text-gray-400 mt-1">点一下填入输入框</div>
+                    移除
                   </button>
                 </div>
-              ) : null}
-            </div>
+              </div>
+            ) : null}
 
-            <input
-              type="text"
-              value={manualReply}
-              onChange={(e) => setManualReply(e.target.value)}
-              placeholder="输入要发送给顾客的日语内容…"
-              className="flex-1 border rounded-xl px-4 py-2.5"
-            />
-            <button
-              onClick={handleManualSend}
-              disabled={isSendingManual || !workspace}
-              className="bg-green-600 text-white px-4 py-2.5 rounded-xl disabled:opacity-60"
-            >
-              {isSendingManual ? "发送中..." : "发送"}
-            </button>
+            <div className="flex gap-2 items-end">
+              <div className="relative" ref={composerMenuRef}>
+                <button
+                  onClick={() => setIsComposerMenuOpen((prev) => !prev)}
+                  className="h-10 w-10 rounded-full border border-gray-300 bg-white text-xl text-gray-700 hover:bg-gray-50"
+                  title="更多操作"
+                >
+                  +
+                </button>
+
+                {isComposerMenuOpen ? (
+                  <div className="absolute bottom-12 left-0 z-20 w-52 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden">
+                    <button
+                      onClick={handleAddImage}
+                      className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50"
+                    >
+                      添加图片
+                      <div className="text-[11px] text-gray-400 mt-1">支持点击选择，也支持把图片拖到输入区</div>
+                    </button>
+                    <button
+                      onClick={openPresetPanel}
+                      className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50 border-t border-gray-100"
+                    >
+                      预设信息
+                      <div className="text-[11px] text-gray-400 mt-1">点一下填入输入框</div>
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+
+              <input
+                type="text"
+                value={manualReply}
+                onChange={(e) => setManualReply(e.target.value)}
+                placeholder={pendingImage ? "可选填写图片说明或补充文字…" : "输入要发送给顾客的日语内容…"}
+                className="flex-1 border rounded-xl px-4 py-2.5"
+              />
+              <button
+                onClick={handleManualSend}
+                disabled={isSendingManual || isUploadingImage || !workspace}
+                className="bg-green-600 text-white px-4 py-2.5 rounded-xl disabled:opacity-60"
+              >
+                {isUploadingImage ? "上传中..." : isSendingManual ? "发送中..." : pendingImage ? "发送图片" : "发送"}
+              </button>
+            </div>
           </div>
 
           {isPresetPanelOpen ? (
