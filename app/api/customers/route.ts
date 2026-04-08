@@ -7,24 +7,58 @@ function getLatestPreview(message: {
   type: "TEXT" | "IMAGE";
   japaneseText: string;
 }) {
-  const baseText = message.type === "IMAGE" ? "[图片]" : message.japaneseText.trim();
+  const baseText = message.type === "IMAGE" ? "[图片]" : message.japaneseText.trim() || "[空消息]";
   return `${message.role === "OPERATOR" ? "我：" : ""}${baseText}`;
 }
 
 export async function GET() {
   try {
     const customers = await prisma.customer.findMany({
-      include: {
+      select: {
+        id: true,
+        lineUserId: true,
+        remarkName: true,
+        originalName: true,
+        avatarUrl: true,
+        stage: true,
+        isVip: true,
+        pinnedAt: true,
+        unreadCount: true,
+        aiCustomerInfo: true,
+        aiCurrentStrategy: true,
+        aiLastAnalyzedAt: true,
+        lastMessageAt: true,
+        lastInboundMessageAt: true,
+        lastOutboundMessageAt: true,
+        followupBucket: true,
+        followupTier: true,
+        followupState: true,
+        followupReason: true,
+        nextFollowupAt: true,
+        updatedAt: true,
         tags: {
-          include: {
-            tag: true,
+          select: {
+            tag: {
+              select: {
+                id: true,
+                name: true,
+                color: true,
+              },
+            },
           },
         },
         messages: {
-          orderBy: {
-            sentAt: "desc",
-          },
+          orderBy: { sentAt: "desc" },
           take: 1,
+          select: {
+            id: true,
+            role: true,
+            type: true,
+            source: true,
+            japaneseText: true,
+            chineseText: true,
+            sentAt: true,
+          },
         },
       },
     });
@@ -87,7 +121,10 @@ export async function GET() {
           state: followup.state,
           reason: followup.reason,
           nextFollowupAt: followup.nextFollowupAt ? followup.nextFollowupAt.toISOString() : null,
-          isOverdue: !!followup.nextFollowupAt && followup.state === "ACTIVE" && followup.nextFollowupAt.getTime() <= now,
+          isOverdue:
+            !!followup.nextFollowupAt &&
+            followup.state === "ACTIVE" &&
+            followup.nextFollowupAt.getTime() <= now,
         },
         tags: customer.tags.map((item) => ({
           id: item.tag.id,
@@ -113,10 +150,7 @@ export async function GET() {
       };
     });
 
-    return NextResponse.json({
-      ok: true,
-      customers: result,
-    });
+    return NextResponse.json({ ok: true, customers: result });
   } catch (error) {
     console.error("GET /api/customers error:", error);
 

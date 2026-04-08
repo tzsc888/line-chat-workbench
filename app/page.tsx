@@ -2,7 +2,7 @@
 
 import * as Ably from "ably";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 
 type FollowupSummary = {
@@ -56,6 +56,11 @@ type WorkspaceMessage = {
   japaneseText: string;
   chineseText: string | null;
   imageUrl: string | null;
+  deliveryStatus: "PENDING" | "SENT" | "FAILED" | null;
+  sendError: string | null;
+  lastAttemptAt: string | null;
+  failedAt: string | null;
+  retryCount: number;
   sentAt: string;
   createdAt: string;
   updatedAt: string;
@@ -223,6 +228,23 @@ function formatBubbleTime(dateString: string) {
   });
 }
 
+function getDeliveryStatusMeta(message: WorkspaceMessage) {
+  if (message.role !== "OPERATOR") {
+    return null;
+  }
+
+  switch (message.deliveryStatus) {
+    case "FAILED":
+      return { label: "发送失败", className: "text-red-500" };
+    case "PENDING":
+      return { label: "发送中", className: "text-amber-500" };
+    case "SENT":
+      return { label: "已发送", className: "text-gray-400" };
+    default:
+      return null;
+  }
+}
+
 function formatDividerTime(dateString: string) {
   const date = new Date(dateString);
   const now = new Date();
@@ -254,6 +276,8 @@ function shouldShowMessageDivider(previousMessage: WorkspaceMessage | null, curr
 
 export default function Home() {
   const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
   const requestedCustomerId = searchParams.get("customerId") || "";
   const [customers, setCustomers] = useState<CustomerListItem[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
@@ -282,11 +306,60 @@ export default function Home() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSendingManual, setIsSendingManual] = useState(false);
+  const [retryingMessageId, setRetryingMessageId] = useState("");
   const [isSendingAi, setIsSendingAi] = useState<"stable" | "advancing" | "">("");
 
   const [pageError, setPageError] = useState("");
   const [apiError, setApiError] = useState("");
   const [helperError, setHelperError] = useState("");
+
+  const clearCustomerQuery = useCallback(() => {
+    if (!requestedCustomerId) return;
+    router.replace(pathname, { scroll: false });
+  }, [pathname, requestedCustomerId, router]);
+
+  const playIncomingSound = useCallback(() => {
+    if (!audioEnabledRef.current) return;
+
+    const now = Date.now();
+    if (now - lastIncomingSoundAtRef.current < 900) return;
+    lastIncomingSoundAtRef.current = now;
+
+    try {
+      const AudioContextClass =
+        typeof window !== "undefined"
+          ? (window.AudioContext ||
+              (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)
+          : undefined;
+
+      if (!AudioContextClass) return;
+
+      const context = audioContextRef.current ?? new AudioContextClass();
+      audioContextRef.current = context;
+
+      if (context.state === "suspended") {
+        void context.resume();
+      }
+
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(880, context.currentTime);
+
+      gain.gain.setValueAtTime(0.0001, context.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.06, context.currentTime + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.18);
+
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+
+      oscillator.start(context.currentTime);
+      oscillator.stop(context.currentTime + 0.18);
+    } catch (error) {
+      console.error("incoming sound error:", error);
+    }
+  }, []);
 
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const isSilentRefreshingRef = useRef(false);
@@ -296,6 +369,18 @@ export default function Home() {
   const markReadInFlightRef = useRef(new Set<string>());
   const composerMenuRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const openChatToBottomRef = useRef(false);
+  const shouldStickToBottomRef = useRef(true);
+  const lastOpenedCustomerIdRef = useRef("");
+  const hasInitializedUnreadSnapshotRef = useRef(false);
+  const previousUnreadMapRef = useRef<Record<string, number>>({});
+  const audioEnabledRef = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const lastIncomingSoundAtRef = useRef(0);
+  const customersAbortRef = useRef<AbortController | null>(null);
+  const workspaceAbortRef = useRef<AbortController | null>(null);
+  const customersRequestIdRef = useRef(0);
+  const workspaceRequestIdRef = useRef(0);
 
   const loadPresetSnippets = useCallback(async () => {
     try {
@@ -317,6 +402,11 @@ export default function Home() {
   }, []);
 
   const loadCustomers = useCallback(async (options?: { silent?: boolean }) => {
+    const requestId = ++customersRequestIdRef.current;
+    customersAbortRef.current?.abort();
+    const controller = new AbortController();
+    customersAbortRef.current = controller;
+
     try {
       if (!options?.silent) {
         setIsListLoading(true);
@@ -326,6 +416,7 @@ export default function Home() {
 
       const response = await fetch("/api/customers", {
         cache: "no-store",
+        signal: controller.signal,
       });
 
       const data = await response.json();
@@ -334,18 +425,26 @@ export default function Home() {
         throw new Error(data?.error || "读取顾客列表失败");
       }
 
+      if (controller.signal.aborted || requestId !== customersRequestIdRef.current) {
+        return;
+      }
+
       const list: CustomerListItem[] = data.customers || [];
       setCustomers(list);
 
       setSelectedCustomerId((prev) => {
         if (prev && list.some((item) => item.id === prev)) return prev;
-        return list[0]?.id || "";
+        return "";
       });
     } catch (error) {
+      if (controller.signal.aborted) return;
       console.error(error);
       setPageError(String(error));
     } finally {
-      if (!options?.silent) {
+      if (customersAbortRef.current === controller) {
+        customersAbortRef.current = null;
+      }
+      if (!options?.silent && requestId === customersRequestIdRef.current) {
         setIsListLoading(false);
       }
     }
@@ -374,10 +473,16 @@ export default function Home() {
 
   const loadWorkspace = useCallback(
     async (customerId: string, options?: { preserveUi?: boolean }) => {
+      workspaceAbortRef.current?.abort();
+
       if (!customerId) {
         setWorkspace(null);
         return;
       }
+
+      const requestId = ++workspaceRequestIdRef.current;
+      const controller = new AbortController();
+      workspaceAbortRef.current = controller;
 
       const preserveUi = !!options?.preserveUi;
       const container = chatScrollRef.current;
@@ -408,12 +513,17 @@ export default function Home() {
 
         const response = await fetch(`/api/customers/${customerId}/workspace`, {
           cache: "no-store",
+          signal: controller.signal,
         });
 
         const data = await response.json();
 
         if (!response.ok || !data.ok) {
           throw new Error(data?.error || "读取顾客工作台失败");
+        }
+
+        if (controller.signal.aborted || requestId !== workspaceRequestIdRef.current) {
+          return;
         }
 
         const nextWorkspace: WorkspaceData | null = data.workspace || null;
@@ -449,13 +559,17 @@ export default function Home() {
           });
         }
       } catch (error) {
+        if (controller.signal.aborted) return;
         console.error(error);
         if (!preserveUi) {
           setWorkspace(null);
           setPageError(String(error));
         }
       } finally {
-        if (!preserveUi) {
+        if (workspaceAbortRef.current === controller) {
+          workspaceAbortRef.current = null;
+        }
+        if (!preserveUi && requestId === workspaceRequestIdRef.current) {
           setIsWorkspaceLoading(false);
         }
         isSilentRefreshingRef.current = false;
@@ -495,13 +609,70 @@ export default function Home() {
   }, [loadCustomers]);
 
   useEffect(() => {
-    if (!selectedCustomerId) return;
-    loadWorkspace(selectedCustomerId);
+    void loadWorkspace(selectedCustomerId);
   }, [selectedCustomerId, loadWorkspace]);
 
   useEffect(() => {
     selectedCustomerIdRef.current = selectedCustomerId;
   }, [selectedCustomerId]);
+  useEffect(() => {
+    const enableAudio = () => {
+      audioEnabledRef.current = true;
+
+      try {
+        const AudioContextClass =
+          window.AudioContext ||
+          (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+
+        if (!AudioContextClass) return;
+
+        const context = audioContextRef.current ?? new AudioContextClass();
+        audioContextRef.current = context;
+        if (context.state === "suspended") {
+          void context.resume();
+        }
+      } catch (error) {
+        console.error("audio init error:", error);
+      }
+    };
+
+    window.addEventListener("pointerdown", enableAudio, { once: true });
+    window.addEventListener("keydown", enableAudio, { once: true });
+
+    return () => {
+      window.removeEventListener("pointerdown", enableAudio);
+      window.removeEventListener("keydown", enableAudio);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!customers.length) {
+      previousUnreadMapRef.current = {};
+      hasInitializedUnreadSnapshotRef.current = true;
+      return;
+    }
+
+    const nextUnreadMap = Object.fromEntries(customers.map((customer) => [customer.id, customer.unreadCount]));
+
+    if (!hasInitializedUnreadSnapshotRef.current) {
+      previousUnreadMapRef.current = nextUnreadMap;
+      hasInitializedUnreadSnapshotRef.current = true;
+      return;
+    }
+
+    const hasIncomingUnread = customers.some((customer) => {
+      const previousUnread = previousUnreadMapRef.current[customer.id] ?? 0;
+      const latestPreviewFromCustomer = customer.latestMessage?.role === "CUSTOMER";
+      return latestPreviewFromCustomer && customer.unreadCount > previousUnread;
+    });
+
+    if (hasIncomingUnread) {
+      playIncomingSound();
+    }
+
+    previousUnreadMapRef.current = nextUnreadMap;
+  }, [customers, playIncomingSound]);
+
 
   useEffect(() => {
     function handleDocumentClick(event: MouseEvent) {
@@ -538,46 +709,11 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    let timer: number | null = null;
-
-    const pingPresence = async () => {
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
-        return;
-      }
-
-      try {
-        await fetch("/api/operator-presence", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            selectedCustomerId: selectedCustomerIdRef.current || null,
-          }),
-        });
-      } catch (error) {
-        console.error("operator presence ping error:", error);
-      }
-    };
-
-    void pingPresence();
-    timer = window.setInterval(() => {
-      void pingPresence();
-    }, 15000);
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        void pingPresence();
-      }
-    };
-
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-
     return () => {
-      if (timer) window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      customersAbortRef.current?.abort();
+      workspaceAbortRef.current?.abort();
     };
-  }, [selectedCustomerId]);
+  }, []);
 
   useEffect(() => {
     const client = new Ably.Realtime({
@@ -645,24 +781,40 @@ export default function Home() {
 
   const currentListCustomer =
     filteredCustomers.find((item) => item.id === selectedCustomerId) ||
-    filteredCustomers[0] ||
     customers.find((item) => item.id === selectedCustomerId) ||
-    customers[0] ||
     null;
-
-  useEffect(() => {
-    if (!currentListCustomer) return;
-    if (currentListCustomer.id !== selectedCustomerId) {
-      setSelectedCustomerId(currentListCustomer.id);
-    }
-  }, [currentListCustomer, selectedCustomerId]);
 
   useEffect(() => {
     if (!requestedCustomerId) return;
     if (!customers.some((item) => item.id === requestedCustomerId)) return;
-    if (selectedCustomerId === requestedCustomerId) return;
-    setSelectedCustomerId(requestedCustomerId);
-  }, [requestedCustomerId, customers, selectedCustomerId]);
+    if (selectedCustomerId !== requestedCustomerId) {
+      openChatToBottomRef.current = true;
+      shouldStickToBottomRef.current = true;
+      setSelectedCustomerId(requestedCustomerId);
+    }
+    clearCustomerQuery();
+  }, [requestedCustomerId, customers, selectedCustomerId, clearCustomerQuery]);
+
+  useEffect(() => {
+    if (!workspace || !selectedCustomerId) return;
+
+    const container = chatScrollRef.current;
+    if (!container) return;
+
+    const customerChanged = lastOpenedCustomerIdRef.current !== workspace.customer.id;
+    if (customerChanged || openChatToBottomRef.current || shouldStickToBottomRef.current) {
+      requestAnimationFrame(() => {
+        const el = chatScrollRef.current;
+        if (!el) return;
+        el.scrollTop = el.scrollHeight;
+      });
+    }
+
+    if (customerChanged) {
+      lastOpenedCustomerIdRef.current = workspace.customer.id;
+    }
+    openChatToBottomRef.current = false;
+  }, [selectedCustomerId, workspace?.customer.id, workspace?.messages.length]);
 
 
   const displayedSuggestion1Ja =
@@ -1070,20 +1222,54 @@ export default function Home() {
       }
     } catch (error) {
       console.error(error);
-      window.alert("发送失败，请看终端报错");
+      window.alert("发送失败，可在消息气泡上点击重发");
     } finally {
       setIsSendingManual(false);
     }
   }
 
+  async function handleRetryMessage(messageId: string) {
+    if (!workspace || !messageId || retryingMessageId) return;
+
+    try {
+      setRetryingMessageId(messageId);
+      const response = await fetch(`/api/messages/${messageId}/retry`, {
+        method: "POST",
+      });
+      const data = await response.json();
+
+      await loadWorkspace(workspace.customer.id, { preserveUi: true });
+      await loadCustomers({ silent: true });
+
+      if (!response.ok || !data.ok) {
+        throw new Error(data?.error || "重发失败");
+      }
+    } catch (error) {
+      console.error(error);
+      window.alert("重发失败，请看终端报错");
+    } finally {
+      setRetryingMessageId("");
+    }
+  }
+
   function handleSelectCustomer(customerId: string) {
+    openChatToBottomRef.current = true;
+    shouldStickToBottomRef.current = true;
     setSelectedCustomerId(customerId);
     setCustomerContextMenu(null);
+    clearCustomerQuery();
     setCustomers((prev) =>
       prev.map((item) =>
         item.id === customerId ? { ...item, unreadCount: 0 } : item
       )
     );
+  }
+
+  function handleCollapseChat() {
+    setSelectedCustomerId("");
+    setWorkspace(null);
+    setCustomerContextMenu(null);
+    clearCustomerQuery();
   }
 
   async function handleTogglePin(customer: CustomerListItem) {
@@ -1117,6 +1303,14 @@ export default function Home() {
     }
   }
 
+  function handleChatScroll() {
+    const container = chatScrollRef.current;
+    if (!container) return;
+    const nearBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+    shouldStickToBottomRef.current = nearBottom;
+  }
+
   const contextMenuCustomer = customerContextMenu?.customer || null;
   const overdueFollowupCount = customers.filter((customer) => customer.followup?.isOverdue && customer.followup?.state === "ACTIVE").length;
 
@@ -1124,7 +1318,7 @@ export default function Home() {
     <div className="h-screen bg-gray-100 flex">
       <div className="w-[24%] bg-gray-50 border-r border-gray-200 p-4 overflow-y-auto">
         <div className="mb-3 flex items-center justify-between gap-3">
-          <h2 className="text-lg font-bold">顾客列表</h2>
+          <button onClick={handleCollapseChat} className="text-lg font-bold text-left hover:text-green-700 transition">顾客列表</button>
 
           <Link
             href="/followups"
@@ -1156,7 +1350,7 @@ export default function Home() {
         ) : (
           <div className="space-y-2">
             {filteredCustomers.map((customer) => {
-              const isActive = customer.id === currentListCustomer?.id;
+              const isActive = customer.id === selectedCustomerId;
               const latestPreview = customer.latestMessage?.previewText || "暂时还没有消息";
 
               return (
@@ -1235,7 +1429,7 @@ export default function Home() {
 
       <div className="w-[46%] flex flex-col bg-gray-50">
         <div className="p-4 border-b bg-white space-y-2">
-          <div className="font-bold">{getDisplayName(workspace?.customer || null)}</div>
+          <div className="font-bold">{selectedCustomerId ? getDisplayName(workspace?.customer || null) : "未打开顾客会话"}</div>
           {workspace?.customer && getSecondaryName(workspace.customer) ? (
             <div className="text-xs text-gray-500 mt-1">
               {getSecondaryName(workspace.customer)}
@@ -1265,10 +1459,17 @@ export default function Home() {
 
         <div
           ref={chatScrollRef}
+          onScroll={handleChatScroll}
           className="flex-1 p-4 space-y-4 overflow-y-auto"
         >
           {isWorkspaceLoading ? (
             <div className="text-sm text-gray-500">聊天内容加载中...</div>
+          ) : !selectedCustomerId ? (
+            <div className="flex h-full items-center justify-center">
+              <div className="rounded-2xl border border-dashed border-gray-300 bg-white/70 px-6 py-8 text-center text-sm text-gray-500 shadow-sm">
+                请先从左侧顾客列表中手动选择一位顾客
+              </div>
+            </div>
           ) : !workspace ? (
             <div className="text-sm text-gray-500">当前没有顾客数据</div>
           ) : workspace.messages.length === 0 ? (
@@ -1347,12 +1548,32 @@ export default function Home() {
                         )}
                       </div>
                       <div
-                        className={`mt-1 text-[11px] text-gray-400 ${
-                          msg.role === "CUSTOMER" ? "text-left" : "text-right"
+                        className={`mt-1 flex items-center gap-2 text-[11px] text-gray-400 ${
+                          msg.role === "CUSTOMER" ? "justify-start" : "justify-end"
                         }`}
                       >
-                        {formatBubbleTime(msg.sentAt)}
+                        <span>{formatBubbleTime(msg.sentAt)}</span>
+                        {getDeliveryStatusMeta(msg) ? (
+                          <span className={getDeliveryStatusMeta(msg)?.className}>
+                            {getDeliveryStatusMeta(msg)?.label}
+                          </span>
+                        ) : null}
+                        {msg.role === "OPERATOR" && msg.deliveryStatus === "FAILED" ? (
+                          <button
+                            type="button"
+                            onClick={() => handleRetryMessage(msg.id)}
+                            disabled={retryingMessageId === msg.id}
+                            className="rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-600 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {retryingMessageId === msg.id ? "重发中..." : "重发"}
+                          </button>
+                        ) : null}
                       </div>
+                      {msg.role === "OPERATOR" && msg.deliveryStatus === "FAILED" && msg.sendError ? (
+                        <div className="mt-1 text-[11px] text-red-500 text-right line-clamp-2">
+                          {msg.sendError}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 </div>

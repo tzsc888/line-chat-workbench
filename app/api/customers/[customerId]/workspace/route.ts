@@ -13,23 +13,79 @@ export async function GET(_: Request, { params }: Props) {
 
     const customer = await prisma.customer.findUnique({
       where: { id: customerId },
-      include: {
+      select: {
+        id: true,
+        lineUserId: true,
+        remarkName: true,
+        originalName: true,
+        avatarUrl: true,
+        stage: true,
+        isVip: true,
+        pinnedAt: true,
+        unreadCount: true,
+        aiCustomerInfo: true,
+        aiCurrentStrategy: true,
+        aiLastAnalyzedAt: true,
+        lastMessageAt: true,
+        lastInboundMessageAt: true,
+        lastOutboundMessageAt: true,
+        followupBucket: true,
+        followupTier: true,
+        followupState: true,
+        followupReason: true,
+        nextFollowupAt: true,
         tags: {
-          include: {
-            tag: true,
+          select: {
+            tag: {
+              select: {
+                id: true,
+                name: true,
+                color: true,
+              },
+            },
           },
         },
         messages: {
-          orderBy: {
-            sentAt: "desc",
+          orderBy: { sentAt: "desc" },
+          take: 80,
+          select: {
+            id: true,
+            customerId: true,
+            role: true,
+            type: true,
+            source: true,
+            lineMessageId: true,
+            japaneseText: true,
+            chineseText: true,
+            imageUrl: true,
+            deliveryStatus: true,
+            sendError: true,
+            lastAttemptAt: true,
+            failedAt: true,
+            retryCount: true,
+            sentAt: true,
+            createdAt: true,
+            updatedAt: true,
           },
-          take: 100,
         },
         replyDraftSets: {
-          orderBy: {
-            createdAt: "desc",
-          },
+          orderBy: { createdAt: "desc" },
           take: 1,
+          select: {
+            id: true,
+            customerId: true,
+            targetCustomerMessageId: true,
+            extraRequirement: true,
+            stableJapanese: true,
+            stableChinese: true,
+            advancingJapanese: true,
+            advancingChinese: true,
+            modelName: true,
+            selectedVariant: true,
+            selectedAt: true,
+            createdAt: true,
+            updatedAt: true,
+          },
         },
       },
     });
@@ -39,16 +95,14 @@ export async function GET(_: Request, { params }: Props) {
     }
 
     const messages = [...customer.messages].reverse();
-    const latestCustomerMessage = [...messages]
-      .reverse()
-      .find((message) => message.role === "CUSTOMER") || null;
-
+    const latestCustomerMessage = [...messages].reverse().find((message) => message.role === "CUSTOMER") || null;
+    const tagNames = customer.tags.map((item) => item.tag.name);
     const followup = resolveFollowupView({
       isVip: customer.isVip,
       stage: customer.stage,
       unreadCount: customer.unreadCount,
       remarkName: customer.remarkName,
-      tags: customer.tags.map((item) => item.tag.name),
+      tags: tagNames,
       followupBucket: customer.followupBucket,
       followupTier: customer.followupTier,
       followupState: customer.followupState,
@@ -83,7 +137,10 @@ export async function GET(_: Request, { params }: Props) {
             state: followup.state,
             reason: followup.reason,
             nextFollowupAt: followup.nextFollowupAt ? followup.nextFollowupAt.toISOString() : null,
-            isOverdue: !!followup.nextFollowupAt && followup.state === "ACTIVE" && followup.nextFollowupAt.getTime() <= now,
+            isOverdue:
+              !!followup.nextFollowupAt &&
+              followup.state === "ACTIVE" &&
+              followup.nextFollowupAt.getTime() <= now,
           },
         },
         tags: customer.tags.map((item) => ({
@@ -93,17 +150,12 @@ export async function GET(_: Request, { params }: Props) {
         })),
         messages,
         latestCustomerMessageId: latestCustomerMessage?.id || null,
-        latestReplyDraftSet: customer.replyDraftSets[0]
-          ? {
-              ...customer.replyDraftSets[0],
-              targetCustomerMessageId: customer.replyDraftSets[0].targetCustomerMessageId,
-            }
-          : null,
+        latestReplyDraftSet: customer.replyDraftSets[0] || null,
       },
     });
   } catch (error) {
     console.error("GET /api/customers/[customerId]/workspace error:", error);
-    return NextResponse.json({ ok: false, error: "读取顾客工作台失败" }, { status: 500 });
+    return NextResponse.json({ ok: false, error: "读取顾客工作台失败，请重试" }, { status: 500 });
   }
 }
 
