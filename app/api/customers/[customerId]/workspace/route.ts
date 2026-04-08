@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { publishRealtimeRefresh } from "@/lib/ably";
 import { prisma } from "@/lib/prisma";
+import { resolveFollowupView } from "@/lib/followup-rules";
 
 type Props = {
   params: Promise<{ customerId: string }>;
@@ -42,6 +43,23 @@ export async function GET(_: Request, { params }: Props) {
       .reverse()
       .find((message) => message.role === "CUSTOMER") || null;
 
+    const followup = resolveFollowupView({
+      isVip: customer.isVip,
+      stage: customer.stage,
+      unreadCount: customer.unreadCount,
+      remarkName: customer.remarkName,
+      tags: customer.tags.map((item) => item.tag.name),
+      followupBucket: customer.followupBucket,
+      followupTier: customer.followupTier,
+      followupState: customer.followupState,
+      nextFollowupAt: customer.nextFollowupAt,
+      followupReason: customer.followupReason,
+      lastMessageAt: customer.lastMessageAt,
+      lastInboundMessageAt: customer.lastInboundMessageAt,
+      lastOutboundMessageAt: customer.lastOutboundMessageAt,
+    });
+    const now = Date.now();
+
     return NextResponse.json({
       ok: true,
       workspace: {
@@ -59,6 +77,14 @@ export async function GET(_: Request, { params }: Props) {
           aiCurrentStrategy: customer.aiCurrentStrategy,
           aiLastAnalyzedAt: customer.aiLastAnalyzedAt,
           lastMessageAt: customer.lastMessageAt,
+          followup: {
+            bucket: followup.bucket,
+            tier: followup.tier,
+            state: followup.state,
+            reason: followup.reason,
+            nextFollowupAt: followup.nextFollowupAt ? followup.nextFollowupAt.toISOString() : null,
+            isOverdue: !!followup.nextFollowupAt && followup.state === "ACTIVE" && followup.nextFollowupAt.getTime() <= now,
+          },
         },
         tags: customer.tags.map((item) => ({
           id: item.tag.id,

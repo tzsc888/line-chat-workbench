@@ -2,7 +2,17 @@
 
 import * as Ably from "ably";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
+
+type FollowupSummary = {
+  bucket: "UNCONVERTED" | "VIP";
+  tier: "A" | "B" | "C";
+  state: "ACTIVE" | "DONE" | "PAUSED";
+  reason: string;
+  nextFollowupAt: string | null;
+  isOverdue: boolean;
+};
 
 type CustomerListItem = {
   id: string;
@@ -18,6 +28,7 @@ type CustomerListItem = {
   aiCurrentStrategy: string | null;
   aiLastAnalyzedAt: string | null;
   lastMessageAt: string | null;
+  followup: FollowupSummary | null;
   tags: {
     id: string;
     name: string;
@@ -45,11 +56,6 @@ type WorkspaceMessage = {
   japaneseText: string;
   chineseText: string | null;
   imageUrl: string | null;
-  deliveryStatus: "PENDING" | "SENT" | "FAILED" | null;
-  sendError: string | null;
-  lastAttemptAt: string | null;
-  failedAt: string | null;
-  retryCount: number;
   sentAt: string;
   createdAt: string;
   updatedAt: string;
@@ -86,6 +92,7 @@ type WorkspaceData = {
     aiCurrentStrategy: string | null;
     aiLastAnalyzedAt: string | null;
     lastMessageAt: string | null;
+    followup: FollowupSummary | null;
   };
   tags: {
     id: string;
@@ -131,9 +138,43 @@ function getDisplayName(customer: Pick<CustomerListItem, "remarkName" | "origina
   return customer.remarkName?.trim() || customer.originalName || "未命名顾客";
 }
 
-function getAvatarText(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null) {
+function getAvatarText(customer: Pick<CustomerListItem, "remarkName" | "originalName" | "followup"> | null) {
+  if (customer?.followup?.tier) return customer.followup.tier;
   const text = getDisplayName(customer);
   return text.slice(0, 1).toUpperCase();
+}
+
+function getAvatarTone(tier?: FollowupSummary["tier"] | null) {
+  if (tier === "A") {
+    return "bg-emerald-100 text-emerald-700 ring-1 ring-emerald-200";
+  }
+  if (tier === "B") {
+    return "bg-amber-100 text-amber-700 ring-1 ring-amber-200";
+  }
+  if (tier === "C") {
+    return "bg-slate-200 text-slate-700 ring-1 ring-slate-300";
+  }
+  return "bg-pink-100 text-pink-700";
+}
+
+function getFollowupBucketLabel(bucket?: FollowupSummary["bucket"] | null) {
+  return bucket === "VIP" ? "VIP已成交" : "未成交";
+}
+
+function getFollowupTierLabel(tier?: FollowupSummary["tier"] | null) {
+  return tier ? `${tier}类` : "未分层";
+}
+
+function formatFollowupTime(dateString: string | null) {
+  if (!dateString) return "未设置";
+  const date = new Date(dateString);
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
 
 function getSecondaryName(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null | undefined) {
@@ -182,23 +223,6 @@ function formatBubbleTime(dateString: string) {
   });
 }
 
-function getDeliveryStatusMeta(message: WorkspaceMessage) {
-  if (message.role !== "OPERATOR") {
-    return null;
-  }
-
-  switch (message.deliveryStatus) {
-    case "FAILED":
-      return { label: "发送失败", className: "text-red-500" };
-    case "PENDING":
-      return { label: "发送中", className: "text-amber-500" };
-    case "SENT":
-      return { label: "已发送", className: "text-gray-400" };
-    default:
-      return null;
-  }
-}
-
 function formatDividerTime(dateString: string) {
   const date = new Date(dateString);
   const now = new Date();
@@ -229,6 +253,8 @@ function shouldShowMessageDivider(previousMessage: WorkspaceMessage | null, curr
 }
 
 export default function Home() {
+  const searchParams = useSearchParams();
+  const requestedCustomerId = searchParams.get("customerId") || "";
   const [customers, setCustomers] = useState<CustomerListItem[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
@@ -256,7 +282,6 @@ export default function Home() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSendingManual, setIsSendingManual] = useState(false);
-  const [retryingMessageId, setRetryingMessageId] = useState("");
   const [isSendingAi, setIsSendingAi] = useState<"stable" | "advancing" | "">("");
 
   const [pageError, setPageError] = useState("");
@@ -403,6 +428,7 @@ export default function Home() {
                     remarkName: nextWorkspace.customer.remarkName,
                     pinnedAt: nextWorkspace.customer.pinnedAt,
                     unreadCount: nextWorkspace.customer.unreadCount,
+                    followup: nextWorkspace.customer.followup,
                   }
                 : item
             )
@@ -456,7 +482,7 @@ export default function Home() {
         throw new Error(data?.error || "更新顾客信息失败");
       }
 
-      await loadCustomers({ preserveUi: true });
+      await loadCustomers({ silent: true });
       if (selectedCustomerIdRef.current === customerId) {
         await loadWorkspace(customerId, { preserveUi: true });
       }
@@ -575,7 +601,7 @@ export default function Home() {
           message && typeof message === "object" ? message.data || {} : {};
         const activeCustomerId = selectedCustomerIdRef.current;
 
-        loadCustomers({ preserveUi: true });
+        loadCustomers({ silent: true });
 
         if (
           activeCustomerId &&
@@ -630,6 +656,14 @@ export default function Home() {
       setSelectedCustomerId(currentListCustomer.id);
     }
   }, [currentListCustomer, selectedCustomerId]);
+
+  useEffect(() => {
+    if (!requestedCustomerId) return;
+    if (!customers.some((item) => item.id === requestedCustomerId)) return;
+    if (selectedCustomerId === requestedCustomerId) return;
+    setSelectedCustomerId(requestedCustomerId);
+  }, [requestedCustomerId, customers, selectedCustomerId]);
+
 
   const displayedSuggestion1Ja =
     customReply?.suggestion1Ja ||
@@ -783,19 +817,13 @@ export default function Home() {
       const data = await response.json();
 
       if (!response.ok || !data.ok) {
-        if (data?.message?.id) {
-          await loadWorkspace(workspace.customer.id, { preserveUi: true });
-          await loadCustomers({ preserveUi: true });
-        }
         throw new Error(data?.error || "发送失败");
       }
 
       setCustomReply(null);
-      await loadWorkspace(workspace.customer.id, { preserveUi: true });
-      await loadCustomers({ preserveUi: true });
     } catch (error) {
       console.error(error);
-      window.alert("AI 建议发送失败，可在消息气泡上点击重发");
+      window.alert("AI 建议发送失败，请看终端报错");
     } finally {
       setIsSendingAi("");
     }
@@ -993,18 +1021,15 @@ export default function Home() {
       );
 
       const sendData = await sendResponse.json();
-      const messageId = String(sendData?.message?.id || "").trim();
-
-      if (messageId) {
-        setManualReply("");
-        setPendingImage(null);
-        await loadWorkspace(workspace.customer.id, { preserveUi: true });
-        await loadCustomers({ preserveUi: true });
-      }
 
       if (!sendResponse.ok || !sendData.ok) {
         throw new Error(sendData?.error || "消息发送失败");
       }
+
+      setManualReply("");
+      setPendingImage(null);
+
+      const messageId = String(sendData?.message?.id || "").trim();
 
       if (messageId && japaneseText) {
         void (async () => {
@@ -1045,33 +1070,9 @@ export default function Home() {
       }
     } catch (error) {
       console.error(error);
-      window.alert("发送失败，可在消息气泡上点击重发");
+      window.alert("发送失败，请看终端报错");
     } finally {
       setIsSendingManual(false);
-    }
-  }
-
-  async function handleRetryMessage(messageId: string) {
-    if (!workspace || !messageId || retryingMessageId) return;
-
-    try {
-      setRetryingMessageId(messageId);
-      const response = await fetch(`/api/messages/${messageId}/retry`, {
-        method: "POST",
-      });
-      const data = await response.json();
-
-      await loadWorkspace(workspace.customer.id, { preserveUi: true });
-      await loadCustomers({ preserveUi: true });
-
-      if (!response.ok || !data.ok) {
-        throw new Error(data?.error || "重发失败");
-      }
-    } catch (error) {
-      console.error(error);
-      window.alert("重发失败，请看终端报错");
-    } finally {
-      setRetryingMessageId("");
     }
   }
 
@@ -1117,6 +1118,7 @@ export default function Home() {
   }
 
   const contextMenuCustomer = customerContextMenu?.customer || null;
+  const overdueFollowupCount = customers.filter((customer) => customer.followup?.isOverdue && customer.followup?.state === "ACTIVE").length;
 
   return (
     <div className="h-screen bg-gray-100 flex">
@@ -1126,9 +1128,14 @@ export default function Home() {
 
           <Link
             href="/followups"
-            className="inline-flex shrink-0 items-center rounded-full border border-neutral-300 bg-white px-3 py-1 text-xs font-medium text-neutral-700 shadow-sm transition hover:bg-neutral-50"
+            className="inline-flex shrink-0 items-center gap-2 rounded-full border border-neutral-300 bg-white px-3 py-1 text-xs font-medium text-neutral-700 shadow-sm transition hover:bg-neutral-50"
           >
-            跟进列表
+            <span>跟进列表</span>
+            {overdueFollowupCount > 0 ? (
+              <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-red-500 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                {overdueFollowupCount > 99 ? "99+" : overdueFollowupCount}
+              </span>
+            ) : null}
           </Link>
         </div>
 
@@ -1171,7 +1178,7 @@ export default function Home() {
                   }`}
                 >
                   <div className="h-full flex items-center gap-3">
-                    <div className="relative h-10 w-10 shrink-0 rounded-full bg-pink-100 text-pink-700 flex items-center justify-center text-sm font-semibold">
+                    <div className={`relative h-10 w-10 shrink-0 rounded-full flex items-center justify-center text-sm font-semibold ${getAvatarTone(customer.followup?.tier)}`}>
                       {getAvatarText(customer)}
                       {customer.unreadCount > 0 ? (
                         <div className="absolute -top-1.5 -right-1.5 min-w-5 h-5 px-1 rounded-full bg-green-500 text-white text-[11px] flex items-center justify-center font-medium">
@@ -1186,6 +1193,9 @@ export default function Home() {
                           {customer.pinnedAt ? (
                             <span className="text-[12px] leading-none" title="已置顶">📌</span>
                           ) : null}
+                          {customer.followup?.isOverdue ? (
+                            <span className="h-2 w-2 shrink-0 rounded-full bg-red-500" title="跟进已到期" />
+                          ) : null}
                           <div className="truncate text-[14px] font-semibold text-gray-900">
                             {getDisplayName(customer)}
                           </div>
@@ -1199,6 +1209,11 @@ export default function Home() {
                         <div className="min-w-0 flex-1 truncate text-[12px] text-gray-500">
                           {latestPreview}
                         </div>
+                        {customer.followup ? (
+                          <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600 border border-slate-200">
+                            {getFollowupTierLabel(customer.followup.tier)}
+                          </span>
+                        ) : null}
                         {customer.isVip ? (
                           <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 border border-amber-200">
                             VIP
@@ -1219,11 +1234,31 @@ export default function Home() {
       </div>
 
       <div className="w-[46%] flex flex-col bg-gray-50">
-        <div className="p-4 border-b bg-white">
+        <div className="p-4 border-b bg-white space-y-2">
           <div className="font-bold">{getDisplayName(workspace?.customer || null)}</div>
           {workspace?.customer && getSecondaryName(workspace.customer) ? (
             <div className="text-xs text-gray-500 mt-1">
               {getSecondaryName(workspace.customer)}
+            </div>
+          ) : null}
+          {workspace?.customer?.followup ? (
+            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-[12px] text-gray-600">
+              <span className={`rounded-full px-2 py-0.5 font-medium ${workspace.customer.followup.bucket === "VIP" ? "bg-amber-50 text-amber-700 border border-amber-200" : "bg-sky-50 text-sky-700 border border-sky-200"}`}>
+                {getFollowupBucketLabel(workspace.customer.followup.bucket)}
+              </span>
+              <span className={`rounded-full px-2 py-0.5 font-medium ${workspace.customer.followup.tier === "A" ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : workspace.customer.followup.tier === "B" ? "bg-amber-50 text-amber-700 border border-amber-200" : "bg-slate-100 text-slate-700 border border-slate-200"}`}>
+                {getFollowupTierLabel(workspace.customer.followup.tier)}
+              </span>
+              <span className={workspace.customer.followup.isOverdue ? "text-red-600 font-medium" : "text-gray-600"}>
+                下次跟进：{formatFollowupTime(workspace.customer.followup.nextFollowupAt)}
+              </span>
+              <span className="truncate">原因：{workspace.customer.followup.reason}</span>
+              <Link
+                href={`/followups?customerId=${workspace.customer.id}`}
+                className="ml-auto rounded-full border border-gray-200 bg-white px-2.5 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50"
+              >
+                编辑跟进
+              </Link>
             </div>
           ) : null}
         </div>
@@ -1312,30 +1347,12 @@ export default function Home() {
                         )}
                       </div>
                       <div
-                        className={`mt-1 flex items-center gap-2 text-[11px] text-gray-400 ${
-                          msg.role === "CUSTOMER" ? "justify-start" : "justify-end"
+                        className={`mt-1 text-[11px] text-gray-400 ${
+                          msg.role === "CUSTOMER" ? "text-left" : "text-right"
                         }`}
                       >
-                        <span>{formatBubbleTime(msg.sentAt)}</span>
-                        {getDeliveryStatusMeta(msg) ? (
-                          <span className={getDeliveryStatusMeta(msg)?.className}>{getDeliveryStatusMeta(msg)?.label}</span>
-                        ) : null}
-                        {msg.role === "OPERATOR" && msg.deliveryStatus === "FAILED" ? (
-                          <button
-                            type="button"
-                            onClick={() => handleRetryMessage(msg.id)}
-                            disabled={retryingMessageId === msg.id}
-                            className="rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-600 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            {retryingMessageId === msg.id ? "重发中..." : "重发"}
-                          </button>
-                        ) : null}
+                        {formatBubbleTime(msg.sentAt)}
                       </div>
-                      {msg.role === "OPERATOR" && msg.deliveryStatus === "FAILED" && msg.sendError ? (
-                        <div className="mt-1 text-[11px] text-red-500 text-right line-clamp-2">
-                          {msg.sendError}
-                        </div>
-                      ) : null}
                     </div>
                   </div>
                 </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 type Bucket = "UNCONVERTED" | "VIP";
@@ -65,6 +66,8 @@ function formatForInput(value: string | null) {
 }
 
 export default function FollowupsPage() {
+  const searchParams = useSearchParams();
+  const requestedCustomerId = searchParams.get("customerId") || "";
   const [bucket, setBucket] = useState<Bucket>("UNCONVERTED");
   const [tier, setTier] = useState<Tier>("A");
   const [items, setItems] = useState<FollowupItem[]>([]);
@@ -88,6 +91,13 @@ export default function FollowupsPage() {
   const [editReason, setEditReason] = useState("");
   const [editNextFollowupAt, setEditNextFollowupAt] = useState("");
   const [editState, setEditState] = useState<State>("ACTIVE");
+
+  useEffect(() => {
+    if (!requestedCustomerId) return;
+    if (!items.some((item) => item.id === requestedCustomerId)) return;
+    if (selectedId === requestedCustomerId) return;
+    setSelectedId(requestedCustomerId);
+  }, [requestedCustomerId, items, selectedId]);
 
   const loadItems = useCallback(async () => {
     try {
@@ -254,8 +264,20 @@ export default function FollowupsPage() {
 
           <div className="rounded-2xl border border-gray-200 bg-white shadow-sm">
             <div className="border-b border-gray-100 px-5 py-4">
-              <div className="text-base font-semibold text-gray-900">{selectedItem ? getDisplayName(selectedItem) : "未选择顾客"}</div>
-              <div className="mt-1 text-sm text-gray-500">{selectedItem?.latestMessage?.previewText || "请从左侧选择顾客"}</div>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-base font-semibold text-gray-900">{selectedItem ? getDisplayName(selectedItem) : "未选择顾客"}</div>
+                  <div className="mt-1 text-sm text-gray-500">{selectedItem?.latestMessage?.previewText || "请从左侧选择顾客"}</div>
+                </div>
+                {selectedItem ? (
+                  <Link
+                    href={`/?customerId=${selectedItem.id}`}
+                    className="shrink-0 rounded-xl border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                  >
+                    打开聊天
+                  </Link>
+                ) : null}
+              </div>
             </div>
             {selectedItem ? (
               <div className="grid gap-4 p-5 md:grid-cols-2">

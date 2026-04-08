@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { resolveFollowupView } from "@/lib/followup-rules";
 
 function getLatestPreview(message: {
   role: "CUSTOMER" | "OPERATOR";
@@ -45,8 +46,26 @@ export async function GET() {
       return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
     });
 
+    const now = Date.now();
+
     const result = sorted.map((customer) => {
       const latestMessage = customer.messages[0] || null;
+      const tagNames = customer.tags.map((item) => item.tag.name);
+      const followup = resolveFollowupView({
+        isVip: customer.isVip,
+        stage: customer.stage,
+        unreadCount: customer.unreadCount,
+        remarkName: customer.remarkName,
+        tags: tagNames,
+        followupBucket: customer.followupBucket,
+        followupTier: customer.followupTier,
+        followupState: customer.followupState,
+        nextFollowupAt: customer.nextFollowupAt,
+        followupReason: customer.followupReason,
+        lastMessageAt: customer.lastMessageAt,
+        lastInboundMessageAt: customer.lastInboundMessageAt,
+        lastOutboundMessageAt: customer.lastOutboundMessageAt,
+      });
 
       return {
         id: customer.id,
@@ -62,6 +81,14 @@ export async function GET() {
         aiCurrentStrategy: customer.aiCurrentStrategy,
         aiLastAnalyzedAt: customer.aiLastAnalyzedAt,
         lastMessageAt: customer.lastMessageAt,
+        followup: {
+          bucket: followup.bucket,
+          tier: followup.tier,
+          state: followup.state,
+          reason: followup.reason,
+          nextFollowupAt: followup.nextFollowupAt ? followup.nextFollowupAt.toISOString() : null,
+          isOverdue: !!followup.nextFollowupAt && followup.state === "ACTIVE" && followup.nextFollowupAt.getTime() <= now,
+        },
         tags: customer.tags.map((item) => ({
           id: item.tag.id,
           name: item.tag.name,
