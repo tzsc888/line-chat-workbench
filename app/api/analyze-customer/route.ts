@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import {
+  EffectiveBucket,
+  EffectiveTier,
+  FollowupTimingKey,
+  resolveFollowupView,
+  timingKeyToNextFollowupAt,
+} from "@/lib/followup-rules";
 
 type DbMessage = {
   type: "TEXT" | "IMAGE";
@@ -33,6 +40,16 @@ function normalizeText(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function normalizeTier(value: unknown): EffectiveTier | null {
+  return value === "A" || value === "B" || value === "C" ? value : null;
+}
+
+function normalizeTimingKey(value: unknown): FollowupTimingKey | null {
+  return value === "24H" || value === "2D" || value === "5D" || value === "7D" || value === "14D" || value === "NONE"
+    ? value
+    : null;
+}
+
 function shortenForContext(text: string, max = 900) {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (normalized.length <= max) return normalized;
@@ -59,6 +76,9 @@ function formatConversation(messages: DbMessage[]) {
 type AnalyzeResult = {
   customerInfo?: string;
   currentStrategy?: string;
+  followupTier?: EffectiveTier;
+  followupReason?: string;
+  followupTimingKey?: FollowupTimingKey;
 };
 
 export async function POST(req: NextRequest) {
@@ -79,34 +99,66 @@ export async function POST(req: NextRequest) {
     const customerId = String(body.customerId || "").trim();
 
     if (!customerId) {
-      return NextResponse.json({ ok: false, error: "缺少 customerId" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "缺少 customerId" },
+        { status: 400 }
+      );
     }
 
     const customer = await prisma.customer.findUnique({
       where: { id: customerId },
       include: {
-        tags: { include: { tag: true } },
+        tags: {
+          include: {
+            tag: true,
+          },
+        },
         messages: {
-          orderBy: { sentAt: "desc" },
+          orderBy: {
+            sentAt: "desc",
+          },
           take: 80,
         },
       },
     });
 
     if (!customer) {
-      return NextResponse.json({ ok: false, error: "客户不存在" }, { status: 404 });
+      return NextResponse.json(
+        { ok: false, error: "客户不存在" },
+        { status: 404 }
+      );
     }
 
     const messages = [...(customer.messages as DbMessage[])].reverse();
-    const latestCustomerMessage = [...messages].reverse().find((msg) => msg.role === "CUSTOMER");
-    const latestOperatorMessage = [...messages].reverse().find((msg) => msg.role === "OPERATOR");
+    const latestCustomerMessage = [...messages]
+      .reverse()
+      .find((msg) => msg.role === "CUSTOMER");
+    const latestOperatorMessage = [...messages]
+      .reverse()
+      .find((msg) => msg.role === "OPERATOR");
 
     const conversationText = formatConversation(messages);
-    const tagText = customer.tags.map((item) => item.tag.name).join("、") || "无";
+    const tagNames = customer.tags.map((item) => item.tag.name);
+    const tagText = tagNames.join("、") || "无";
+    const currentFollowup = resolveFollowupView({
+      isVip: customer.isVip,
+      remarkName: customer.remarkName,
+      tags: tagNames,
+      stage: String(customer.stage),
+      unreadCount: customer.unreadCount,
+      followupBucket: customer.followupBucket as EffectiveBucket | null,
+      followupTier: customer.followupTier as EffectiveTier | null,
+      followupState: customer.followupState,
+      followupReason: customer.followupReason,
+      nextFollowupAt: customer.nextFollowupAt,
+      lastMessageAt: customer.lastMessageAt,
+      lastInboundMessageAt: customer.lastInboundMessageAt,
+      lastOutboundMessageAt: customer.lastOutboundMessageAt,
+    });
 
     const prompt = `
 你是“日本 LINE 私域玄学/灵视销售工作台”的副模型整理助手。
-你的任务不是写长文，不是写鉴定文，而是把当前这个顾客的状态，用极短的中文整理给主模型和人工看。
+你的任务不是写长文，不是写鉴定文，而是把当前这个顾客的状态，用极短的中文整理给主模型和人工看；并顺手给跟进中心一个保守、可落地的分层建议。
 
 先记住不可违反的底层规则：
 1. 你现在只处理当前这一位顾客，绝不能带入任何其他顾客的情绪、阶段、案例、语气或信息。
@@ -133,25 +185,35 @@ export async function POST(req: NextRequest) {
 - 当前最需要警惕的问题是什么：
   免费说太多 / 推太硬 / 继续白送深层判断 / 写太像客服或报告。
 
-你也要参考这些销售常识，但不要死板照抄：
-- 免费文后，顾客一旦开始追问更深层、更具体的结果/原因/动作建议，就说明不能继续免费延展，应该逐步收口到首单付费。
-- 首单后默认仍以服务型鉴定文为主，常见入口是：变化解读、下一步行动判断、节点追踪。
-- 异议常见包括：怕被骗、怕没用、预算犹豫、想白嫖、其实不急、怕后续一直加钱。
-- 分类和判断都是动态的，不要把顾客一次性判死。
+跟进中心输出要求：
+- bucket 不需要你判断，系统会自己根据 VIP 信号决定。
+- 你只需要判断：
+  1) 当前投入等级 followupTier：A / B / C
+  2) 当前简短跟进原因 followupReason：一句中文，18字内
+  3) 默认跟进档位 followupTimingKey：
+     24H / 2D / 5D / 7D / 14D / NONE
+- 规则要保守：
+  - A = 现在最值得投入
+  - B = 可以跟但不急
+  - C = 先放着
+- 时间也是默认档位，不是死规则；顾客一旦来新消息，系统会重新判断。
+- 如果当前几乎不值得主动跟，followupTimingKey 可以给 NONE。
 
 输出要求：
 1. 只输出 JSON，不要输出其他解释，不要加代码块。
 2. JSON 格式必须严格如下：
 {
   "customerInfo": "......",
-  "currentStrategy": "......"
+  "currentStrategy": "......",
+  "followupTier": "A",
+  "followupReason": "......",
+  "followupTimingKey": "24H"
 }
 3. customerInfo：1-2句中文，尽量控制在 50 个字以内。
-   要尽量包含：当前核心烦恼 / 当前情绪或关系温度 / 当前阶段 / 更像哪种购买语言。
 4. currentStrategy：1-2句中文，尽量控制在 65 个字以内。
-   要尽量包含：当前最优聊天目标 / 更适合的入口 / 推进力度 / 最要避免的动作。
-5. 不要写空话，不要写成长分析，不要写成列表。
-6. 只给“当前判断”，不要假装给终局判断。
+5. followupReason：一句短中文，18字以内。
+6. 不要写空话，不要写成长分析，不要写成列表。
+7. 只给“当前判断”，不要假装给终局判断。
 
 顾客基础信息：
 - 当前 customerId：${customer.id}
@@ -162,6 +224,11 @@ export async function POST(req: NextRequest) {
 - 当前标签：${tagText}
 - 旧的客户信息摘要：${customer.aiCustomerInfo || "无"}
 - 旧的当前思路摘要：${customer.aiCurrentStrategy || "无"}
+- 跟进中心当前默认状态：
+  - bucket：${currentFollowup.bucket}
+  - tier：${currentFollowup.tier}
+  - reason：${currentFollowup.reason}
+  - nextFollowupAt：${currentFollowup.nextFollowupAt ? currentFollowup.nextFollowupAt.toISOString() : "无"}
 - 顾客最新一句：${latestCustomerMessage?.japaneseText || "无"}
 - 我方最近一句：${latestOperatorMessage?.japaneseText || "无"}
 
@@ -196,9 +263,11 @@ ${conversationText}
       });
 
       const text = await response.text();
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status} - ${text}`);
       }
+
       return JSON.parse(text);
     }
 
@@ -207,11 +276,13 @@ ${conversationText}
 
     try {
       const data = await requestOnce(baseUrl);
-      parsed = parseModelJson<AnalyzeResult>(data?.choices?.[0]?.message?.content || "");
+      const content = data?.choices?.[0]?.message?.content || "";
+      parsed = parseModelJson<AnalyzeResult>(content);
     } catch (mainError) {
       try {
         const data = await requestOnce(backupBaseUrl);
-        parsed = parseModelJson<AnalyzeResult>(data?.choices?.[0]?.message?.content || "");
+        const content = data?.choices?.[0]?.message?.content || "";
+        parsed = parseModelJson<AnalyzeResult>(content);
         line = "主线路失败，已切到备用线路成功";
       } catch (backupError) {
         return NextResponse.json(
@@ -229,6 +300,16 @@ ${conversationText}
     const now = new Date();
     const customerInfo = normalizeText(parsed.customerInfo);
     const currentStrategy = normalizeText(parsed.currentStrategy);
+    const followupTier = normalizeTier(parsed.followupTier);
+    const followupReason = normalizeText(parsed.followupReason);
+    const followupTimingKey = normalizeTimingKey(parsed.followupTimingKey);
+
+    const nextFollowupAt =
+      followupTimingKey && followupTimingKey !== "NONE"
+        ? timingKeyToNextFollowupAt(followupTimingKey, customer.lastInboundMessageAt || customer.lastMessageAt || now)
+        : followupTimingKey === "NONE"
+        ? null
+        : currentFollowup.nextFollowupAt;
 
     await prisma.customer.update({
       where: { id: customerId },
@@ -236,19 +317,34 @@ ${conversationText}
         aiCustomerInfo: customerInfo,
         aiCurrentStrategy: currentStrategy,
         aiLastAnalyzedAt: now,
+        followupTier: followupTier || currentFollowup.tier,
+        followupReason: followupReason || currentFollowup.reason,
+        nextFollowupAt,
+        followupUpdatedAt: now,
+        followupState: currentFollowup.state === "PAUSED" ? "PAUSED" : "ACTIVE",
       },
     });
 
     return NextResponse.json({
       ok: true,
       line,
-      model,
       customerInfo,
       currentStrategy,
-      analyzedAt: now.toISOString(),
+      followup: {
+        bucket: currentFollowup.bucket,
+        tier: followupTier || currentFollowup.tier,
+        reason: followupReason || currentFollowup.reason,
+        nextFollowupAt: nextFollowupAt ? nextFollowupAt.toISOString() : null,
+      },
     });
   } catch (error) {
     console.error("POST /api/analyze-customer error:", error);
-    return NextResponse.json({ ok: false, error: String(error) }, { status: 500 });
+    return NextResponse.json(
+      {
+        ok: false,
+        error: String(error),
+      },
+      { status: 500 }
+    );
   }
 }

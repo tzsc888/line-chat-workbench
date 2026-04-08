@@ -1,6 +1,13 @@
 import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
 import { AutomationJobKind, AutomationJobStatus, MessageRole, MessageType } from "@prisma/client";
+import {
+  EffectiveBucket,
+  EffectiveTier,
+  FollowupTimingKey,
+  resolveFollowupView,
+  timingKeyToNextFollowupAt,
+} from "@/lib/followup-rules";
 
 type DbMessage = {
   id: string;
@@ -23,6 +30,9 @@ type HelperResult = {
   currentStrategy?: string;
   shouldGenerateReplies?: boolean;
   autoReason?: string;
+  followupTier?: EffectiveTier;
+  followupReason?: string;
+  followupTimingKey?: FollowupTimingKey;
 };
 
 const OPERATOR_PRESENCE_ID = "PRIMARY";
@@ -52,6 +62,16 @@ function parseModelJson<T>(content: string) {
 
 function normalizeText(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeTier(value: unknown): EffectiveTier | null {
+  return value === "A" || value === "B" || value === "C" ? value : null;
+}
+
+function normalizeTimingKey(value: unknown): FollowupTimingKey | null {
+  return value === "24H" || value === "2D" || value === "5D" || value === "7D" || value === "14D" || value === "NONE"
+    ? value
+    : null;
 }
 
 function shortenForContext(text: string, max = 700) {
@@ -105,22 +125,10 @@ function collectPendingCustomerBurst(messagesAsc: DbMessage[], targetMessageId: 
 
   for (let i = messagesAsc.length - 1; i >= 0; i -= 1) {
     const msg = messagesAsc[i];
-    if (msg.role !== "CUSTOMER") {
-      break;
-    }
-    if (msg.type !== "TEXT") {
-      break;
-    }
-
+    if (msg.role !== "CUSTOMER") break;
+    if (msg.type !== "TEXT") break;
     pending.unshift(msg);
-
-    if (msg.id === targetMessageId) {
-      continue;
-    }
-
-    if (pending.length >= 6) {
-      break;
-    }
+    if (msg.id !== targetMessageId && pending.length >= 6) break;
   }
 
   return pending;
@@ -135,6 +143,12 @@ async function runHelperBatch(options: {
     isVip: boolean;
     aiCustomerInfo: string | null;
     aiCurrentStrategy: string | null;
+    unreadCount: number;
+    followupBucket: EffectiveBucket;
+    followupTier: EffectiveTier;
+    followupReason: string;
+    nextFollowupAt: Date | null;
+    tags: string[];
   };
   conversation: DbMessage[];
   pendingBurst: DbMessage[];
@@ -155,39 +169,49 @@ async function runHelperBatch(options: {
 
   const prompt = `
 你是日本 LINE 私域玄学销售工作台的副模型总控助手。
-你的任务是：对“当前这一个顾客”的最新一波入站消息，一次性做四件事：
+你的任务是：对“当前这一个顾客”的最新一波入站消息，一次性做五件事：
 1. 给 pending 消息做日中翻译；
 2. 用极短中文更新客户信息摘要；
 3. 用极短中文更新当前思路摘要；
-4. 保守判断：这一波消息是否值得自动触发主模型生成建议回复。
+4. 保守判断：这一波消息是否值得自动触发主模型生成建议回复；
+5. 顺手给跟进中心输出：A/B/C、跟进原因、默认跟进档位。
 
 不可违反的规则：
-- 你只处理当前这一位顾客，绝不能带入其他顾客的信息、情绪、阶段、案例。
+- 你只处理当前这一位顾客，绝不能带入任何其他顾客的信息、情绪、阶段、案例。
 - 你不能写长篇鉴定文。
 - 平台 AI 的职责是 LINE 短聊承接、推进成交、处理异议。
 - 默认要保守：没有明显销售价值时，不要建议自动触发主模型。
-- 但以下场景允许你判断为值得自动触发：
-  1) 顾客对免费/首单/后续长文后的第一波实质反馈；
-  2) 顾客开始明显追问更深层结果、原因、下一步；
-  3) 顾客有明显异议（怕被骗、怕没用、预算犹豫、想白嫖、其实不急、怕后续一直加钱）；
-  4) 顾客出现新变化、新节点、明确行动问题。
 - 如果消息只是谢谢、收到、嗯嗯、轻礼貌回应、没有新信息量，shouldGenerateReplies 必须偏 false。
+- 跟进中心的 bucket 不需要你判断，系统会自己根据 VIP 信号决定。
+- A/B/C 是“当前投入等级”，不是永久身份；判断要保守、要动态。
+- followupTimingKey 只是默认档位，不是终局时间。可选：24H / 2D / 5D / 7D / 14D / NONE
 
-请输出严格 JSON：
+自动触发主模型建议的典型场景：
+1) 顾客对免费/首单/后续长文后的第一波实质反馈；
+2) 顾客开始明显追问更深层结果、原因、下一步；
+3) 顾客有明显异议（怕被骗、怕没用、预算犹豫、想白嫖、其实不急、怕后续一直加钱）；
+4) 顾客出现新变化、新节点、明确行动问题。
+
+输出严格 JSON：
 {
   "translations": [{"messageId":"...","chinese":"..."}],
   "customerInfo": "...",
   "currentStrategy": "...",
   "shouldGenerateReplies": true,
-  "autoReason": "..."
+  "autoReason": "...",
+  "followupTier": "A",
+  "followupReason": "...",
+  "followupTimingKey": "24H"
 }
 
 字段要求：
 - translations：只翻译本次 pending 消息，逐条对应 messageId。
-- customerInfo：1-2句中文，50字内，写当前核心烦恼、情绪/关系温度、当前大致阶段。
-- currentStrategy：1-2句中文，65字内，写当前最优聊天目标、当前更适合的入口、推进力度。
+- customerInfo：1-2句中文，50字内。
+- currentStrategy：1-2句中文，65字内。
 - shouldGenerateReplies：布尔值，务必保守。
 - autoReason：一句短中文，说明为什么需要或不需要自动触发。
+- followupReason：一句短中文，18字内。
+- 只输出 JSON，不要其他解释。
 
 当前顾客：
 - customerId：${options.customer.id}
@@ -195,8 +219,14 @@ async function runHelperBatch(options: {
 - 原始昵称：${options.customer.originalName}
 - 系统阶段：${options.customer.stage}
 - 是否 VIP：${options.customer.isVip ? "是" : "否"}
+- 当前标签：${options.customer.tags.join("、") || "无"}
 - 旧客户信息摘要：${options.customer.aiCustomerInfo || "无"}
 - 旧当前思路摘要：${options.customer.aiCurrentStrategy || "无"}
+- 当前跟进中心默认状态：
+  - bucket：${options.customer.followupBucket}
+  - tier：${options.customer.followupTier}
+  - reason：${options.customer.followupReason}
+  - nextFollowupAt：${options.customer.nextFollowupAt ? options.customer.nextFollowupAt.toISOString() : "无"}
 
 这次需要处理的 pending 消息：
 ${pendingText}
@@ -243,7 +273,7 @@ ${conversationText}
   try {
     const data = await requestOnce(baseUrl);
     return parseModelJson<HelperResult>(data?.choices?.[0]?.message?.content || "");
-  } catch (mainError) {
+  } catch {
     const data = await requestOnce(backupBaseUrl);
     return parseModelJson<HelperResult>(data?.choices?.[0]?.message?.content || "");
   }
@@ -328,6 +358,9 @@ export async function runInboundAutomation(options: {
     const customer = await prisma.customer.findUnique({
       where: { id: customerId },
       include: {
+        tags: {
+          include: { tag: true },
+        },
         messages: {
           orderBy: {
             sentAt: "desc",
@@ -371,6 +404,23 @@ export async function runInboundAutomation(options: {
       return;
     }
 
+    const tagNames = customer.tags.map((item) => item.tag.name);
+    const followupCurrent = resolveFollowupView({
+      isVip: customer.isVip,
+      remarkName: customer.remarkName,
+      tags: tagNames,
+      stage: String(customer.stage),
+      unreadCount: customer.unreadCount,
+      followupBucket: customer.followupBucket as EffectiveBucket | null,
+      followupTier: customer.followupTier as EffectiveTier | null,
+      followupState: customer.followupState,
+      followupReason: customer.followupReason,
+      nextFollowupAt: customer.nextFollowupAt,
+      lastMessageAt: customer.lastMessageAt,
+      lastInboundMessageAt: customer.lastInboundMessageAt,
+      lastOutboundMessageAt: customer.lastOutboundMessageAt,
+    });
+
     const pendingBurst = collectPendingCustomerBurst(messagesAsc, targetMessageId).filter(
       (msg) => !msg.chineseText
     );
@@ -388,6 +438,12 @@ export async function runInboundAutomation(options: {
         isVip: customer.isVip,
         aiCustomerInfo: customer.aiCustomerInfo,
         aiCurrentStrategy: customer.aiCurrentStrategy,
+        unreadCount: customer.unreadCount,
+        followupBucket: followupCurrent.bucket,
+        followupTier: followupCurrent.tier,
+        followupReason: followupCurrent.reason,
+        nextFollowupAt: followupCurrent.nextFollowupAt,
+        tags: tagNames,
       },
       conversation: messagesAsc,
       pendingBurst,
@@ -412,12 +468,27 @@ export async function runInboundAutomation(options: {
       });
     }
 
+    const followupTier = normalizeTier(helper.followupTier) || followupCurrent.tier;
+    const followupReason = normalizeText(helper.followupReason) || followupCurrent.reason;
+    const followupTimingKey = normalizeTimingKey(helper.followupTimingKey);
+    const nextFollowupAt =
+      followupTimingKey && followupTimingKey !== "NONE"
+        ? timingKeyToNextFollowupAt(followupTimingKey, customer.lastInboundMessageAt || customer.lastMessageAt || new Date())
+        : followupTimingKey === "NONE"
+        ? null
+        : followupCurrent.nextFollowupAt;
+
     await prisma.customer.update({
       where: { id: customerId },
       data: {
         aiCustomerInfo: normalizeText(helper.customerInfo) || customer.aiCustomerInfo,
         aiCurrentStrategy: normalizeText(helper.currentStrategy) || customer.aiCurrentStrategy,
         aiLastAnalyzedAt: new Date(),
+        followupTier,
+        followupReason,
+        nextFollowupAt,
+        followupUpdatedAt: new Date(),
+        followupState: customer.followupState === "PAUSED" ? "PAUSED" : "ACTIVE",
       },
     });
 
