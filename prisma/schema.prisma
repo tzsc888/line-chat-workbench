@@ -50,6 +50,22 @@ enum AutomationJobStatus {
   SKIPPED
   FAILED
 }
+enum FollowupBucket {
+  UNCONVERTED
+  VIP
+}
+
+enum FollowupTier {
+  A
+  B
+  C
+}
+
+enum FollowupState {
+  ACTIVE
+  DONE
+  PAUSED
+}
 
 model Customer {
   id                     String        @id @default(cuid())
@@ -61,6 +77,14 @@ model Customer {
   isVip                  Boolean       @default(false)
   pinnedAt               DateTime?
   unreadCount            Int           @default(0)
+
+  followupBucket         FollowupBucket?
+  followupTier           FollowupTier?
+  followupState          FollowupState @default(ACTIVE)
+  nextFollowupAt         DateTime?
+  followupReason         String?
+  lastFollowupHandledAt  DateTime?
+  followupUpdatedAt      DateTime?
 
   aiCustomerInfo         String?
   aiCurrentStrategy      String?
@@ -84,6 +108,8 @@ model Customer {
   @@index([originalName])
   @@index([remarkName])
   @@index([pinnedAt(sort: Desc)])
+  @@index([followupBucket, followupTier])
+  @@index([nextFollowupAt(sort: Asc)])
 }
 
 model Tag {

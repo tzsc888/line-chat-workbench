@@ -1,6 +1,7 @@
 "use client";
 
 import * as Ably from "ably";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 
 type CustomerListItem = {
@@ -1064,7 +1065,16 @@ export default function Home() {
   return (
     <div className="h-screen bg-gray-100 flex">
       <div className="w-[24%] bg-gray-50 border-r border-gray-200 p-4 overflow-y-auto">
-        <h2 className="text-lg font-bold mb-3">顾客列表</h2>
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h2 className="text-lg font-bold">顾客列表</h2>
+
+          <Link
+            href="/followups"
+            className="inline-flex shrink-0 items-center rounded-full border border-neutral-300 bg-white px-3 py-1 text-xs font-medium text-neutral-700 shadow-sm transition hover:bg-neutral-50"
+          >
+            跟进列表
+          </Link>
+        </div>
 
         <input
           type="text"
