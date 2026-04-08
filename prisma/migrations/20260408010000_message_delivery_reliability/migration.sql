@@ -1,0 +1,13 @@
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'MessageSendStatus') THEN
+    CREATE TYPE "MessageSendStatus" AS ENUM ('PENDING', 'SENT', 'FAILED');
+  END IF;
+END $$;
+
+ALTER TABLE "Message"
+  ADD COLUMN IF NOT EXISTS "deliveryStatus" "MessageSendStatus",
+  ADD COLUMN IF NOT EXISTS "sendError" TEXT,
+  ADD COLUMN IF NOT EXISTS "lastAttemptAt" TIMESTAMP(3),
+  ADD COLUMN IF NOT EXISTS "failedAt" TIMESTAMP(3),
+  ADD COLUMN IF NOT EXISTS "retryCount" INTEGER NOT NULL DEFAULT 0;

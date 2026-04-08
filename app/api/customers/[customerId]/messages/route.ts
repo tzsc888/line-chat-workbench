@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
-import { MessageRole, MessageSource, MessageType, SuggestionVariant } from "@prisma/client";
+import {
+  MessageRole,
+  MessageSource,
+  MessageType,
+  MessageSendStatus,
+  SuggestionVariant,
+} from "@prisma/client";
 
 type Props = {
   params: Promise<{ customerId: string }>;
@@ -30,6 +36,31 @@ async function pushLineMessages(to: string, messages: unknown[]) {
   if (!response.ok) {
     throw new Error(`LINE push 失败: HTTP ${response.status} - ${textBody}`);
   }
+}
+
+function buildLineMessages(params: { type: MessageType; japaneseText: string; imageUrl?: string | null }) {
+  const messages: any[] = [];
+
+  if (params.type === MessageType.TEXT) {
+    messages.push({ type: "text", text: params.japaneseText });
+    return messages;
+  }
+
+  if (!params.imageUrl) {
+    throw new Error("图片消息缺少 imageUrl");
+  }
+
+  messages.push({
+    type: "image",
+    originalContentUrl: params.imageUrl,
+    previewImageUrl: params.imageUrl,
+  });
+
+  if (params.japaneseText) {
+    messages.push({ type: "text", text: params.japaneseText });
+  }
+
+  return messages;
 }
 
 export async function GET(_: Request, { params }: Props) {
@@ -86,24 +117,7 @@ export async function POST(req: Request, { params }: Props) {
       return NextResponse.json({ ok: false, error: "当前客户没有 LINE userId，无法发送" }, { status: 400 });
     }
 
-    const lineMessages: any[] = [];
-
-    if (type === MessageType.TEXT) {
-      lineMessages.push({ type: "text", text: japaneseText });
-    } else {
-      lineMessages.push({
-        type: "image",
-        originalContentUrl: imageUrl,
-        previewImageUrl: imageUrl,
-      });
-
-      if (japaneseText) {
-        lineMessages.push({ type: "text", text: japaneseText });
-      }
-    }
-
     const now = new Date();
-    await pushLineMessages(customer.lineUserId, lineMessages);
 
     const message = await prisma.message.create({
       data: {
@@ -115,6 +129,8 @@ export async function POST(req: Request, { params }: Props) {
         chineseText,
         imageUrl: type === MessageType.IMAGE ? imageUrl : null,
         sentAt: now,
+        deliveryStatus: MessageSendStatus.PENDING,
+        lastAttemptAt: now,
       },
     });
 
@@ -126,26 +142,69 @@ export async function POST(req: Request, { params }: Props) {
       },
     });
 
-    if (source === MessageSource.AI_SUGGESTION && replyDraftSetId && suggestionVariant) {
-      await prisma.replyDraftSet.updateMany({
-        where: {
-          id: replyDraftSetId,
-          customerId,
-        },
+    try {
+      const lineMessages = buildLineMessages({
+        type,
+        japaneseText,
+        imageUrl: type === MessageType.IMAGE ? imageUrl : null,
+      });
+
+      await pushLineMessages(customer.lineUserId, lineMessages);
+
+      const sentMessage = await prisma.message.update({
+        where: { id: message.id },
         data: {
-          selectedVariant: suggestionVariant,
-          selectedAt: now,
+          deliveryStatus: MessageSendStatus.SENT,
+          sendError: null,
+          failedAt: null,
         },
       });
-    }
 
-    try {
-      await publishRealtimeRefresh({ customerId, reason: "outbound-message" });
+      if (source === MessageSource.AI_SUGGESTION && replyDraftSetId && suggestionVariant) {
+        await prisma.replyDraftSet.updateMany({
+          where: {
+            id: replyDraftSetId,
+            customerId,
+          },
+          data: {
+            selectedVariant: suggestionVariant,
+            selectedAt: now,
+          },
+        });
+      }
+
+      try {
+        await publishRealtimeRefresh({ customerId, reason: "outbound-message" });
+      } catch (error) {
+        console.error("Ably publish outbound-message error:", error);
+      }
+
+      return NextResponse.json({ ok: true, message: sentMessage });
     } catch (error) {
-      console.error("Ably publish outbound-message error:", error);
-    }
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const failedAt = new Date();
 
-    return NextResponse.json({ ok: true, message });
+      const failedMessage = await prisma.message.update({
+        where: { id: message.id },
+        data: {
+          deliveryStatus: MessageSendStatus.FAILED,
+          sendError: errorMessage,
+          failedAt,
+          lastAttemptAt: failedAt,
+        },
+      });
+
+      try {
+        await publishRealtimeRefresh({ customerId, reason: "outbound-message-failed" });
+      } catch (ablyError) {
+        console.error("Ably publish outbound-message-failed error:", ablyError);
+      }
+
+      return NextResponse.json(
+        { ok: false, error: errorMessage, message: failedMessage },
+        { status: 502 }
+      );
+    }
   } catch (error) {
     console.error("POST /api/customers/[customerId]/messages error:", error);
     return NextResponse.json({ ok: false, error: String(error) }, { status: 500 });

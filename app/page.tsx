@@ -45,6 +45,11 @@ type WorkspaceMessage = {
   japaneseText: string;
   chineseText: string | null;
   imageUrl: string | null;
+  deliveryStatus: "PENDING" | "SENT" | "FAILED" | null;
+  sendError: string | null;
+  lastAttemptAt: string | null;
+  failedAt: string | null;
+  retryCount: number;
   sentAt: string;
   createdAt: string;
   updatedAt: string;
@@ -177,6 +182,23 @@ function formatBubbleTime(dateString: string) {
   });
 }
 
+function getDeliveryStatusMeta(message: WorkspaceMessage) {
+  if (message.role !== "OPERATOR") {
+    return null;
+  }
+
+  switch (message.deliveryStatus) {
+    case "FAILED":
+      return { label: "发送失败", className: "text-red-500" };
+    case "PENDING":
+      return { label: "发送中", className: "text-amber-500" };
+    case "SENT":
+      return { label: "已发送", className: "text-gray-400" };
+    default:
+      return null;
+  }
+}
+
 function formatDividerTime(dateString: string) {
   const date = new Date(dateString);
   const now = new Date();
@@ -234,6 +256,7 @@ export default function Home() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSendingManual, setIsSendingManual] = useState(false);
+  const [retryingMessageId, setRetryingMessageId] = useState("");
   const [isSendingAi, setIsSendingAi] = useState<"stable" | "advancing" | "">("");
 
   const [pageError, setPageError] = useState("");
@@ -433,7 +456,7 @@ export default function Home() {
         throw new Error(data?.error || "更新顾客信息失败");
       }
 
-      await loadCustomers({ silent: true });
+      await loadCustomers({ preserveUi: true });
       if (selectedCustomerIdRef.current === customerId) {
         await loadWorkspace(customerId, { preserveUi: true });
       }
@@ -552,7 +575,7 @@ export default function Home() {
           message && typeof message === "object" ? message.data || {} : {};
         const activeCustomerId = selectedCustomerIdRef.current;
 
-        loadCustomers({ silent: true });
+        loadCustomers({ preserveUi: true });
 
         if (
           activeCustomerId &&
@@ -760,13 +783,19 @@ export default function Home() {
       const data = await response.json();
 
       if (!response.ok || !data.ok) {
+        if (data?.message?.id) {
+          await loadWorkspace(workspace.customer.id, { preserveUi: true });
+          await loadCustomers({ preserveUi: true });
+        }
         throw new Error(data?.error || "发送失败");
       }
 
       setCustomReply(null);
+      await loadWorkspace(workspace.customer.id, { preserveUi: true });
+      await loadCustomers({ preserveUi: true });
     } catch (error) {
       console.error(error);
-      window.alert("AI 建议发送失败，请看终端报错");
+      window.alert("AI 建议发送失败，可在消息气泡上点击重发");
     } finally {
       setIsSendingAi("");
     }
@@ -964,15 +993,18 @@ export default function Home() {
       );
 
       const sendData = await sendResponse.json();
+      const messageId = String(sendData?.message?.id || "").trim();
+
+      if (messageId) {
+        setManualReply("");
+        setPendingImage(null);
+        await loadWorkspace(workspace.customer.id, { preserveUi: true });
+        await loadCustomers({ preserveUi: true });
+      }
 
       if (!sendResponse.ok || !sendData.ok) {
         throw new Error(sendData?.error || "消息发送失败");
       }
-
-      setManualReply("");
-      setPendingImage(null);
-
-      const messageId = String(sendData?.message?.id || "").trim();
 
       if (messageId && japaneseText) {
         void (async () => {
@@ -1013,9 +1045,33 @@ export default function Home() {
       }
     } catch (error) {
       console.error(error);
-      window.alert("发送失败，请看终端报错");
+      window.alert("发送失败，可在消息气泡上点击重发");
     } finally {
       setIsSendingManual(false);
+    }
+  }
+
+  async function handleRetryMessage(messageId: string) {
+    if (!workspace || !messageId || retryingMessageId) return;
+
+    try {
+      setRetryingMessageId(messageId);
+      const response = await fetch(`/api/messages/${messageId}/retry`, {
+        method: "POST",
+      });
+      const data = await response.json();
+
+      await loadWorkspace(workspace.customer.id, { preserveUi: true });
+      await loadCustomers({ preserveUi: true });
+
+      if (!response.ok || !data.ok) {
+        throw new Error(data?.error || "重发失败");
+      }
+    } catch (error) {
+      console.error(error);
+      window.alert("重发失败，请看终端报错");
+    } finally {
+      setRetryingMessageId("");
     }
   }
 
@@ -1256,12 +1312,30 @@ export default function Home() {
                         )}
                       </div>
                       <div
-                        className={`mt-1 text-[11px] text-gray-400 ${
-                          msg.role === "CUSTOMER" ? "text-left" : "text-right"
+                        className={`mt-1 flex items-center gap-2 text-[11px] text-gray-400 ${
+                          msg.role === "CUSTOMER" ? "justify-start" : "justify-end"
                         }`}
                       >
-                        {formatBubbleTime(msg.sentAt)}
+                        <span>{formatBubbleTime(msg.sentAt)}</span>
+                        {getDeliveryStatusMeta(msg) ? (
+                          <span className={getDeliveryStatusMeta(msg)?.className}>{getDeliveryStatusMeta(msg)?.label}</span>
+                        ) : null}
+                        {msg.role === "OPERATOR" && msg.deliveryStatus === "FAILED" ? (
+                          <button
+                            type="button"
+                            onClick={() => handleRetryMessage(msg.id)}
+                            disabled={retryingMessageId === msg.id}
+                            className="rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-600 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {retryingMessageId === msg.id ? "重发中..." : "重发"}
+                          </button>
+                        ) : null}
                       </div>
+                      {msg.role === "OPERATOR" && msg.deliveryStatus === "FAILED" && msg.sendError ? (
+                        <div className="mt-1 text-[11px] text-red-500 text-right line-clamp-2">
+                          {msg.sendError}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 </div>
