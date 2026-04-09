@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import crypto from "crypto";
 import { put } from "@vercel/blob";
+import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
 import { runInboundAutomation } from "@/lib/inbound-automation";
 
@@ -85,6 +86,60 @@ async function uploadInboundImageToBlob(params: {
   return blob.url;
 }
 
+async function markCustomerRelationshipStatus(lineUserId: string, status: "ACTIVE" | "UNFOLLOWED", options?: {
+  originalName?: string;
+  avatarUrl?: string;
+  refollowed?: boolean;
+}) {
+  const now = new Date();
+
+  const existing = await prisma.customer.findUnique({
+    where: { lineUserId },
+    select: { id: true },
+  });
+
+  if (existing) {
+    await prisma.customer.update({
+      where: { id: existing.id },
+      data: {
+        lineRelationshipStatus: status,
+        lineRelationshipUpdatedAt: now,
+        lineRefollowedAt: options?.refollowed ? now : null,
+        originalName: options?.originalName || undefined,
+        avatarUrl: options?.avatarUrl || undefined,
+      },
+    });
+
+    try {
+      await publishRealtimeRefresh({ customerId: existing.id, reason: status === "UNFOLLOWED" ? "line-unfollow" : "line-follow" });
+    } catch (error) {
+      console.error("Ably publish relationship status error:", error);
+    }
+
+    return;
+  }
+
+  if (status === "ACTIVE") {
+    const created = await prisma.customer.create({
+      data: {
+        lineUserId,
+        originalName: options?.originalName || lineUserId,
+        avatarUrl: options?.avatarUrl || null,
+        lineRelationshipStatus: "ACTIVE",
+        lineRelationshipUpdatedAt: now,
+        lineRefollowedAt: options?.refollowed ? now : null,
+      },
+      select: { id: true },
+    });
+
+    try {
+      await publishRealtimeRefresh({ customerId: created.id, reason: "line-follow" });
+    } catch (error) {
+      console.error("Ably publish relationship status error:", error);
+    }
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const channelSecret = process.env.LINE_CHANNEL_SECRET;
@@ -105,15 +160,36 @@ export async function POST(req: NextRequest) {
     const internalBaseUrl = process.env.INTERNAL_APP_BASE_URL || "http://127.0.0.1:3000";
 
     for (const event of events) {
-      if (event.type !== "message") continue;
       if (event.source?.type !== "user") continue;
+
+      const userId = String(event.source.userId || "").trim();
+      if (!userId) continue;
+
+      if (event.type === "unfollow") {
+        await markCustomerRelationshipStatus(userId, "UNFOLLOWED");
+        continue;
+      }
+
+      if (event.type === "follow") {
+        const profile = await getLineProfile(userId);
+        await markCustomerRelationshipStatus(userId, "ACTIVE", {
+          originalName:
+            typeof profile?.displayName === "string" && profile.displayName.trim()
+              ? profile.displayName.trim()
+              : userId,
+          avatarUrl: typeof profile?.pictureUrl === "string" ? profile.pictureUrl : "",
+          refollowed: true,
+        });
+        continue;
+      }
+
+      if (event.type !== "message") continue;
 
       const lineType = String(event.message?.type || "").trim();
       if (!["text", "image", "sticker"].includes(lineType)) continue;
 
-      const userId = String(event.source.userId || "").trim();
       const lineMessageId = String(event.message?.id || "").trim();
-      if (!userId || !lineMessageId) continue;
+      if (!lineMessageId) continue;
 
       const profile = await getLineProfile(userId);
       const originalName =

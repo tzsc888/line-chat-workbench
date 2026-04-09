@@ -34,13 +34,6 @@ enum MessageSource {
   AI_SUGGESTION
 }
 
-
-enum MessageSendStatus {
-  PENDING
-  SENT
-  FAILED
-}
-
 enum SuggestionVariant {
   STABLE
   ADVANCING
@@ -74,6 +67,11 @@ enum FollowupState {
   PAUSED
 }
 
+enum LineRelationshipStatus {
+  ACTIVE
+  UNFOLLOWED
+}
+
 model Customer {
   id                     String        @id @default(cuid())
   lineUserId             String?       @unique
@@ -84,6 +82,9 @@ model Customer {
   isVip                  Boolean       @default(false)
   pinnedAt               DateTime?
   unreadCount            Int           @default(0)
+  lineRelationshipStatus LineRelationshipStatus @default(ACTIVE)
+  lineRelationshipUpdatedAt DateTime?
+  lineRefollowedAt       DateTime?
 
   followupBucket         FollowupBucket?
   followupTier           FollowupTier?
@@ -115,6 +116,7 @@ model Customer {
   @@index([originalName])
   @@index([remarkName])
   @@index([pinnedAt(sort: Desc)])
+  @@index([lineRelationshipStatus])
   @@index([followupBucket, followupTier])
   @@index([nextFollowupAt(sort: Asc)])
 }
@@ -155,12 +157,6 @@ model Message {
   japaneseText    String
   chineseText     String?
   imageUrl        String?
-
-  deliveryStatus  MessageSendStatus?
-  sendError       String?
-  lastAttemptAt   DateTime?
-  failedAt        DateTime?
-  retryCount      Int           @default(0)
 
   sentAt          DateTime      @default(now())
   createdAt       DateTime      @default(now())

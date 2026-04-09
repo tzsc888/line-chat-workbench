@@ -24,6 +24,8 @@ type CustomerListItem = {
   isVip: boolean;
   pinnedAt: string | null;
   unreadCount: number;
+  lineRelationshipStatus: "ACTIVE" | "UNFOLLOWED";
+  lineRefollowedAt: string | null;
   aiCustomerInfo: string | null;
   aiCurrentStrategy: string | null;
   aiLastAnalyzedAt: string | null;
@@ -93,6 +95,8 @@ type WorkspaceData = {
     isVip: boolean;
     pinnedAt: string | null;
     unreadCount: number;
+    lineRelationshipStatus: "ACTIVE" | "UNFOLLOWED";
+    lineRefollowedAt: string | null;
     aiCustomerInfo: string | null;
     aiCurrentStrategy: string | null;
     aiLastAnalyzedAt: string | null;
@@ -180,6 +184,20 @@ function formatFollowupTime(dateString: string | null) {
     minute: "2-digit",
     hour12: false,
   });
+}
+
+function shouldShowRefollowNotice(dateString: string | null, status?: "ACTIVE" | "UNFOLLOWED") {
+  if (status !== "ACTIVE" || !dateString) return false;
+  const time = new Date(dateString).getTime();
+  if (!Number.isFinite(time)) return false;
+  return Date.now() - time < 1000 * 60 * 60 * 24 * 3;
+}
+
+function getRelationshipBadge(status?: "ACTIVE" | "UNFOLLOWED") {
+  if (status === "UNFOLLOWED") {
+    return { text: "已取消关注", className: "bg-rose-50 text-rose-700 border border-rose-200" };
+  }
+  return null;
 }
 
 function getSecondaryName(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null | undefined) {
@@ -377,10 +395,6 @@ export default function Home() {
   const audioEnabledRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastIncomingSoundAtRef = useRef(0);
-  const customersAbortRef = useRef<AbortController | null>(null);
-  const workspaceAbortRef = useRef<AbortController | null>(null);
-  const customersRequestIdRef = useRef(0);
-  const workspaceRequestIdRef = useRef(0);
 
   const loadPresetSnippets = useCallback(async () => {
     try {
@@ -402,11 +416,6 @@ export default function Home() {
   }, []);
 
   const loadCustomers = useCallback(async (options?: { silent?: boolean }) => {
-    const requestId = ++customersRequestIdRef.current;
-    customersAbortRef.current?.abort();
-    const controller = new AbortController();
-    customersAbortRef.current = controller;
-
     try {
       if (!options?.silent) {
         setIsListLoading(true);
@@ -416,17 +425,12 @@ export default function Home() {
 
       const response = await fetch("/api/customers", {
         cache: "no-store",
-        signal: controller.signal,
       });
 
       const data = await response.json();
 
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "读取顾客列表失败");
-      }
-
-      if (controller.signal.aborted || requestId !== customersRequestIdRef.current) {
-        return;
       }
 
       const list: CustomerListItem[] = data.customers || [];
@@ -437,14 +441,10 @@ export default function Home() {
         return "";
       });
     } catch (error) {
-      if (controller.signal.aborted) return;
       console.error(error);
       setPageError(String(error));
     } finally {
-      if (customersAbortRef.current === controller) {
-        customersAbortRef.current = null;
-      }
-      if (!options?.silent && requestId === customersRequestIdRef.current) {
+      if (!options?.silent) {
         setIsListLoading(false);
       }
     }
@@ -473,16 +473,10 @@ export default function Home() {
 
   const loadWorkspace = useCallback(
     async (customerId: string, options?: { preserveUi?: boolean }) => {
-      workspaceAbortRef.current?.abort();
-
       if (!customerId) {
         setWorkspace(null);
         return;
       }
-
-      const requestId = ++workspaceRequestIdRef.current;
-      const controller = new AbortController();
-      workspaceAbortRef.current = controller;
 
       const preserveUi = !!options?.preserveUi;
       const container = chatScrollRef.current;
@@ -513,17 +507,12 @@ export default function Home() {
 
         const response = await fetch(`/api/customers/${customerId}/workspace`, {
           cache: "no-store",
-          signal: controller.signal,
         });
 
         const data = await response.json();
 
         if (!response.ok || !data.ok) {
           throw new Error(data?.error || "读取顾客工作台失败");
-        }
-
-        if (controller.signal.aborted || requestId !== workspaceRequestIdRef.current) {
-          return;
         }
 
         const nextWorkspace: WorkspaceData | null = data.workspace || null;
@@ -559,17 +548,13 @@ export default function Home() {
           });
         }
       } catch (error) {
-        if (controller.signal.aborted) return;
         console.error(error);
         if (!preserveUi) {
           setWorkspace(null);
           setPageError(String(error));
         }
       } finally {
-        if (workspaceAbortRef.current === controller) {
-          workspaceAbortRef.current = null;
-        }
-        if (!preserveUi && requestId === workspaceRequestIdRef.current) {
+        if (!preserveUi) {
           setIsWorkspaceLoading(false);
         }
         isSilentRefreshingRef.current = false;
@@ -709,11 +694,46 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    return () => {
-      customersAbortRef.current?.abort();
-      workspaceAbortRef.current?.abort();
+    let timer: number | null = null;
+
+    const pingPresence = async () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        return;
+      }
+
+      try {
+        await fetch("/api/operator-presence", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            selectedCustomerId: selectedCustomerIdRef.current || null,
+          }),
+        });
+      } catch (error) {
+        console.error("operator presence ping error:", error);
+      }
     };
-  }, []);
+
+    void pingPresence();
+    timer = window.setInterval(() => {
+      void pingPresence();
+    }, 15000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void pingPresence();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      if (timer) window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [selectedCustomerId]);
 
   useEffect(() => {
     const client = new Ably.Realtime({
@@ -1239,7 +1259,7 @@ export default function Home() {
       const data = await response.json();
 
       await loadWorkspace(workspace.customer.id, { preserveUi: true });
-      await loadCustomers({ silent: true });
+      await loadCustomers({ preserveUi: true });
 
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "重发失败");
@@ -1413,6 +1433,11 @@ export default function Home() {
                             VIP
                           </span>
                         ) : null}
+                        {getRelationshipBadge(customer.lineRelationshipStatus) ? (
+                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${getRelationshipBadge(customer.lineRelationshipStatus)?.className}`}>
+                            {getRelationshipBadge(customer.lineRelationshipStatus)?.text}
+                          </span>
+                        ) : null}
                       </div>
                     </div>
                   </div>
@@ -1433,6 +1458,15 @@ export default function Home() {
           {workspace?.customer && getSecondaryName(workspace.customer) ? (
             <div className="text-xs text-gray-500 mt-1">
               {getSecondaryName(workspace.customer)}
+            </div>
+          ) : null}
+          {workspace?.customer?.lineRelationshipStatus === "UNFOLLOWED" ? (
+            <div className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[12px] font-medium text-rose-700">
+              顾客已取消关注
+            </div>
+          ) : workspace?.customer && shouldShowRefollowNotice(workspace.customer.lineRefollowedAt, workspace.customer.lineRelationshipStatus) ? (
+            <div className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[12px] font-medium text-emerald-700">
+              顾客重新加为好友
             </div>
           ) : null}
           {workspace?.customer?.followup ? (
