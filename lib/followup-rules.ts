@@ -9,6 +9,8 @@ type FollowupRuleCustomer = {
   unreadCount?: number;
   remarkName?: string | null;
   tags?: string[];
+  lineRelationshipStatus?: string | null;
+  lineRefollowedAt?: Date | null;
   followupBucket?: EffectiveBucket | null;
   followupTier?: EffectiveTier | null;
   followupState?: EffectiveState | null;
@@ -47,6 +49,9 @@ export function deriveDefaultTier(customer: FollowupRuleCustomer): EffectiveTier
   const bucket = deriveEffectiveBucket(customer);
   const stage = String(customer.stage || "");
   const unread = Number(customer.unreadCount || 0);
+  const relationship = String(customer.lineRelationshipStatus || "ACTIVE");
+
+  if (relationship === "UNFOLLOWED") return "C";
 
   if (bucket === "VIP") {
     if (unread > 0) return "A";
@@ -111,7 +116,9 @@ export function deriveDefaultReason(customer: FollowupRuleCustomer) {
   const bucket = deriveEffectiveBucket(customer);
   const stage = String(customer.stage || "");
   const unread = Number(customer.unreadCount || 0);
+  const relationship = String(customer.lineRelationshipStatus || "ACTIVE");
 
+  if (relationship === "UNFOLLOWED") return "顾客已取消关注，暂不主动跟进";
   if (unread > 0) return "有新消息，建议优先处理";
   if (bucket === "VIP") return "已成交顾客，建议持续经营";
   if (["WAITING_PAYMENT", "NEGOTIATING"].includes(stage)) return "接近成交，建议重点跟进";

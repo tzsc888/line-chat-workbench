@@ -34,6 +34,14 @@ enum MessageSource {
   AI_SUGGESTION
 }
 
+
+
+enum MessageSendStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
 enum SuggestionVariant {
   STABLE
   ADVANCING
@@ -157,6 +165,12 @@ model Message {
   japaneseText    String
   chineseText     String?
   imageUrl        String?
+
+  deliveryStatus  MessageSendStatus?
+  sendError       String?
+  lastAttemptAt   DateTime?
+  failedAt        DateTime?
+  retryCount      Int           @default(0)
 
   sentAt          DateTime      @default(now())
   createdAt       DateTime      @default(now())
