@@ -5,9 +5,14 @@ import {
   MessageRole,
   MessageSource,
   MessageType,
-  MessageSendStatus,
   SuggestionVariant,
 } from "@prisma/client";
+
+const SEND_STATUS = {
+  PENDING: "PENDING",
+  SENT: "SENT",
+  FAILED: "FAILED",
+} as const;
 
 type Props = {
   params: Promise<{ customerId: string }>;
@@ -129,7 +134,7 @@ export async function POST(req: Request, { params }: Props) {
         chineseText,
         imageUrl: type === MessageType.IMAGE ? imageUrl : null,
         sentAt: now,
-        deliveryStatus: MessageSendStatus.PENDING,
+        deliveryStatus: SEND_STATUS.PENDING,
         lastAttemptAt: now,
       },
     });
@@ -154,7 +159,7 @@ export async function POST(req: Request, { params }: Props) {
       const sentMessage = await prisma.message.update({
         where: { id: message.id },
         data: {
-          deliveryStatus: MessageSendStatus.SENT,
+          deliveryStatus: SEND_STATUS.SENT,
           sendError: null,
           failedAt: null,
         },
@@ -187,7 +192,7 @@ export async function POST(req: Request, { params }: Props) {
       const failedMessage = await prisma.message.update({
         where: { id: message.id },
         data: {
-          deliveryStatus: MessageSendStatus.FAILED,
+          deliveryStatus: SEND_STATUS.FAILED,
           sendError: errorMessage,
           failedAt,
           lastAttemptAt: failedAt,

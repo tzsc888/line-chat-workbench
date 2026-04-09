@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
 type Bucket = "UNCONVERTED" | "VIP";
 type Tier = "A" | "B" | "C";
@@ -65,7 +65,7 @@ function formatForInput(value: string | null) {
   )}:${pad(date.getMinutes())}`;
 }
 
-export default function FollowupsPage() {
+function FollowupsPageContent() {
   const searchParams = useSearchParams();
   const requestedCustomerId = searchParams.get("customerId") || "";
   const [bucket, setBucket] = useState<Bucket>("UNCONVERTED");
@@ -376,5 +376,21 @@ export default function FollowupsPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function FollowupsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-gray-100 p-4 md:p-6">
+          <div className="mx-auto max-w-7xl rounded-2xl border border-gray-200 bg-white px-5 py-6 text-sm text-gray-500 shadow-sm">
+            跟进页面加载中...
+          </div>
+        </div>
+      }
+    >
+      <FollowupsPageContent />
+    </Suspense>
   );
 }

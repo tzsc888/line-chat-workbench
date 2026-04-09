@@ -3,7 +3,7 @@
 import * as Ably from "ably";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 
 type FollowupSummary = {
   bucket: "UNCONVERTED" | "VIP";
@@ -292,7 +292,7 @@ function shouldShowMessageDivider(previousMessage: WorkspaceMessage | null, curr
   return gap >= 30 * 60 * 1000;
 }
 
-export default function Home() {
+function HomePageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
@@ -415,7 +415,7 @@ export default function Home() {
     }
   }, []);
 
-  const loadCustomers = useCallback(async (options?: { silent?: boolean }) => {
+  const loadCustomers = useCallback(async (options?: { silent?: boolean; preserveUi?: boolean }) => {
     try {
       if (!options?.silent) {
         setIsListLoading(true);
@@ -1956,5 +1956,21 @@ export default function Home() {
         </div>
       ) : null}
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense
+      fallback={
+        <div className="h-screen bg-gray-100 flex items-center justify-center">
+          <div className="rounded-2xl border border-gray-200 bg-white px-6 py-4 text-sm text-gray-500 shadow-sm">
+            页面加载中...
+          </div>
+        </div>
+      }
+    >
+      <HomePageContent />
+    </Suspense>
   );
 }
