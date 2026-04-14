@@ -1,57 +1,12 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
-import { MessageRole, MessageSendStatus, MessageType } from "@prisma/client";
+import { buildLineMessages, pushLineMessages } from "@/lib/line-messaging";
+import { MessageRole, MessageSendStatus } from "@prisma/client";
 
 type Props = {
   params: Promise<{ messageId: string }>;
 };
-
-async function pushLineMessages(to: string, messages: unknown[]) {
-  const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-  if (!accessToken) {
-    throw new Error("缺少 LINE_CHANNEL_ACCESS_TOKEN");
-  }
-
-  const response = await fetch("https://api.line.me/v2/bot/message/push", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({ to, messages }),
-  });
-
-  const textBody = await response.text();
-  if (!response.ok) {
-    throw new Error(`LINE push 失败: HTTP ${response.status} - ${textBody}`);
-  }
-}
-
-function buildLineMessages(type: MessageType, japaneseText: string, imageUrl: string | null) {
-  if (type === MessageType.TEXT) {
-    return [{ type: "text", text: japaneseText }];
-  }
-
-  if (!imageUrl) {
-    throw new Error("图片消息缺少 imageUrl");
-  }
-
-  const messages: any[] = [
-    {
-      type: "image",
-      originalContentUrl: imageUrl,
-      previewImageUrl: imageUrl,
-    },
-  ];
-
-  if (japaneseText) {
-    messages.push({ type: "text", text: japaneseText });
-  }
-
-  return messages;
-}
 
 export async function POST(_: Request, { params }: Props) {
   try {
@@ -88,7 +43,11 @@ export async function POST(_: Request, { params }: Props) {
     });
 
     try {
-      const lineMessages = buildLineMessages(message.type, message.japaneseText, message.imageUrl);
+      const lineMessages = buildLineMessages({
+        type: message.type,
+        japaneseText: message.japaneseText,
+        imageUrl: message.imageUrl,
+      });
       await pushLineMessages(message.customer.lineUserId, lineMessages);
 
       const sentMessage = await prisma.message.update({

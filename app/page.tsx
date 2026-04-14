@@ -1,10 +1,8 @@
 "use client";
-
 import * as Ably from "ably";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
-
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from "react";
 type FollowupSummary = {
   bucket: "UNCONVERTED" | "VIP";
   tier: "A" | "B" | "C";
@@ -13,7 +11,6 @@ type FollowupSummary = {
   nextFollowupAt: string | null;
   isOverdue: boolean;
 };
-
 type CustomerListItem = {
   id: string;
   lineUserId: string | null;
@@ -47,7 +44,6 @@ type CustomerListItem = {
     previewText: string;
   } | null;
 };
-
 type WorkspaceMessage = {
   id: string;
   customerId: string;
@@ -67,7 +63,6 @@ type WorkspaceMessage = {
   createdAt: string;
   updatedAt: string;
 };
-
 type ReplyDraftSet = {
   id: string;
   customerId: string;
@@ -83,7 +78,20 @@ type ReplyDraftSet = {
   createdAt: string;
   updatedAt: string;
 };
-
+type ScheduledMessageItem = {
+  id: string;
+  type: "TEXT" | "IMAGE";
+  source: "LINE" | "MANUAL" | "AI_SUGGESTION";
+  japaneseText: string;
+  chineseText: string | null;
+  imageUrl: string | null;
+  scheduledFor: string;
+  status: "PENDING" | "PROCESSING" | "FAILED";
+  sendError: string | null;
+  retryCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
 type WorkspaceData = {
   customer: {
     id: string;
@@ -109,23 +117,21 @@ type WorkspaceData = {
     color: string | null;
   }[];
   messages: WorkspaceMessage[];
+  scheduledMessages: ScheduledMessageItem[];
   latestCustomerMessageId: string | null;
   latestReplyDraftSet: ReplyDraftSet | null;
 };
-
 type RewriteResult = {
   suggestion1Ja: string;
   suggestion1Zh: string;
   suggestion2Ja: string;
   suggestion2Zh: string;
 };
-
 type CustomerContextMenuState = {
   customer: CustomerListItem;
   x: number;
   y: number;
 };
-
 type PresetSnippet = {
   id: string;
   title: string;
@@ -134,25 +140,21 @@ type PresetSnippet = {
   createdAt: string;
   updatedAt: string;
 };
-
 type PendingUploadImage = {
   url: string;
   originalName: string;
   size: number;
   contentType: string | null;
 };
-
 function getDisplayName(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null | undefined) {
   if (!customer) return "未选择顾客";
   return customer.remarkName?.trim() || customer.originalName || "未命名顾客";
 }
-
 function getAvatarText(customer: Pick<CustomerListItem, "remarkName" | "originalName" | "followup"> | null) {
   if (customer?.followup?.tier) return customer.followup.tier;
   const text = getDisplayName(customer);
   return text.slice(0, 1).toUpperCase();
 }
-
 function getAvatarTone(tier?: FollowupSummary["tier"] | null) {
   if (tier === "A") {
     return "bg-emerald-100 text-emerald-700 ring-1 ring-emerald-200";
@@ -165,15 +167,12 @@ function getAvatarTone(tier?: FollowupSummary["tier"] | null) {
   }
   return "bg-pink-100 text-pink-700";
 }
-
 function getFollowupBucketLabel(bucket?: FollowupSummary["bucket"] | null) {
   return bucket === "VIP" ? "VIP已成交" : "未成交";
 }
-
 function getFollowupTierLabel(tier?: FollowupSummary["tier"] | null) {
   return tier ? `${tier}类` : "未分层";
 }
-
 function formatFollowupTime(dateString: string | null) {
   if (!dateString) return "未设置";
   const date = new Date(dateString);
@@ -185,40 +184,34 @@ function formatFollowupTime(dateString: string | null) {
     hour12: false,
   });
 }
-
 function shouldShowRefollowNotice(dateString: string | null, status?: "ACTIVE" | "UNFOLLOWED") {
   if (status !== "ACTIVE" || !dateString) return false;
   const time = new Date(dateString).getTime();
   if (!Number.isFinite(time)) return false;
   return Date.now() - time < 1000 * 60 * 60 * 24 * 3;
 }
-
 function getRelationshipBadge(status?: "ACTIVE" | "UNFOLLOWED") {
   if (status === "UNFOLLOWED") {
     return { text: "已取消关注", className: "bg-rose-50 text-rose-700 border border-rose-200" };
   }
   return null;
 }
-
 function getSecondaryName(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null | undefined) {
   if (!customer) return "";
   const remark = customer.remarkName?.trim() || "";
   if (remark) return "";
   return customer.originalName || "";
 }
-
 function getListMetaText(customer: Pick<CustomerListItem, "stage" | "isVip">) {
   if (customer.isVip) return "VIP";
   if (customer.stage === "NEW") return "";
   return customer.stage || "";
 }
-
 function formatListTime(dateString: string | null) {
   if (!dateString) return "";
   const date = new Date(dateString);
   const now = new Date();
   const sameDay = date.toDateString() === now.toDateString();
-
   if (sameDay) {
     return date.toLocaleTimeString("ja-JP", {
       hour: "2-digit",
@@ -226,7 +219,6 @@ function formatListTime(dateString: string | null) {
       hour12: false,
     });
   }
-
   const sameYear = date.getFullYear() === now.getFullYear();
   return date.toLocaleString("ja-JP", {
     month: "numeric",
@@ -237,7 +229,6 @@ function formatListTime(dateString: string | null) {
     hour12: false,
   });
 }
-
 function formatBubbleTime(dateString: string) {
   return new Date(dateString).toLocaleTimeString("ja-JP", {
     hour: "2-digit",
@@ -245,12 +236,10 @@ function formatBubbleTime(dateString: string) {
     hour12: false,
   });
 }
-
 function getDeliveryStatusMeta(message: WorkspaceMessage) {
   if (message.role !== "OPERATOR") {
     return null;
   }
-
   switch (message.deliveryStatus) {
     case "FAILED":
       return { label: "发送失败", className: "text-red-500" };
@@ -262,12 +251,49 @@ function getDeliveryStatusMeta(message: WorkspaceMessage) {
       return null;
   }
 }
-
+function formatDateTimeForInput(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+function buildDefaultScheduledInputValue() {
+  const date = new Date();
+  date.setMinutes(date.getMinutes() + 30);
+  date.setSeconds(0, 0);
+  const minutes = date.getMinutes();
+  const roundedMinutes = minutes <= 30 ? 30 : 0;
+  if (roundedMinutes === 0) {
+    date.setHours(date.getHours() + 1);
+  }
+  date.setMinutes(roundedMinutes, 0, 0);
+  return formatDateTimeForInput(date);
+}
+function formatScheduledTime(dateString: string) {
+  const date = new Date(dateString);
+  if (!Number.isFinite(date.getTime())) return "时间格式错误";
+  return date.toLocaleString("ja-JP", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+function getScheduledMessageStatusMeta(status: ScheduledMessageItem["status"]) {
+  switch (status) {
+    case "PENDING":
+      return { label: "待发送", className: "bg-amber-50 text-amber-700 border border-amber-200" };
+    case "PROCESSING":
+      return { label: "发送中", className: "bg-sky-50 text-sky-700 border border-sky-200" };
+    case "FAILED":
+      return { label: "发送失败", className: "bg-rose-50 text-rose-700 border border-rose-200" };
+    default:
+      return { label: status, className: "bg-slate-50 text-slate-700 border border-slate-200" };
+  }
+}
 function formatDividerTime(dateString: string) {
   const date = new Date(dateString);
   const now = new Date();
   const sameYear = date.getFullYear() === now.getFullYear();
-
   return date.toLocaleString("ja-JP", {
     ...(sameYear ? {} : { year: "numeric" }),
     month: "numeric",
@@ -277,21 +303,16 @@ function formatDividerTime(dateString: string) {
     hour12: false,
   });
 }
-
 function shouldShowMessageDivider(previousMessage: WorkspaceMessage | null, currentMessage: WorkspaceMessage) {
   if (!previousMessage) return true;
-
   const previousDate = new Date(previousMessage.sentAt);
   const currentDate = new Date(currentMessage.sentAt);
   const previousDayKey = `${previousDate.getFullYear()}-${previousDate.getMonth()}-${previousDate.getDate()}`;
   const currentDayKey = `${currentDate.getFullYear()}-${currentDate.getMonth()}-${currentDate.getDate()}`;
-
   if (previousDayKey !== currentDayKey) return true;
-
   const gap = currentDate.getTime() - previousDate.getTime();
   return gap >= 30 * 60 * 1000;
 }
-
 function HomePageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -300,7 +321,6 @@ function HomePageContent() {
   const [customers, setCustomers] = useState<CustomerListItem[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
-
   const [searchText, setSearchText] = useState("");
   const [rewriteInput, setRewriteInput] = useState("");
   const [manualReply, setManualReply] = useState("");
@@ -318,74 +338,75 @@ function HomePageContent() {
   const [pendingImage, setPendingImage] = useState<PendingUploadImage | null>(null);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [isComposerDragOver, setIsComposerDragOver] = useState(false);
-
   const [isListLoading, setIsListLoading] = useState(true);
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSendingManual, setIsSendingManual] = useState(false);
+  const [isSchedulingManual, setIsSchedulingManual] = useState(false);
+  const [isSchedulePanelOpen, setIsSchedulePanelOpen] = useState(false);
+  const [scheduleAtInput, setScheduleAtInput] = useState(() => buildDefaultScheduledInputValue());
   const [retryingMessageId, setRetryingMessageId] = useState("");
   const [isSendingAi, setIsSendingAi] = useState<"stable" | "advancing" | "">("");
-
   const [pageError, setPageError] = useState("");
   const [apiError, setApiError] = useState("");
   const [helperError, setHelperError] = useState("");
-
   const clearCustomerQuery = useCallback(() => {
     if (!requestedCustomerId) return;
     router.replace(pathname, { scroll: false });
   }, [pathname, requestedCustomerId, router]);
-
   const playIncomingSound = useCallback(() => {
     if (!audioEnabledRef.current) return;
-
     const now = Date.now();
     if (now - lastIncomingSoundAtRef.current < 900) return;
     lastIncomingSoundAtRef.current = now;
-
     try {
       const AudioContextClass =
         typeof window !== "undefined"
           ? (window.AudioContext ||
               (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)
           : undefined;
-
       if (!AudioContextClass) return;
-
       const context = audioContextRef.current ?? new AudioContextClass();
       audioContextRef.current = context;
-
       if (context.state === "suspended") {
         void context.resume();
       }
-
       const oscillator = context.createOscillator();
       const gain = context.createGain();
-
       oscillator.type = "sine";
       oscillator.frequency.setValueAtTime(880, context.currentTime);
-
       gain.gain.setValueAtTime(0.0001, context.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.06, context.currentTime + 0.01);
       gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.18);
-
       oscillator.connect(gain);
       gain.connect(context.destination);
-
       oscillator.start(context.currentTime);
       oscillator.stop(context.currentTime + 0.18);
     } catch (error) {
       console.error("incoming sound error:", error);
     }
   }, []);
-
+  const resizeManualReplyTextarea = useCallback(() => {
+    const textarea = manualReplyTextareaRef.current;
+    if (!textarea) return;
+    const minHeight = 44;
+    const maxHeight = 176;
+    textarea.style.height = "auto";
+    const nextHeight = Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, []);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const customerListScrollRef = useRef<HTMLDivElement | null>(null);
+  const manualReplyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const isSilentRefreshingRef = useRef(false);
   const selectedCustomerIdRef = useRef("");
   const realtimeRefreshTimerRef = useRef<number | null>(null);
   const ablyClientRef = useRef<Ably.Realtime | null>(null);
   const markReadInFlightRef = useRef(new Set<string>());
   const composerMenuRef = useRef<HTMLDivElement | null>(null);
+  const schedulePanelRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const openChatToBottomRef = useRef(false);
   const shouldStickToBottomRef = useRef(true);
@@ -395,17 +416,14 @@ function HomePageContent() {
   const audioEnabledRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastIncomingSoundAtRef = useRef(0);
-
   const loadPresetSnippets = useCallback(async () => {
     try {
       setIsPresetLoading(true);
       const response = await fetch("/api/preset-messages", { cache: "no-store" });
       const data = await response.json();
-
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "读取预设信息失败");
       }
-
       setPresetSnippets(data.items || []);
     } catch (error) {
       console.error(error);
@@ -414,45 +432,47 @@ function HomePageContent() {
       setIsPresetLoading(false);
     }
   }, []);
-
   const loadCustomers = useCallback(async (options?: { silent?: boolean; preserveUi?: boolean }) => {
+    const shouldPreserveListUi = !!options?.silent || !!options?.preserveUi;
+    const listScrollTop = shouldPreserveListUi
+      ? customerListScrollRef.current?.scrollTop ?? 0
+      : 0;
     try {
-      if (!options?.silent) {
+      if (!options?.silent && !shouldPreserveListUi) {
         setIsListLoading(true);
       }
-
       setPageError("");
-
       const response = await fetch("/api/customers", {
         cache: "no-store",
       });
-
       const data = await response.json();
-
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "读取顾客列表失败");
       }
-
       const list: CustomerListItem[] = data.customers || [];
       setCustomers(list);
-
       setSelectedCustomerId((prev) => {
         if (prev && list.some((item) => item.id === prev)) return prev;
         return "";
       });
+      if (shouldPreserveListUi) {
+        requestAnimationFrame(() => {
+          const container = customerListScrollRef.current;
+          if (!container) return;
+          container.scrollTop = listScrollTop;
+        });
+      }
     } catch (error) {
       console.error(error);
       setPageError(String(error));
     } finally {
-      if (!options?.silent) {
+      if (!options?.silent && !shouldPreserveListUi) {
         setIsListLoading(false);
       }
     }
   }, []);
-
   const markCustomerRead = useCallback(async (customerId: string) => {
     if (!customerId || markReadInFlightRef.current.has(customerId)) return;
-
     markReadInFlightRef.current.add(customerId);
     try {
       await fetch(`/api/customers/${customerId}/workspace`, {
@@ -470,21 +490,17 @@ function HomePageContent() {
       markReadInFlightRef.current.delete(customerId);
     }
   }, []);
-
   const loadWorkspace = useCallback(
     async (customerId: string, options?: { preserveUi?: boolean }) => {
       if (!customerId) {
         setWorkspace(null);
         return;
       }
-
       const preserveUi = !!options?.preserveUi;
       const container = chatScrollRef.current;
-
       let previousScrollTop = 0;
       let previousScrollHeight = 0;
       let wasNearBottom = false;
-
       if (preserveUi && container) {
         previousScrollTop = container.scrollTop;
         previousScrollHeight = container.scrollHeight;
@@ -492,7 +508,6 @@ function HomePageContent() {
           container.scrollHeight - container.scrollTop - container.clientHeight < 80;
         isSilentRefreshingRef.current = true;
       }
-
       try {
         if (!preserveUi) {
           setIsWorkspaceLoading(true);
@@ -504,20 +519,15 @@ function HomePageContent() {
           setApiError("");
           setHelperError("");
         }
-
         const response = await fetch(`/api/customers/${customerId}/workspace`, {
           cache: "no-store",
         });
-
         const data = await response.json();
-
         if (!response.ok || !data.ok) {
           throw new Error(data?.error || "读取顾客工作台失败");
         }
-
         const nextWorkspace: WorkspaceData | null = data.workspace || null;
         setWorkspace(nextWorkspace);
-
         if (nextWorkspace?.customer) {
           setCustomers((prev) =>
             prev.map((item) =>
@@ -533,12 +543,10 @@ function HomePageContent() {
             )
           );
         }
-
         if (preserveUi) {
           requestAnimationFrame(() => {
             const el = chatScrollRef.current;
             if (!el) return;
-
             if (wasNearBottom) {
               el.scrollTop = el.scrollHeight;
             } else {
@@ -562,7 +570,6 @@ function HomePageContent() {
     },
     []
   );
-
   const patchCustomerMeta = useCallback(
     async (
       customerId: string,
@@ -575,12 +582,10 @@ function HomePageContent() {
         },
         body: JSON.stringify(payload),
       });
-
       const data = await response.json();
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "更新顾客信息失败");
       }
-
       await loadCustomers({ silent: true });
       if (selectedCustomerIdRef.current === customerId) {
         await loadWorkspace(customerId, { preserveUi: true });
@@ -588,29 +593,30 @@ function HomePageContent() {
     },
     [loadCustomers, loadWorkspace]
   );
-
   useEffect(() => {
     loadCustomers();
   }, [loadCustomers]);
-
   useEffect(() => {
     void loadWorkspace(selectedCustomerId);
   }, [selectedCustomerId, loadWorkspace]);
-
   useEffect(() => {
     selectedCustomerIdRef.current = selectedCustomerId;
   }, [selectedCustomerId]);
   useEffect(() => {
+    setIsSchedulePanelOpen(false);
+    setScheduleAtInput(buildDefaultScheduledInputValue());
+  }, [selectedCustomerId]);
+  useEffect(() => {
+    resizeManualReplyTextarea();
+  }, [manualReply, resizeManualReplyTextarea]);
+  useEffect(() => {
     const enableAudio = () => {
       audioEnabledRef.current = true;
-
       try {
         const AudioContextClass =
           window.AudioContext ||
           (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-
         if (!AudioContextClass) return;
-
         const context = audioContextRef.current ?? new AudioContextClass();
         audioContextRef.current = context;
         if (context.state === "suspended") {
@@ -620,60 +626,51 @@ function HomePageContent() {
         console.error("audio init error:", error);
       }
     };
-
     window.addEventListener("pointerdown", enableAudio, { once: true });
     window.addEventListener("keydown", enableAudio, { once: true });
-
     return () => {
       window.removeEventListener("pointerdown", enableAudio);
       window.removeEventListener("keydown", enableAudio);
     };
   }, []);
-
   useEffect(() => {
     if (!customers.length) {
       previousUnreadMapRef.current = {};
       hasInitializedUnreadSnapshotRef.current = true;
       return;
     }
-
     const nextUnreadMap = Object.fromEntries(customers.map((customer) => [customer.id, customer.unreadCount]));
-
     if (!hasInitializedUnreadSnapshotRef.current) {
       previousUnreadMapRef.current = nextUnreadMap;
       hasInitializedUnreadSnapshotRef.current = true;
       return;
     }
-
     const hasIncomingUnread = customers.some((customer) => {
       const previousUnread = previousUnreadMapRef.current[customer.id] ?? 0;
       const latestPreviewFromCustomer = customer.latestMessage?.role === "CUSTOMER";
       return latestPreviewFromCustomer && customer.unreadCount > previousUnread;
     });
-
     if (hasIncomingUnread) {
       playIncomingSound();
     }
-
     previousUnreadMapRef.current = nextUnreadMap;
   }, [customers, playIncomingSound]);
-
-
   useEffect(() => {
     function handleDocumentClick(event: MouseEvent) {
-      if (!composerMenuRef.current) return;
-      if (composerMenuRef.current.contains(event.target as Node)) return;
-      setIsComposerMenuOpen(false);
+      const target = event.target as Node;
+      if (composerMenuRef.current && !composerMenuRef.current.contains(target)) {
+        setIsComposerMenuOpen(false);
+      }
+      if (schedulePanelRef.current && !schedulePanelRef.current.contains(target)) {
+        setIsSchedulePanelOpen(false);
+      }
     }
-
     document.addEventListener("mousedown", handleDocumentClick);
     return () => document.removeEventListener("mousedown", handleDocumentClick);
   }, []);
-
   useEffect(() => {
     const selectedCustomer = customers.find((item) => item.id === selectedCustomerId);
     if (!selectedCustomerId || !selectedCustomer?.unreadCount) return;
-
     setCustomers((prev) =>
       prev.map((item) =>
         item.id === selectedCustomerId ? { ...item, unreadCount: 0 } : item
@@ -681,10 +678,8 @@ function HomePageContent() {
     );
     void markCustomerRead(selectedCustomerId);
   }, [customers, selectedCustomerId, markCustomerRead]);
-
   useEffect(() => {
     const handleCloseContextMenu = () => setCustomerContextMenu(null);
-
     window.addEventListener("click", handleCloseContextMenu);
     window.addEventListener("resize", handleCloseContextMenu);
     return () => {
@@ -692,15 +687,12 @@ function HomePageContent() {
       window.removeEventListener("resize", handleCloseContextMenu);
     };
   }, []);
-
   useEffect(() => {
     let timer: number | null = null;
-
     const pingPresence = async () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") {
         return;
       }
-
       try {
         await fetch("/api/operator-presence", {
           method: "POST",
@@ -715,50 +707,38 @@ function HomePageContent() {
         console.error("operator presence ping error:", error);
       }
     };
-
     void pingPresence();
     timer = window.setInterval(() => {
       void pingPresence();
     }, 15000);
-
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
         void pingPresence();
       }
     };
-
     document.addEventListener("visibilitychange", handleVisibilityChange);
-
     return () => {
       if (timer) window.clearInterval(timer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [selectedCustomerId]);
-
   useEffect(() => {
     const client = new Ably.Realtime({
       authUrl: "/api/ably/token",
       authMethod: "GET",
     });
-
     ablyClientRef.current = client;
-
     const channel = client.channels.get("line-chat-workbench");
-
     const handleRefresh = (message: any) => {
       if (realtimeRefreshTimerRef.current) {
         window.clearTimeout(realtimeRefreshTimerRef.current);
       }
-
       realtimeRefreshTimerRef.current = window.setTimeout(() => {
         if (isSilentRefreshingRef.current) return;
-
         const payload =
           message && typeof message === "object" ? message.data || {} : {};
         const activeCustomerId = selectedCustomerIdRef.current;
-
         loadCustomers({ silent: true });
-
         if (
           activeCustomerId &&
           (!payload.customerId || payload.customerId === activeCustomerId)
@@ -767,25 +747,19 @@ function HomePageContent() {
         }
       }, 250);
     };
-
     channel.subscribe("refresh", handleRefresh);
-
     return () => {
       if (realtimeRefreshTimerRef.current) {
         window.clearTimeout(realtimeRefreshTimerRef.current);
       }
-
       channel.unsubscribe("refresh", handleRefresh);
       client.close();
       ablyClientRef.current = null;
     };
   }, [loadCustomers, loadWorkspace]);
-
   const filteredCustomers = useMemo(() => {
     const keyword = searchText.trim().toLowerCase();
-
     if (!keyword) return customers;
-
     return customers.filter((customer) => {
       const displayName = getDisplayName(customer);
       const tagText = customer.tags.map((tag) => tag.name).join(" ");
@@ -798,12 +772,10 @@ function HomePageContent() {
       );
     });
   }, [customers, searchText]);
-
   const currentListCustomer =
     filteredCustomers.find((item) => item.id === selectedCustomerId) ||
     customers.find((item) => item.id === selectedCustomerId) ||
     null;
-
   useEffect(() => {
     if (!requestedCustomerId) return;
     if (!customers.some((item) => item.id === requestedCustomerId)) return;
@@ -814,13 +786,10 @@ function HomePageContent() {
     }
     clearCustomerQuery();
   }, [requestedCustomerId, customers, selectedCustomerId, clearCustomerQuery]);
-
   useEffect(() => {
     if (!workspace || !selectedCustomerId) return;
-
     const container = chatScrollRef.current;
     if (!container) return;
-
     const customerChanged = lastOpenedCustomerIdRef.current !== workspace.customer.id;
     if (customerChanged || openChatToBottomRef.current || shouldStickToBottomRef.current) {
       requestAnimationFrame(() => {
@@ -829,14 +798,11 @@ function HomePageContent() {
         el.scrollTop = el.scrollHeight;
       });
     }
-
     if (customerChanged) {
       lastOpenedCustomerIdRef.current = workspace.customer.id;
     }
     openChatToBottomRef.current = false;
   }, [selectedCustomerId, workspace?.customer.id, workspace?.messages.length]);
-
-
   const displayedSuggestion1Ja =
     customReply?.suggestion1Ja ||
     workspace?.latestReplyDraftSet?.stableJapanese ||
@@ -853,7 +819,6 @@ function HomePageContent() {
     customReply?.suggestion2Zh ||
     workspace?.latestReplyDraftSet?.advancingChinese ||
     "";
-
   const latestDraft = workspace?.latestReplyDraftSet || null;
   const isLatestDraftUsed = !!latestDraft?.selectedVariant;
   const isLatestDraftStale =
@@ -862,22 +827,18 @@ function HomePageContent() {
     !!latestDraft.targetCustomerMessageId &&
     latestDraft.targetCustomerMessageId !== workspace.latestCustomerMessageId;
   const shouldDimDraft = isLatestDraftUsed || isLatestDraftStale;
-
   async function handleRewrite() {
     if (!workspace) {
       window.alert("当前没有选中的顾客");
       return;
     }
-
     if (!rewriteInput.trim()) {
       window.alert("请先输入你的要求");
       return;
     }
-
     try {
       setIsGenerating(true);
       setApiError("");
-
       const response = await fetch("/api/generate-replies", {
         method: "POST",
         headers: {
@@ -888,22 +849,18 @@ function HomePageContent() {
           rewriteInput,
         }),
       });
-
       const data = await response.json();
-
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "生成失败");
       }
-
       setCustomReply({
         suggestion1Ja: data.suggestion1Ja || "",
         suggestion1Zh: data.suggestion1Zh || "",
         suggestion2Ja: data.suggestion2Ja || "",
         suggestion2Zh: data.suggestion2Zh || "",
       });
-
       await loadWorkspace(workspace.customer.id);
-      await loadCustomers();
+      await loadCustomers({ preserveUi: true });
     } catch (error) {
       console.error(error);
       setApiError(String(error));
@@ -912,17 +869,14 @@ function HomePageContent() {
       setIsGenerating(false);
     }
   }
-
   async function handleAnalyzeCustomer() {
     if (!workspace) {
       window.alert("当前没有选中的顾客");
       return;
     }
-
     try {
       setIsAnalyzing(true);
       setHelperError("");
-
       const response = await fetch("/api/analyze-customer", {
         method: "POST",
         headers: {
@@ -932,15 +886,12 @@ function HomePageContent() {
           customerId: workspace.customer.id,
         }),
       });
-
       const data = await response.json();
-
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "分析失败");
       }
-
       await loadWorkspace(workspace.customer.id);
-      await loadCustomers();
+      await loadCustomers({ preserveUi: true });
     } catch (error) {
       console.error(error);
       setHelperError(String(error));
@@ -949,7 +900,6 @@ function HomePageContent() {
       setIsAnalyzing(false);
     }
   }
-
   async function addAiReplyToChat(
     replyJa: string,
     replyZh: string,
@@ -959,15 +909,12 @@ function HomePageContent() {
       window.alert("当前没有选中的顾客");
       return;
     }
-
     if (!replyJa.trim()) {
       window.alert("当前没有可发送的建议回复");
       return;
     }
-
     try {
       setIsSendingAi(variant);
-
       const response = await fetch(
         `/api/customers/${workspace.customer.id}/messages`,
         {
@@ -985,13 +932,10 @@ function HomePageContent() {
           }),
         }
       );
-
       const data = await response.json();
-
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "发送失败");
       }
-
       setCustomReply(null);
     } catch (error) {
       console.error(error);
@@ -1000,44 +944,38 @@ function HomePageContent() {
       setIsSendingAi("");
     }
   }
-
   function openPresetPanel() {
     setIsComposerMenuOpen(false);
+    setIsSchedulePanelOpen(false);
     setIsPresetPanelOpen(true);
     setEditingPresetId("");
     setPresetTitle("");
     setPresetContent("");
     void loadPresetSnippets();
   }
-
   function applyPresetSnippet(item: PresetSnippet) {
     setManualReply(item.content);
     setIsPresetPanelOpen(false);
   }
-
   function startEditPreset(item: PresetSnippet) {
     setEditingPresetId(item.id);
     setPresetTitle(item.title);
     setPresetContent(item.content);
   }
-
   function resetPresetForm() {
     setEditingPresetId("");
     setPresetTitle("");
     setPresetContent("");
   }
-
   async function handleSavePreset() {
     if (!presetTitle.trim()) {
       window.alert("预设名称不能为空");
       return;
     }
-
     if (!presetContent.trim()) {
       window.alert("预设内容不能为空");
       return;
     }
-
     try {
       setIsPresetSaving(true);
       const response = await fetch(
@@ -1051,12 +989,10 @@ function HomePageContent() {
           }),
         }
       );
-
       const data = await response.json();
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "保存预设信息失败");
       }
-
       resetPresetForm();
       await loadPresetSnippets();
     } catch (error) {
@@ -1066,10 +1002,8 @@ function HomePageContent() {
       setIsPresetSaving(false);
     }
   }
-
   async function handleDeletePreset(id: string) {
     if (!window.confirm("确认删除这条预设信息吗？")) return;
-
     try {
       const response = await fetch(`/api/preset-messages/${id}`, {
         method: "DELETE",
@@ -1078,7 +1012,6 @@ function HomePageContent() {
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "删除预设信息失败");
       }
-
       if (editingPresetId === id) {
         resetPresetForm();
       }
@@ -1088,33 +1021,28 @@ function HomePageContent() {
       window.alert("删除预设信息失败，请看终端报错");
     }
   }
-
   function handleAddImage() {
     setIsComposerMenuOpen(false);
+    setIsSchedulePanelOpen(false);
     imageInputRef.current?.click();
   }
-
   async function uploadImageFile(file: File) {
     if (!file.type.startsWith("image/")) {
       window.alert("只能上传图片文件");
       return;
     }
-
     try {
       setIsUploadingImage(true);
       const formData = new FormData();
       formData.append("file", file);
-
       const response = await fetch("/api/uploads/images", {
         method: "POST",
         body: formData,
       });
       const data = await response.json();
-
       if (!response.ok || !data.ok || !data.image?.url) {
         throw new Error(data?.error || "上传图片失败");
       }
-
       setPendingImage({
         url: data.image.url,
         originalName: data.image.originalName || file.name,
@@ -1129,28 +1057,23 @@ function HomePageContent() {
       setIsUploadingImage(false);
     }
   }
-
   function handleImageInputChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
     void uploadImageFile(file);
     event.target.value = "";
   }
-
   function clearPendingImage() {
     setPendingImage(null);
   }
-
   function handleComposerDragOver(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsComposerDragOver(true);
   }
-
   function handleComposerDragLeave(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsComposerDragOver(false);
   }
-
   function handleComposerDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsComposerDragOver(false);
@@ -1158,24 +1081,28 @@ function HomePageContent() {
     if (!file) return;
     void uploadImageFile(file);
   }
-
+  function handleManualReplyKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter") return;
+    if (event.shiftKey) return;
+    if (event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    if (isSendingManual || isUploadingImage || !workspace) return;
+    if (!manualReply.trim() && !pendingImage) return;
+    void handleManualSend();
+  }
   async function handleManualSend() {
     if (!workspace) {
       window.alert("当前没有选中的顾客");
       return;
     }
-
     if (!manualReply.trim() && !pendingImage) {
       window.alert("请先输入文本或选择图片");
       return;
     }
-
-    const japaneseText = manualReply.trim();
+    const japaneseText = manualReply.replace(/\r\n/g, "\n");
     const sendingType = pendingImage ? "IMAGE" : "TEXT";
-
     try {
       setIsSendingManual(true);
-
       const sendResponse = await fetch(
         `/api/customers/${workspace.customer.id}/messages`,
         {
@@ -1191,18 +1118,13 @@ function HomePageContent() {
           }),
         }
       );
-
       const sendData = await sendResponse.json();
-
       if (!sendResponse.ok || !sendData.ok) {
         throw new Error(sendData?.error || "消息发送失败");
       }
-
       setManualReply("");
       setPendingImage(null);
-
       const messageId = String(sendData?.message?.id || "").trim();
-
       if (messageId && japaneseText) {
         void (async () => {
           try {
@@ -1215,9 +1137,7 @@ function HomePageContent() {
                 japanese: japaneseText,
               }),
             });
-
             const translateData = await translateResponse.json();
-
             if (
               !translateResponse.ok ||
               !translateData.ok ||
@@ -1225,7 +1145,6 @@ function HomePageContent() {
             ) {
               return;
             }
-
             await fetch(`/api/messages/${messageId}/translation`, {
               method: "PATCH",
               headers: {
@@ -1247,20 +1166,90 @@ function HomePageContent() {
       setIsSendingManual(false);
     }
   }
-
+  async function handleScheduleManualSend() {
+    if (!workspace) {
+      window.alert("当前没有选中的顾客");
+      return;
+    }
+    if (!manualReply.trim() && !pendingImage) {
+      window.alert("请先输入文本或选择图片");
+      return;
+    }
+    if (!scheduleAtInput) {
+      window.alert("请选择定时发送时间");
+      return;
+    }
+    const scheduledFor = new Date(scheduleAtInput);
+    if (!Number.isFinite(scheduledFor.getTime())) {
+      window.alert("定时发送时间格式不正确");
+      return;
+    }
+    if (scheduledFor.getTime() - Date.now() < 30 * 60 * 1000) {
+      window.alert("定时发送至少要比当前时间晚 30 分钟");
+      return;
+    }
+    const japaneseText = manualReply.replace(/\r\n/g, "\n");
+    const sendingType = pendingImage ? "IMAGE" : "TEXT";
+    try {
+      setIsSchedulingManual(true);
+      const response = await fetch(`/api/customers/${workspace.customer.id}/scheduled-messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          japaneseText,
+          imageUrl: pendingImage?.url || "",
+          source: "MANUAL",
+          type: sendingType,
+          scheduledFor: scheduledFor.toISOString(),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data?.error || "创建定时发送失败");
+      }
+      setManualReply("");
+      setPendingImage(null);
+      setIsSchedulePanelOpen(false);
+      setScheduleAtInput(buildDefaultScheduledInputValue());
+      await loadWorkspace(workspace.customer.id, { preserveUi: true });
+      await loadCustomers({ preserveUi: true });
+    } catch (error) {
+      console.error(error);
+      window.alert(error instanceof Error ? error.message : "创建定时发送失败");
+    } finally {
+      setIsSchedulingManual(false);
+    }
+  }
+  async function handleCancelScheduledMessage(scheduledMessageId: string) {
+    if (!workspace) return;
+    if (!window.confirm("确认取消这条定时发送吗？")) return;
+    try {
+      const response = await fetch(`/api/scheduled-messages/${scheduledMessageId}`, {
+        method: "DELETE",
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data?.error || "取消定时发送失败");
+      }
+      await loadWorkspace(workspace.customer.id, { preserveUi: true });
+      await loadCustomers({ preserveUi: true });
+    } catch (error) {
+      console.error(error);
+      window.alert(error instanceof Error ? error.message : "取消定时发送失败");
+    }
+  }
   async function handleRetryMessage(messageId: string) {
     if (!workspace || !messageId || retryingMessageId) return;
-
     try {
       setRetryingMessageId(messageId);
       const response = await fetch(`/api/messages/${messageId}/retry`, {
         method: "POST",
       });
       const data = await response.json();
-
       await loadWorkspace(workspace.customer.id, { preserveUi: true });
       await loadCustomers({ preserveUi: true });
-
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "重发失败");
       }
@@ -1271,7 +1260,6 @@ function HomePageContent() {
       setRetryingMessageId("");
     }
   }
-
   function handleSelectCustomer(customerId: string) {
     openChatToBottomRef.current = true;
     shouldStickToBottomRef.current = true;
@@ -1284,14 +1272,13 @@ function HomePageContent() {
       )
     );
   }
-
   function handleCollapseChat() {
     setSelectedCustomerId("");
+    setIsSchedulePanelOpen(false);
     setWorkspace(null);
     setCustomerContextMenu(null);
     clearCustomerQuery();
   }
-
   async function handleTogglePin(customer: CustomerListItem) {
     setCustomerContextMenu(null);
     try {
@@ -1303,16 +1290,13 @@ function HomePageContent() {
       window.alert("置顶状态更新失败");
     }
   }
-
   async function handleRenameCustomer(customer: CustomerListItem) {
     setCustomerContextMenu(null);
     const nextRemarkName = window.prompt(
       "请输入备注名（留空会清除备注）",
       customer.remarkName || ""
     );
-
     if (nextRemarkName === null) return;
-
     try {
       await patchCustomerMeta(customer.id, {
         remarkName: nextRemarkName,
@@ -1322,7 +1306,6 @@ function HomePageContent() {
       window.alert("备注名更新失败");
     }
   }
-
   function handleChatScroll() {
     const container = chatScrollRef.current;
     if (!container) return;
@@ -1330,16 +1313,15 @@ function HomePageContent() {
       container.scrollHeight - container.scrollTop - container.clientHeight < 80;
     shouldStickToBottomRef.current = nearBottom;
   }
-
   const contextMenuCustomer = customerContextMenu?.customer || null;
   const overdueFollowupCount = customers.filter((customer) => customer.followup?.isOverdue && customer.followup?.state === "ACTIVE").length;
-
+  const canManualSend = !!workspace && !isSendingManual && !isUploadingImage && (!!pendingImage || !!manualReply.trim());
+  const canScheduleManual = !!workspace && !isSchedulingManual && !isUploadingImage && (!!pendingImage || !!manualReply.trim());
   return (
     <div className="h-screen bg-gray-100 flex">
-      <div className="w-[24%] bg-gray-50 border-r border-gray-200 p-4 overflow-y-auto">
+      <div ref={customerListScrollRef} className="w-[24%] bg-gray-50 border-r border-gray-200 p-4 overflow-y-auto">
         <div className="mb-3 flex items-center justify-between gap-3">
           <button onClick={handleCollapseChat} className="text-lg font-bold text-left hover:text-green-700 transition">顾客列表</button>
-
           <Link
             href="/followups"
             className="inline-flex shrink-0 items-center gap-2 rounded-full border border-neutral-300 bg-white px-3 py-1 text-xs font-medium text-neutral-700 shadow-sm transition hover:bg-neutral-50"
@@ -1352,7 +1334,6 @@ function HomePageContent() {
             ) : null}
           </Link>
         </div>
-
         <input
           type="text"
           value={searchText}
@@ -1360,11 +1341,9 @@ function HomePageContent() {
           placeholder="搜索备注、昵称、标签、最后一条消息"
           className="w-full border border-gray-200 bg-white rounded-xl px-3 py-2 text-sm mb-4 shadow-sm outline-none focus:border-green-300"
         />
-
         {pageError ? (
           <div className="mb-3 text-xs text-red-500 break-all">{pageError}</div>
         ) : null}
-
         {isListLoading ? (
           <div className="text-sm text-gray-500">顾客列表加载中...</div>
         ) : (
@@ -1372,7 +1351,6 @@ function HomePageContent() {
             {filteredCustomers.map((customer) => {
               const isActive = customer.id === selectedCustomerId;
               const latestPreview = customer.latestMessage?.previewText || "暂时还没有消息";
-
               return (
                 <div
                   key={customer.id}
@@ -1400,7 +1378,6 @@ function HomePageContent() {
                         </div>
                       ) : null}
                     </div>
-
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0 flex items-center gap-1.5">
@@ -1418,7 +1395,6 @@ function HomePageContent() {
                           {formatListTime(customer.lastMessageAt)}
                         </div>
                       </div>
-
                       <div className="mt-1 flex items-center gap-2">
                         <div className="min-w-0 flex-1 truncate text-[12px] text-gray-500">
                           {latestPreview}
@@ -1444,14 +1420,12 @@ function HomePageContent() {
                 </div>
               );
             })}
-
             {filteredCustomers.length === 0 && (
               <div className="text-sm text-gray-500 p-3">没有搜索到相关顾客</div>
             )}
           </div>
         )}
       </div>
-
       <div className="w-[46%] flex flex-col bg-gray-50">
         <div className="p-4 border-b bg-white space-y-2">
           <div className="font-bold">{selectedCustomerId ? getDisplayName(workspace?.customer || null) : "未打开顾客会话"}</div>
@@ -1490,7 +1464,6 @@ function HomePageContent() {
             </div>
           ) : null}
         </div>
-
         <div
           ref={chatScrollRef}
           onScroll={handleChatScroll}
@@ -1512,7 +1485,6 @@ function HomePageContent() {
             workspace.messages.map((msg, index) => {
               const previousMessage = index > 0 ? workspace.messages[index - 1] : null;
               const showDivider = shouldShowMessageDivider(previousMessage, msg);
-
               return (
                 <div key={msg.id}>
                   {showDivider ? (
@@ -1522,7 +1494,6 @@ function HomePageContent() {
                       </div>
                     </div>
                   ) : null}
-
                   <div
                     className={`flex ${
                       msg.role === "CUSTOMER" ? "justify-start" : "justify-end"
@@ -1615,7 +1586,6 @@ function HomePageContent() {
             })
           )}
         </div>
-
         <div className="p-4 border-t bg-white relative">
           <input
             ref={imageInputRef}
@@ -1624,7 +1594,6 @@ function HomePageContent() {
             className="hidden"
             onChange={handleImageInputChange}
           />
-
           <div
             onDragOver={handleComposerDragOver}
             onDragLeave={handleComposerDragLeave}
@@ -1656,7 +1625,6 @@ function HomePageContent() {
                 </div>
               </div>
             ) : null}
-
             <div className="flex gap-2 items-end">
               <div className="relative" ref={composerMenuRef}>
                 <button
@@ -1666,7 +1634,6 @@ function HomePageContent() {
                 >
                   +
                 </button>
-
                 {isComposerMenuOpen ? (
                   <div className="absolute bottom-12 left-0 z-20 w-52 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden">
                     <button
@@ -1686,24 +1653,116 @@ function HomePageContent() {
                   </div>
                 ) : null}
               </div>
-
-              <input
-                type="text"
+              <textarea
+                ref={manualReplyTextareaRef}
                 value={manualReply}
                 onChange={(e) => setManualReply(e.target.value)}
+                onKeyDown={handleManualReplyKeyDown}
+                rows={1}
                 placeholder={pendingImage ? "可选填写图片说明或补充文字…" : "输入要发送给顾客的日语内容…"}
-                className="flex-1 border rounded-xl px-4 py-2.5"
+                className="min-h-[44px] max-h-44 flex-1 rounded-xl border border-gray-300 bg-white px-4 py-[10px] leading-6 resize-none whitespace-pre-wrap break-words outline-none focus:border-green-300 focus:ring-2 focus:ring-green-100"
               />
+              <div className="relative" ref={schedulePanelRef}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!workspace) return;
+                    setIsSchedulePanelOpen((prev) => !prev);
+                  }}
+                  disabled={!workspace}
+                  className="rounded-xl border border-gray-300 bg-white px-3 py-2.5 text-sm text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  定时发送
+                </button>
+                {isSchedulePanelOpen ? (
+                  <div className="absolute bottom-14 right-0 z-20 w-[320px] rounded-2xl border border-gray-200 bg-white p-4 shadow-2xl">
+                    <div className="text-sm font-semibold text-gray-900">定时发送</div>
+                    <div className="mt-1 text-xs text-gray-500">至少比当前时间晚 30 分钟。到点后系统会自动发送，就算你关掉页面也照样会发。</div>
+                    <input
+                      type="datetime-local"
+                      step={1800}
+                      value={scheduleAtInput}
+                      min={buildDefaultScheduledInputValue()}
+                      onChange={(e) => setScheduleAtInput(e.target.value)}
+                      className="mt-3 w-full rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm outline-none focus:border-green-300 focus:ring-2 focus:ring-green-100"
+                    />
+                    <div className="mt-3 flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsSchedulePanelOpen(false)}
+                        className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 hover:bg-gray-50"
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleScheduleManualSend}
+                        disabled={!canScheduleManual}
+                        className="rounded-xl bg-green-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {isSchedulingManual ? "加入中..." : "加入定时发送"}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
               <button
                 onClick={handleManualSend}
-                disabled={isSendingManual || isUploadingImage || !workspace}
+                disabled={!canManualSend}
                 className="bg-green-600 text-white px-4 py-2.5 rounded-xl disabled:opacity-60"
               >
                 {isUploadingImage ? "上传中..." : isSendingManual ? "发送中..." : pendingImage ? "发送图片" : "发送"}
               </button>
             </div>
+            {workspace?.scheduledMessages?.length ? (
+              <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900">已排队的定时发送</div>
+                    <div className="mt-1 text-[11px] text-gray-500">这里只显示还没完成的任务。发出去后，它会正常出现在聊天记录里。</div>
+                  </div>
+                  <span className="rounded-full bg-white px-2 py-1 text-[11px] text-gray-500 border border-gray-200">
+                    {workspace.scheduledMessages.length} 条
+                  </span>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {workspace.scheduledMessages.map((item) => {
+                    const statusMeta = getScheduledMessageStatusMeta(item.status);
+                    return (
+                      <div key={item.id} className="rounded-2xl border border-gray-200 bg-white p-3 shadow-sm">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${statusMeta.className}`}>
+                                {statusMeta.label}
+                              </span>
+                              <span className="text-[11px] text-gray-500">{formatScheduledTime(item.scheduledFor)}</span>
+                              {item.type === "IMAGE" ? (
+                                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600 border border-slate-200">图片</span>
+                              ) : null}
+                            </div>
+                            <div className="mt-2 whitespace-pre-wrap break-words text-sm text-gray-900">{item.japaneseText || "（仅图片，无补充文字）"}</div>
+                            {item.sendError ? (
+                              <div className="mt-2 text-[11px] text-rose-500 break-all">{item.sendError}</div>
+                            ) : null}
+                          </div>
+                          {item.status !== "PROCESSING" ? (
+                            <button
+                              type="button"
+                              onClick={() => handleCancelScheduledMessage(item.id)}
+                              className="shrink-0 rounded-xl border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
+                            >
+                              取消
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
           </div>
-
           {isPresetPanelOpen ? (
             <div className="absolute bottom-20 left-4 z-30 w-[420px] max-w-[calc(100%-2rem)] rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3 border-b bg-gray-50">
@@ -1721,7 +1780,6 @@ function HomePageContent() {
                   关闭
                 </button>
               </div>
-
               <div className="grid grid-cols-[1.2fr_1fr] max-h-[440px]">
                 <div className="border-r border-gray-100 overflow-y-auto p-3 space-y-2">
                   {isPresetLoading ? (
@@ -1756,7 +1814,6 @@ function HomePageContent() {
                     ))
                   )}
                 </div>
-
                 <div className="p-3 space-y-3 bg-gray-50/60">
                   <div className="text-sm font-medium text-gray-900">
                     {editingPresetId ? "编辑预设" : "新增预设"}
@@ -1801,10 +1858,8 @@ function HomePageContent() {
           ) : null}
         </div>
       </div>
-
       <div className="w-[30%] bg-white border-l border-gray-200 p-4 overflow-y-auto">
         <h2 className="text-lg font-bold mb-4">AI 助理</h2>
-
         <div className="space-y-5">
           <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
             <div className="flex items-center justify-between mb-2">
@@ -1825,7 +1880,6 @@ function HomePageContent() {
               <div className="text-xs text-red-500 mt-2 break-all">{helperError}</div>
             ) : null}
           </div>
-
           <div
             className={`rounded-xl border p-4 ${
               shouldDimDraft ? "border-gray-200 bg-gray-50 opacity-70" : "border-gray-200 bg-white"
@@ -1868,7 +1922,6 @@ function HomePageContent() {
                     : "发送"}
             </button>
           </div>
-
           <div
             className={`rounded-xl border p-4 ${
               shouldDimDraft ? "border-gray-200 bg-gray-50 opacity-70" : "border-gray-200 bg-white"
@@ -1911,7 +1964,6 @@ function HomePageContent() {
                     : "发送"}
             </button>
           </div>
-
           <div className="rounded-xl border border-gray-200 p-4 bg-white">
             <div className="font-semibold mb-2">要求重写</div>
             <input
@@ -1934,7 +1986,6 @@ function HomePageContent() {
           </div>
         </div>
       </div>
-
       {customerContextMenu && contextMenuCustomer ? (
         <div
           className="fixed z-50 min-w-40 rounded-xl border border-gray-200 bg-white shadow-xl py-2"
@@ -1958,7 +2009,6 @@ function HomePageContent() {
     </div>
   );
 }
-
 export default function Home() {
   return (
     <Suspense

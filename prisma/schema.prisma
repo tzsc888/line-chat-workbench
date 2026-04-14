@@ -42,6 +42,14 @@ enum MessageSendStatus {
   FAILED
 }
 
+enum ScheduledMessageStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+  CANCELED
+}
+
 enum SuggestionVariant {
   STABLE
   ADVANCING
@@ -115,6 +123,7 @@ model Customer {
 
   tags                   CustomerTag[]
   messages               Message[]
+  scheduledMessages      ScheduledMessage[]
   replyDraftSets         ReplyDraftSet[]
   automationJobs         AutomationJob[]
 
@@ -180,6 +189,36 @@ model Message {
 
   @@index([customerId, sentAt(sort: Asc)])
   @@index([customerId, role, sentAt(sort: Desc)])
+}
+
+
+model ScheduledMessage {
+  id                String                 @id @default(cuid())
+  customerId        String
+  type              MessageType            @default(TEXT)
+  source            MessageSource          @default(MANUAL)
+  japaneseText      String
+  chineseText       String?
+  imageUrl          String?
+  scheduledFor      DateTime
+  status            ScheduledMessageStatus @default(PENDING)
+  replyDraftSetId   String?
+  suggestionVariant SuggestionVariant?
+  deliveredMessageId String?               @unique
+  lastAttemptAt     DateTime?
+  processedAt       DateTime?
+  failedAt          DateTime?
+  canceledAt        DateTime?
+  sendError         String?
+  retryCount        Int                    @default(0)
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+
+  customer          Customer               @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([status, scheduledFor(sort: Asc)])
+  @@index([customerId, scheduledFor(sort: Desc)])
+  @@index([customerId, status, scheduledFor(sort: Asc)])
 }
 
 model ReplyDraftSet {

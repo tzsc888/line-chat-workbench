@@ -31,6 +31,17 @@ export async function GET(_: Request, { params }: Props) {
           },
           take: 1,
         },
+        scheduledMessages: {
+          where: {
+            status: {
+              in: ["PENDING", "PROCESSING", "FAILED"],
+            },
+          },
+          orderBy: {
+            scheduledFor: "asc",
+          },
+          take: 20,
+        },
       },
     });
 
@@ -94,6 +105,20 @@ export async function GET(_: Request, { params }: Props) {
           color: item.tag.color,
         })),
         messages,
+        scheduledMessages: customer.scheduledMessages.map((item) => ({
+          id: item.id,
+          type: item.type,
+          source: item.source,
+          japaneseText: item.japaneseText,
+          chineseText: item.chineseText,
+          imageUrl: item.imageUrl,
+          scheduledFor: item.scheduledFor.toISOString(),
+          status: item.status,
+          sendError: item.sendError,
+          retryCount: item.retryCount,
+          createdAt: item.createdAt.toISOString(),
+          updatedAt: item.updatedAt.toISOString(),
+        })),
         latestCustomerMessageId: latestCustomerMessage?.id || null,
         latestReplyDraftSet: customer.replyDraftSets[0]
           ? {

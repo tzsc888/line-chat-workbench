@@ -86,6 +86,23 @@ async function uploadInboundImageToBlob(params: {
   return blob.url;
 }
 
+function buildAutoRemarkName(originalName: string, lineUserId: string, now = new Date()) {
+  const formatter = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "2-digit",
+    month: "numeric",
+    day: "numeric",
+  });
+
+  const parts = formatter.formatToParts(now);
+  const year = parts.find((item) => item.type === "year")?.value || String(now.getFullYear()).slice(-2);
+  const month = parts.find((item) => item.type === "month")?.value || String(now.getMonth() + 1);
+  const day = parts.find((item) => item.type === "day")?.value || String(now.getDate());
+  const baseName = originalName.trim() || lineUserId.trim() || "未命名顾客";
+
+  return `${year}.${month}.${day}${baseName}`;
+}
+
 async function markCustomerRelationshipStatus(lineUserId: string, status: "ACTIVE" | "UNFOLLOWED", options?: {
   originalName?: string;
   avatarUrl?: string;
@@ -124,6 +141,7 @@ async function markCustomerRelationshipStatus(lineUserId: string, status: "ACTIV
       data: {
         lineUserId,
         originalName: options?.originalName || lineUserId,
+        remarkName: buildAutoRemarkName(options?.originalName || "", lineUserId, now),
         avatarUrl: options?.avatarUrl || null,
         lineRelationshipStatus: "ACTIVE",
         lineRelationshipUpdatedAt: now,

@@ -1,72 +1,18 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
+import { buildLineMessages, pushLineMessages } from "@/lib/line-messaging";
 import {
   MessageRole,
   MessageSource,
   MessageType,
   SuggestionVariant,
+  MessageSendStatus,
 } from "@prisma/client";
-
-const SEND_STATUS = {
-  PENDING: "PENDING",
-  SENT: "SENT",
-  FAILED: "FAILED",
-} as const;
 
 type Props = {
   params: Promise<{ customerId: string }>;
 };
-
-async function pushLineMessages(to: string, messages: unknown[]) {
-  const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-  if (!accessToken) {
-    throw new Error("缺少 LINE_CHANNEL_ACCESS_TOKEN");
-  }
-
-  const response = await fetch("https://api.line.me/v2/bot/message/push", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({
-      to,
-      messages,
-    }),
-  });
-
-  const textBody = await response.text();
-  if (!response.ok) {
-    throw new Error(`LINE push 失败: HTTP ${response.status} - ${textBody}`);
-  }
-}
-
-function buildLineMessages(params: { type: MessageType; japaneseText: string; imageUrl?: string | null }) {
-  const messages: any[] = [];
-
-  if (params.type === MessageType.TEXT) {
-    messages.push({ type: "text", text: params.japaneseText });
-    return messages;
-  }
-
-  if (!params.imageUrl) {
-    throw new Error("图片消息缺少 imageUrl");
-  }
-
-  messages.push({
-    type: "image",
-    originalContentUrl: params.imageUrl,
-    previewImageUrl: params.imageUrl,
-  });
-
-  if (params.japaneseText) {
-    messages.push({ type: "text", text: params.japaneseText });
-  }
-
-  return messages;
-}
 
 export async function GET(_: Request, { params }: Props) {
   try {
@@ -89,7 +35,8 @@ export async function POST(req: Request, { params }: Props) {
     const { customerId } = await params;
     const body = await req.json();
 
-    const japaneseText = String(body.japaneseText || "").trim();
+    const japaneseTextRaw = typeof body.japaneseText === "string" ? body.japaneseText : "";
+    const japaneseText = japaneseTextRaw.replace(/\r\n/g, "\n");
     const chineseText = typeof body.chineseText === "string" ? body.chineseText.trim() : null;
     const imageUrl = typeof body.imageUrl === "string" ? body.imageUrl.trim() : "";
     const type = body.type === "IMAGE" ? MessageType.IMAGE : MessageType.TEXT;
@@ -101,7 +48,7 @@ export async function POST(req: Request, { params }: Props) {
         ? suggestionVariantRaw
         : null;
 
-    if (type === MessageType.TEXT && !japaneseText) {
+    if (type === MessageType.TEXT && !japaneseText.trim()) {
       return NextResponse.json({ ok: false, error: "japaneseText 不能为空" }, { status: 400 });
     }
 
@@ -134,7 +81,7 @@ export async function POST(req: Request, { params }: Props) {
         chineseText,
         imageUrl: type === MessageType.IMAGE ? imageUrl : null,
         sentAt: now,
-        deliveryStatus: SEND_STATUS.PENDING,
+        deliveryStatus: MessageSendStatus.PENDING,
         lastAttemptAt: now,
       },
     });
@@ -159,7 +106,7 @@ export async function POST(req: Request, { params }: Props) {
       const sentMessage = await prisma.message.update({
         where: { id: message.id },
         data: {
-          deliveryStatus: SEND_STATUS.SENT,
+          deliveryStatus: MessageSendStatus.SENT,
           sendError: null,
           failedAt: null,
         },
@@ -192,7 +139,7 @@ export async function POST(req: Request, { params }: Props) {
       const failedMessage = await prisma.message.update({
         where: { id: message.id },
         data: {
-          deliveryStatus: SEND_STATUS.FAILED,
+          deliveryStatus: MessageSendStatus.FAILED,
           sendError: errorMessage,
           failedAt,
           lastAttemptAt: failedAt,

@@ -35,6 +35,23 @@ async function callModel(
   return JSON.parse(text);
 }
 
+function buildAutoRemarkName(originalName: string, lineUserId: string, now = new Date()) {
+  const formatter = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "2-digit",
+    month: "numeric",
+    day: "numeric",
+  });
+
+  const parts = formatter.formatToParts(now);
+  const year = parts.find((item) => item.type === "year")?.value || String(now.getFullYear()).slice(-2);
+  const month = parts.find((item) => item.type === "month")?.value || String(now.getMonth() + 1);
+  const day = parts.find((item) => item.type === "day")?.value || String(now.getDate());
+  const baseName = originalName.trim() || lineUserId.trim() || "未命名顾客";
+
+  return `${year}.${month}.${day}${baseName}`;
+}
+
 export async function POST(req: NextRequest) {
   const apiKey = process.env.EKAN8_API_KEY;
   const baseUrl = process.env.EKAN8_BASE_URL;
@@ -123,7 +140,7 @@ export async function POST(req: NextRequest) {
       create: {
         lineUserId,
         originalName: originalName || lineUserId,
-        remarkName: remarkName || null,
+        remarkName: remarkName || buildAutoRemarkName(originalName, lineUserId, now),
         avatarUrl: avatar.startsWith("http") ? avatar : null,
         lastMessageAt: now,
         lastInboundMessageAt: now,
