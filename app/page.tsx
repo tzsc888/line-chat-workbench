@@ -3,6 +3,7 @@ import * as Ably from "ably";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from "react";
+import { MessageSource } from "@prisma/client";
 type FollowupSummary = {
   bucket: "UNCONVERTED" | "VIP";
   tier: "A" | "B" | "C";
@@ -868,7 +869,7 @@ function HomePageContent() {
       chineseText?: string | null;
       imageUrl?: string | null;
       type: "TEXT" | "IMAGE";
-      source: "MANUAL" | "AI_SUGGESTION";
+      source: MessageSource;
       replyDraftSetId?: string;
       suggestionVariant?: "STABLE" | "ADVANCING";
       optimisticMessageId?: string;
