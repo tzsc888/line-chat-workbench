@@ -21,11 +21,21 @@ export async function DELETE(_: Request, { params }: Props) {
     });
 
     if (!existing) {
-      return NextResponse.json({ ok: false, error: "定时发送任务不存在" }, { status: 404 });
+      return NextResponse.json(
+        { ok: false, error: "定时发送任务不存在" },
+        { status: 404 }
+      );
     }
 
-    if (![ScheduledMessageStatus.PENDING, ScheduledMessageStatus.FAILED].includes(existing.status)) {
-      return NextResponse.json({ ok: false, error: "当前状态不能取消这条定时发送" }, { status: 400 });
+    const canCancel =
+      existing.status === ScheduledMessageStatus.PENDING ||
+      existing.status === ScheduledMessageStatus.FAILED;
+
+    if (!canCancel) {
+      return NextResponse.json(
+        { ok: false, error: "当前状态不能取消这条定时发送" },
+        { status: 400 }
+      );
     }
 
     const updated = await prisma.scheduledMessage.update({
@@ -37,14 +47,23 @@ export async function DELETE(_: Request, { params }: Props) {
     });
 
     try {
-      await publishRealtimeRefresh({ customerId: existing.customerId, reason: "scheduled-message-canceled" });
+      await publishRealtimeRefresh({
+        customerId: existing.customerId,
+        reason: "scheduled-message-canceled",
+      });
     } catch (error) {
       console.error("Ably publish scheduled-message-canceled error:", error);
     }
 
     return NextResponse.json({ ok: true, scheduledMessage: updated });
   } catch (error) {
-    console.error("DELETE /api/scheduled-messages/[scheduledMessageId] error:", error);
-    return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    console.error(
+      "DELETE /api/scheduled-messages/[scheduledMessageId] error:",
+      error
+    );
+    return NextResponse.json(
+      { ok: false, error: error instanceof Error ? error.message : String(error) },
+      { status: 500 }
+    );
   }
 }
