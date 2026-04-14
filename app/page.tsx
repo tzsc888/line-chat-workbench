@@ -3,6 +3,7 @@ import * as Ably from "ably";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from "react";
+import { MessageSource } from "@prisma/client";
 type FollowupSummary = {
   bucket: "UNCONVERTED" | "VIP";
   tier: "A" | "B" | "C";
@@ -146,6 +147,16 @@ type PendingUploadImage = {
   size: number;
   contentType: string | null;
 };
+type OptimisticWorkspaceMessage = WorkspaceMessage & {
+  isOptimistic: true;
+  replyDraftSetId?: string;
+  suggestionVariant?: "STABLE" | "ADVANCING" | null;
+};
+type CustomerListStats = {
+  overdueFollowupCount: number;
+};
+const CUSTOMER_PAGE_SIZE = 50;
+const OPTIMISTIC_ID_PREFIX = "optimistic:";
 function getDisplayName(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null | undefined) {
   if (!customer) return "未选择顾客";
   return customer.remarkName?.trim() || customer.originalName || "未命名顾客";
@@ -251,6 +262,80 @@ function getDeliveryStatusMeta(message: WorkspaceMessage) {
       return null;
   }
 }
+function buildPreviewTextFromMessage(message: Pick<WorkspaceMessage, "role" | "type" | "japaneseText">) {
+  const baseText = message.type === "IMAGE" ? "[图片]" : message.japaneseText.trim() || "[空消息]";
+  return `${message.role === "OPERATOR" ? "我：" : ""}${baseText}`;
+}
+function buildCustomerLatestMessage(message: WorkspaceMessage | OptimisticWorkspaceMessage): CustomerListItem["latestMessage"] {
+  return {
+    id: message.id,
+    role: message.role,
+    type: message.type,
+    source: message.source,
+    japaneseText: message.japaneseText,
+    chineseText: message.chineseText,
+    sentAt: message.sentAt,
+    previewText: buildPreviewTextFromMessage(message),
+  };
+}
+function sortCustomerList(list: CustomerListItem[]) {
+  return [...list].sort((a, b) => {
+    const aPinned = a.pinnedAt ? new Date(a.pinnedAt).getTime() : 0;
+    const bPinned = b.pinnedAt ? new Date(b.pinnedAt).getTime() : 0;
+
+    if (aPinned || bPinned) {
+      if (!aPinned) return 1;
+      if (!bPinned) return -1;
+      if (bPinned !== aPinned) return bPinned - aPinned;
+    }
+
+    const aLast = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
+    const bLast = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
+    if (bLast !== aLast) return bLast - aLast;
+
+    return a.originalName.localeCompare(b.originalName, "zh-CN");
+  });
+}
+function mergeWorkspaceMessages(
+  baseMessages: WorkspaceMessage[],
+  optimisticMessages: OptimisticWorkspaceMessage[]
+) {
+  const merged = [...baseMessages, ...optimisticMessages];
+  merged.sort((a, b) => {
+    const aTime = new Date(a.sentAt).getTime();
+    const bTime = new Date(b.sentAt).getTime();
+    if (aTime !== bTime) return aTime - bTime;
+    return a.id.localeCompare(b.id);
+  });
+  return merged;
+}
+function isOptimisticMessageId(messageId: string) {
+  return messageId.startsWith(OPTIMISTIC_ID_PREFIX);
+}
+function normalizeWorkspaceMessagePayload(payload: any): WorkspaceMessage | null {
+  if (!payload || typeof payload !== "object" || typeof payload.id !== "string") {
+    return null;
+  }
+  return {
+    id: payload.id,
+    customerId: payload.customerId,
+    role: payload.role,
+    type: payload.type,
+    source: payload.source,
+    lineMessageId: payload.lineMessageId ?? null,
+    japaneseText: payload.japaneseText ?? "",
+    chineseText: payload.chineseText ?? null,
+    imageUrl: payload.imageUrl ?? null,
+    deliveryStatus: payload.deliveryStatus ?? null,
+    sendError: payload.sendError ?? null,
+    lastAttemptAt: payload.lastAttemptAt ?? null,
+    failedAt: payload.failedAt ?? null,
+    retryCount: Number(payload.retryCount ?? 0),
+    sentAt: payload.sentAt,
+    createdAt: payload.createdAt ?? payload.sentAt,
+    updatedAt: payload.updatedAt ?? payload.sentAt,
+  };
+}
 function formatDateTimeForInput(date: Date) {
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
@@ -319,9 +404,15 @@ function HomePageContent() {
   const pathname = usePathname();
   const requestedCustomerId = searchParams.get("customerId") || "";
   const [customers, setCustomers] = useState<CustomerListItem[]>([]);
+  const [customerStats, setCustomerStats] = useState<CustomerListStats>({ overdueFollowupCount: 0 });
+  const [customerPage, setCustomerPage] = useState(1);
+  const [hasMoreCustomers, setHasMoreCustomers] = useState(false);
+  const [isLoadingMoreCustomers, setIsLoadingMoreCustomers] = useState(false);
+  const [optimisticMessagesByCustomer, setOptimisticMessagesByCustomer] = useState<Record<string, OptimisticWorkspaceMessage[]>>({});
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
   const [searchText, setSearchText] = useState("");
+  const [debouncedSearchText, setDebouncedSearchText] = useState("");
   const [rewriteInput, setRewriteInput] = useState("");
   const [manualReply, setManualReply] = useState("");
   const [customReply, setCustomReply] = useState<RewriteResult | null>(null);
@@ -342,7 +433,6 @@ function HomePageContent() {
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isSendingManual, setIsSendingManual] = useState(false);
   const [isSchedulingManual, setIsSchedulingManual] = useState(false);
   const [isSchedulePanelOpen, setIsSchedulePanelOpen] = useState(false);
   const [scheduleAtInput, setScheduleAtInput] = useState(() => buildDefaultScheduledInputValue());
@@ -399,7 +489,13 @@ function HomePageContent() {
   }, []);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const customerListScrollRef = useRef<HTMLDivElement | null>(null);
+  const customerListLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const manualReplyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const customersRef = useRef<CustomerListItem[]>([]);
+  const customerPageRef = useRef(1);
+  const hasMoreCustomersRef = useRef(false);
+  const searchKeywordRef = useRef("");
+  const isCustomerListRequestInFlightRef = useRef(false);
   const isSilentRefreshingRef = useRef(false);
   const selectedCustomerIdRef = useRef("");
   const realtimeRefreshTimerRef = useRef<number | null>(null);
@@ -432,45 +528,105 @@ function HomePageContent() {
       setIsPresetLoading(false);
     }
   }, []);
-  const loadCustomers = useCallback(async (options?: { silent?: boolean; preserveUi?: boolean }) => {
-    const shouldPreserveListUi = !!options?.silent || !!options?.preserveUi;
-    const listScrollTop = shouldPreserveListUi
-      ? customerListScrollRef.current?.scrollTop ?? 0
-      : 0;
-    try {
-      if (!options?.silent && !shouldPreserveListUi) {
-        setIsListLoading(true);
+  const loadCustomers = useCallback(
+    async (options?: {
+      silent?: boolean;
+      preserveUi?: boolean;
+      loadMore?: boolean;
+      reset?: boolean;
+      search?: string;
+      limitOverride?: number;
+    }) => {
+      const shouldPreserveListUi = !!options?.silent || !!options?.preserveUi || !!options?.loadMore;
+      const listScrollTop = shouldPreserveListUi
+        ? customerListScrollRef.current?.scrollTop ?? 0
+        : 0;
+      const isLoadMore = !!options?.loadMore;
+      const isReset = options?.reset ?? !isLoadMore;
+      const activeSearch = options?.search ?? searchKeywordRef.current;
+      const currentLoadedCount = customersRef.current.length;
+      const limit = Math.max(
+        options?.limitOverride ?? (isReset ? CUSTOMER_PAGE_SIZE : currentLoadedCount || CUSTOMER_PAGE_SIZE),
+        CUSTOMER_PAGE_SIZE
+      );
+      const page = isLoadMore ? customerPageRef.current + 1 : 1;
+
+      if (isCustomerListRequestInFlightRef.current && isLoadMore) {
+        return;
       }
-      setPageError("");
-      const response = await fetch("/api/customers", {
-        cache: "no-store",
-      });
-      const data = await response.json();
-      if (!response.ok || !data.ok) {
-        throw new Error(data?.error || "读取顾客列表失败");
-      }
-      const list: CustomerListItem[] = data.customers || [];
-      setCustomers(list);
-      setSelectedCustomerId((prev) => {
-        if (prev && list.some((item) => item.id === prev)) return prev;
-        return "";
-      });
-      if (shouldPreserveListUi) {
-        requestAnimationFrame(() => {
-          const container = customerListScrollRef.current;
-          if (!container) return;
-          container.scrollTop = listScrollTop;
+
+      try {
+        isCustomerListRequestInFlightRef.current = true;
+        if (isLoadMore) {
+          setIsLoadingMoreCustomers(true);
+        } else if (!options?.silent && !shouldPreserveListUi) {
+          setIsListLoading(true);
+        }
+        setPageError("");
+
+        const params = new URLSearchParams();
+        params.set("page", String(page));
+        params.set("limit", String(limit));
+        if (activeSearch) {
+          params.set("q", activeSearch);
+        }
+
+        const response = await fetch(`/api/customers?${params.toString()}`, {
+          cache: "no-store",
         });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data?.error || "读取顾客列表失败");
+        }
+
+        const list: CustomerListItem[] = data.customers || [];
+        const nextHasMore = !!data.hasMore;
+        const nextPage = Number(data.page || page);
+        const nextStats: CustomerListStats = data.stats || { overdueFollowupCount: 0 };
+
+        setCustomers((prev) => {
+          if (isLoadMore) {
+            const merged = new Map<string, CustomerListItem>();
+            for (const item of prev) merged.set(item.id, item);
+            for (const item of list) merged.set(item.id, item);
+            return sortCustomerList(Array.from(merged.values()));
+          }
+          return sortCustomerList(list);
+        });
+        setCustomerStats(nextStats);
+        setCustomerPage(nextPage);
+        setHasMoreCustomers(nextHasMore);
+        customerPageRef.current = nextPage;
+        hasMoreCustomersRef.current = nextHasMore;
+        searchKeywordRef.current = activeSearch;
+
+        setSelectedCustomerId((prev) => {
+          if (prev && list.some((item) => item.id === prev)) return prev;
+          if (prev && customersRef.current.some((item) => item.id === prev)) return prev;
+          return prev;
+        });
+
+        if (shouldPreserveListUi) {
+          requestAnimationFrame(() => {
+            const container = customerListScrollRef.current;
+            if (!container) return;
+            container.scrollTop = listScrollTop;
+          });
+        }
+      } catch (error) {
+        console.error(error);
+        setPageError(String(error));
+      } finally {
+        isCustomerListRequestInFlightRef.current = false;
+        if (isLoadMore) {
+          setIsLoadingMoreCustomers(false);
+        } else if (!options?.silent && !shouldPreserveListUi) {
+          setIsListLoading(false);
+        }
       }
-    } catch (error) {
-      console.error(error);
-      setPageError(String(error));
-    } finally {
-      if (!options?.silent && !shouldPreserveListUi) {
-        setIsListLoading(false);
-      }
-    }
-  }, []);
+    },
+    []
+  );
   const markCustomerRead = useCallback(async (customerId: string) => {
     if (!customerId || markReadInFlightRef.current.has(customerId)) return;
     markReadInFlightRef.current.add(customerId);
@@ -570,11 +726,285 @@ function HomePageContent() {
     },
     []
   );
+  const addOptimisticMessage = useCallback((customerId: string, message: OptimisticWorkspaceMessage) => {
+    setOptimisticMessagesByCustomer((prev) => {
+      const nextList = [...(prev[customerId] || []).filter((item) => item.id !== message.id), message];
+      return {
+        ...prev,
+        [customerId]: nextList,
+      };
+    });
+  }, []);
+  const updateOptimisticMessage = useCallback(
+    (
+      customerId: string,
+      messageId: string,
+      updater: (message: OptimisticWorkspaceMessage) => OptimisticWorkspaceMessage
+    ) => {
+      setOptimisticMessagesByCustomer((prev) => {
+        const currentList = prev[customerId] || [];
+        const nextList = currentList.map((item) => (item.id === messageId ? updater(item) : item));
+        return {
+          ...prev,
+          [customerId]: nextList,
+        };
+      });
+    },
+    []
+  );
+  const removeOptimisticMessage = useCallback((customerId: string, messageId: string) => {
+    setOptimisticMessagesByCustomer((prev) => {
+      const currentList = prev[customerId] || [];
+      const nextList = currentList.filter((item) => item.id !== messageId);
+      if (!nextList.length) {
+        const nextState = { ...prev };
+        delete nextState[customerId];
+        return nextState;
+      }
+      return {
+        ...prev,
+        [customerId]: nextList,
+      };
+    });
+  }, []);
+  const upsertWorkspaceMessage = useCallback((customerId: string, message: WorkspaceMessage) => {
+    setWorkspace((prev) => {
+      if (!prev || prev.customer.id !== customerId) return prev;
+      const nextMessages = [...prev.messages.filter((item) => item.id !== message.id), message].sort((a, b) => {
+        const aTime = new Date(a.sentAt).getTime();
+        const bTime = new Date(b.sentAt).getTime();
+        if (aTime !== bTime) return aTime - bTime;
+        return a.id.localeCompare(b.id);
+      });
+      return {
+        ...prev,
+        customer: {
+          ...prev.customer,
+          lastMessageAt: message.sentAt,
+        },
+        messages: nextMessages,
+      };
+    });
+  }, []);
+  const updateWorkspaceMessage = useCallback(
+    (
+      customerId: string,
+      messageId: string,
+      updater: (message: WorkspaceMessage) => WorkspaceMessage
+    ) => {
+      setWorkspace((prev) => {
+        if (!prev || prev.customer.id !== customerId) return prev;
+        return {
+          ...prev,
+          messages: prev.messages.map((item) => (item.id === messageId ? updater(item) : item)),
+        };
+      });
+    },
+    []
+  );
+  const updateCustomerLatestMessage = useCallback(
+    (customerId: string, message: WorkspaceMessage | OptimisticWorkspaceMessage) => {
+      setCustomers((prev) =>
+        sortCustomerList(
+          prev.map((item) =>
+            item.id === customerId
+              ? {
+                  ...item,
+                  lastMessageAt: message.sentAt,
+                  latestMessage: buildCustomerLatestMessage(message),
+                }
+              : item
+          )
+        )
+      );
+    },
+    []
+  );
+  const attachAsyncTranslation = useCallback(async (messageId: string, japaneseText: string) => {
+    if (!messageId || !japaneseText.trim()) return;
+    try {
+      const translateResponse = await fetch("/api/translate-message", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          japanese: japaneseText,
+        }),
+      });
+      const translateData = await translateResponse.json();
+      if (!translateResponse.ok || !translateData.ok || !translateData.chinese) {
+        return;
+      }
+      await fetch(`/api/messages/${messageId}/translation`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          chineseText: translateData.chinese,
+        }),
+      });
+    } catch (error) {
+      console.error("translate patch error:", error);
+    }
+  }, []);
+  const submitOutboundMessage = useCallback(
+    async (params: {
+      customerId: string;
+      japaneseText: string;
+      chineseText?: string | null;
+      imageUrl?: string | null;
+      type: "TEXT" | "IMAGE";
+      source: MessageSource;
+      replyDraftSetId?: string;
+      suggestionVariant?: "STABLE" | "ADVANCING";
+      optimisticMessageId?: string;
+    }) => {
+      const sentAt = new Date().toISOString();
+      const optimisticId = params.optimisticMessageId || `${OPTIMISTIC_ID_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const baseOptimisticMessage: OptimisticWorkspaceMessage = {
+        id: optimisticId,
+        customerId: params.customerId,
+        role: "OPERATOR",
+        type: params.type,
+        source: params.source,
+        lineMessageId: null,
+        japaneseText: params.japaneseText,
+        chineseText: params.chineseText ?? null,
+        imageUrl: params.type === "IMAGE" ? params.imageUrl ?? null : null,
+        deliveryStatus: "PENDING",
+        sendError: null,
+        lastAttemptAt: sentAt,
+        failedAt: null,
+        retryCount: 0,
+        sentAt,
+        createdAt: sentAt,
+        updatedAt: sentAt,
+        isOptimistic: true,
+        replyDraftSetId: params.replyDraftSetId,
+        suggestionVariant: params.suggestionVariant ?? null,
+      };
+
+      if (params.optimisticMessageId) {
+        updateOptimisticMessage(params.customerId, params.optimisticMessageId, () => baseOptimisticMessage);
+      } else {
+        addOptimisticMessage(params.customerId, baseOptimisticMessage);
+      }
+      updateCustomerLatestMessage(params.customerId, baseOptimisticMessage);
+
+      try {
+        const response = await fetch(`/api/customers/${params.customerId}/messages`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            japaneseText: params.japaneseText,
+            chineseText: params.chineseText ?? "",
+            imageUrl: params.imageUrl || "",
+            source: params.source,
+            type: params.type,
+            replyDraftSetId: params.replyDraftSetId || "",
+            suggestionVariant: params.suggestionVariant || "",
+          }),
+        });
+        const data = await response.json();
+        const serverMessage = normalizeWorkspaceMessagePayload(data?.message);
+
+        if (!response.ok || !data.ok) {
+          if (serverMessage) {
+            upsertWorkspaceMessage(params.customerId, serverMessage);
+            updateCustomerLatestMessage(params.customerId, serverMessage);
+            removeOptimisticMessage(params.customerId, optimisticId);
+          } else {
+            const errorMessage = data?.error || "消息发送失败";
+            updateOptimisticMessage(params.customerId, optimisticId, (message) => ({
+              ...message,
+              deliveryStatus: "FAILED",
+              sendError: errorMessage,
+              failedAt: new Date().toISOString(),
+              lastAttemptAt: new Date().toISOString(),
+            }));
+          }
+          return { ok: false };
+        }
+
+        if (serverMessage) {
+          upsertWorkspaceMessage(params.customerId, serverMessage);
+          updateCustomerLatestMessage(params.customerId, serverMessage);
+          removeOptimisticMessage(params.customerId, optimisticId);
+          if (params.type === "TEXT") {
+            void attachAsyncTranslation(serverMessage.id, params.japaneseText);
+          }
+        }
+
+        return { ok: true };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        updateOptimisticMessage(params.customerId, optimisticId, (message) => ({
+          ...message,
+          deliveryStatus: "FAILED",
+          sendError: errorMessage,
+          failedAt: new Date().toISOString(),
+          lastAttemptAt: new Date().toISOString(),
+        }));
+        return { ok: false };
+      }
+    },
+    [
+      addOptimisticMessage,
+      attachAsyncTranslation,
+      removeOptimisticMessage,
+      updateCustomerLatestMessage,
+      updateOptimisticMessage,
+      upsertWorkspaceMessage,
+    ]
+  );
   const patchCustomerMeta = useCallback(
     async (
       customerId: string,
       payload: { pinned?: boolean; remarkName?: string | null; markRead?: boolean }
     ) => {
+      const previousCustomers = customersRef.current;
+      const previousWorkspace = workspace;
+
+      setCustomers((prev) =>
+        sortCustomerList(
+          prev.map((item) => {
+            if (item.id !== customerId) return item;
+            return {
+              ...item,
+              ...(payload.remarkName !== undefined
+                ? { remarkName: payload.remarkName?.trim() || null }
+                : {}),
+              ...(payload.pinned !== undefined
+                ? { pinnedAt: payload.pinned ? new Date().toISOString() : null }
+                : {}),
+              ...(payload.markRead ? { unreadCount: 0 } : {}),
+            };
+          })
+        )
+      );
+      if (selectedCustomerIdRef.current === customerId) {
+        setWorkspace((prev) => {
+          if (!prev || prev.customer.id !== customerId) return prev;
+          return {
+            ...prev,
+            customer: {
+              ...prev.customer,
+              ...(payload.remarkName !== undefined
+                ? { remarkName: payload.remarkName?.trim() || null }
+                : {}),
+              ...(payload.pinned !== undefined
+                ? { pinnedAt: payload.pinned ? new Date().toISOString() : null }
+                : {}),
+              ...(payload.markRead ? { unreadCount: 0 } : {}),
+            },
+          };
+        });
+      }
+
       const response = await fetch(`/api/customers/${customerId}/workspace`, {
         method: "PATCH",
         headers: {
@@ -584,18 +1014,60 @@ function HomePageContent() {
       });
       const data = await response.json();
       if (!response.ok || !data.ok) {
+        setCustomers(previousCustomers);
+        setWorkspace(previousWorkspace);
         throw new Error(data?.error || "更新顾客信息失败");
       }
-      await loadCustomers({ silent: true });
+
+      const nextCustomer = data.customer;
+      setCustomers((prev) =>
+        sortCustomerList(
+          prev.map((item) =>
+            item.id === customerId
+              ? {
+                  ...item,
+                  remarkName: nextCustomer.remarkName,
+                  pinnedAt: nextCustomer.pinnedAt,
+                  unreadCount: nextCustomer.unreadCount,
+                }
+              : item
+          )
+        )
+      );
       if (selectedCustomerIdRef.current === customerId) {
-        await loadWorkspace(customerId, { preserveUi: true });
+        setWorkspace((prev) => {
+          if (!prev || prev.customer.id !== customerId) return prev;
+          return {
+            ...prev,
+            customer: {
+              ...prev.customer,
+              remarkName: nextCustomer.remarkName,
+              pinnedAt: nextCustomer.pinnedAt,
+              unreadCount: nextCustomer.unreadCount,
+            },
+          };
+        });
       }
     },
-    [loadCustomers, loadWorkspace]
+    [workspace]
   );
   useEffect(() => {
-    loadCustomers();
-  }, [loadCustomers]);
+    customersRef.current = customers;
+  }, [customers]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchText(searchText.trim());
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [searchText]);
+  useEffect(() => {
+    customerPageRef.current = customerPage;
+    hasMoreCustomersRef.current = hasMoreCustomers;
+    searchKeywordRef.current = debouncedSearchText;
+  }, [customerPage, hasMoreCustomers, debouncedSearchText]);
+  useEffect(() => {
+    void loadCustomers({ reset: true, search: debouncedSearchText });
+  }, [debouncedSearchText, loadCustomers]);
   useEffect(() => {
     void loadWorkspace(selectedCustomerId);
   }, [selectedCustomerId, loadWorkspace]);
@@ -688,6 +1160,27 @@ function HomePageContent() {
     };
   }, []);
   useEffect(() => {
+    const sentinel = customerListLoadMoreRef.current;
+    const container = customerListScrollRef.current;
+    if (!sentinel || !container) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const first = entries[0];
+        if (!first?.isIntersecting) return;
+        if (isListLoading || isLoadingMoreCustomers || !hasMoreCustomersRef.current) return;
+        void loadCustomers({ loadMore: true, preserveUi: true, search: searchKeywordRef.current });
+      },
+      {
+        root: container,
+        rootMargin: "160px 0px",
+      }
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [isListLoading, isLoadingMoreCustomers, loadCustomers]);
+  useEffect(() => {
     let timer: number | null = null;
     const pingPresence = async () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") {
@@ -738,7 +1231,12 @@ function HomePageContent() {
         const payload =
           message && typeof message === "object" ? message.data || {} : {};
         const activeCustomerId = selectedCustomerIdRef.current;
-        loadCustomers({ silent: true });
+        loadCustomers({
+          silent: true,
+          preserveUi: true,
+          limitOverride: Math.max(customersRef.current.length, CUSTOMER_PAGE_SIZE),
+          search: searchKeywordRef.current,
+        });
         if (
           activeCustomerId &&
           (!payload.customerId || payload.customerId === activeCustomerId)
@@ -757,23 +1255,34 @@ function HomePageContent() {
       ablyClientRef.current = null;
     };
   }, [loadCustomers, loadWorkspace]);
-  const filteredCustomers = useMemo(() => {
-    const keyword = searchText.trim().toLowerCase();
-    if (!keyword) return customers;
-    return customers.filter((customer) => {
-      const displayName = getDisplayName(customer);
-      const tagText = customer.tags.map((tag) => tag.name).join(" ");
-      const latestPreview = customer.latestMessage?.previewText || "";
-      return (
-        displayName.toLowerCase().includes(keyword) ||
-        customer.originalName.toLowerCase().includes(keyword) ||
-        tagText.toLowerCase().includes(keyword) ||
-        latestPreview.toLowerCase().includes(keyword)
-      );
-    });
-  }, [customers, searchText]);
+  const displayedCustomers = useMemo(() => {
+    return sortCustomerList(
+      customers.map((customer) => {
+        const optimisticList = optimisticMessagesByCustomer[customer.id] || [];
+        if (!optimisticList.length) return customer;
+        const latestOptimistic = [...optimisticList].sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime())[0];
+        const latestBaseTime = customer.latestMessage?.sentAt ? new Date(customer.latestMessage.sentAt).getTime() : 0;
+        const latestOptimisticTime = new Date(latestOptimistic.sentAt).getTime();
+        if (latestOptimisticTime < latestBaseTime) {
+          return customer;
+        }
+        return {
+          ...customer,
+          latestMessage: buildCustomerLatestMessage(latestOptimistic),
+          lastMessageAt: latestOptimistic.sentAt,
+        };
+      })
+    );
+  }, [customers, optimisticMessagesByCustomer]);
+  const displayedWorkspaceMessages = useMemo(() => {
+    if (!workspace) return [] as Array<WorkspaceMessage | OptimisticWorkspaceMessage>;
+    return mergeWorkspaceMessages(
+      workspace.messages,
+      optimisticMessagesByCustomer[workspace.customer.id] || []
+    );
+  }, [workspace, optimisticMessagesByCustomer]);
   const currentListCustomer =
-    filteredCustomers.find((item) => item.id === selectedCustomerId) ||
+    displayedCustomers.find((item) => item.id === selectedCustomerId) ||
     customers.find((item) => item.id === selectedCustomerId) ||
     null;
   useEffect(() => {
@@ -802,7 +1311,7 @@ function HomePageContent() {
       lastOpenedCustomerIdRef.current = workspace.customer.id;
     }
     openChatToBottomRef.current = false;
-  }, [selectedCustomerId, workspace?.customer.id, workspace?.messages.length]);
+  }, [selectedCustomerId, workspace?.customer.id, displayedWorkspaceMessages.length]);
   const displayedSuggestion1Ja =
     customReply?.suggestion1Ja ||
     workspace?.latestReplyDraftSet?.stableJapanese ||
@@ -915,31 +1424,18 @@ function HomePageContent() {
     }
     try {
       setIsSendingAi(variant);
-      const response = await fetch(
-        `/api/customers/${workspace.customer.id}/messages`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            japaneseText: replyJa,
-            chineseText: replyZh,
-            source: "AI_SUGGESTION",
-            type: "TEXT",
-            replyDraftSetId: workspace.latestReplyDraftSet?.id || "",
-            suggestionVariant: variant === "stable" ? "STABLE" : "ADVANCING",
-          }),
-        }
-      );
-      const data = await response.json();
-      if (!response.ok || !data.ok) {
-        throw new Error(data?.error || "发送失败");
-      }
       setCustomReply(null);
+      await submitOutboundMessage({
+        customerId: workspace.customer.id,
+        japaneseText: replyJa,
+        chineseText: replyZh,
+        source: "AI_SUGGESTION",
+        type: "TEXT",
+        replyDraftSetId: workspace.latestReplyDraftSet?.id || "",
+        suggestionVariant: variant === "stable" ? "STABLE" : "ADVANCING",
+      });
     } catch (error) {
       console.error(error);
-      window.alert("AI 建议发送失败，请看终端报错");
     } finally {
       setIsSendingAi("");
     }
@@ -1086,7 +1582,7 @@ function HomePageContent() {
     if (event.shiftKey) return;
     if (event.nativeEvent.isComposing) return;
     event.preventDefault();
-    if (isSendingManual || isUploadingImage || !workspace) return;
+    if (isUploadingImage || !workspace) return;
     if (!manualReply.trim() && !pendingImage) return;
     void handleManualSend();
   }
@@ -1101,70 +1597,16 @@ function HomePageContent() {
     }
     const japaneseText = manualReply.replace(/\r\n/g, "\n");
     const sendingType = pendingImage ? "IMAGE" : "TEXT";
-    try {
-      setIsSendingManual(true);
-      const sendResponse = await fetch(
-        `/api/customers/${workspace.customer.id}/messages`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            japaneseText,
-            imageUrl: pendingImage?.url || "",
-            source: "MANUAL",
-            type: sendingType,
-          }),
-        }
-      );
-      const sendData = await sendResponse.json();
-      if (!sendResponse.ok || !sendData.ok) {
-        throw new Error(sendData?.error || "消息发送失败");
-      }
-      setManualReply("");
-      setPendingImage(null);
-      const messageId = String(sendData?.message?.id || "").trim();
-      if (messageId && japaneseText) {
-        void (async () => {
-          try {
-            const translateResponse = await fetch("/api/translate-message", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                japanese: japaneseText,
-              }),
-            });
-            const translateData = await translateResponse.json();
-            if (
-              !translateResponse.ok ||
-              !translateData.ok ||
-              !translateData.chinese
-            ) {
-              return;
-            }
-            await fetch(`/api/messages/${messageId}/translation`, {
-              method: "PATCH",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                chineseText: translateData.chinese,
-              }),
-            });
-          } catch (error) {
-            console.error("Manual send translate patch error:", error);
-          }
-        })();
-      }
-    } catch (error) {
-      console.error(error);
-      window.alert("发送失败，可在消息气泡上点击重发");
-    } finally {
-      setIsSendingManual(false);
-    }
+    const nextImage = pendingImage;
+    setManualReply("");
+    setPendingImage(null);
+    void submitOutboundMessage({
+      customerId: workspace.customer.id,
+      japaneseText,
+      imageUrl: nextImage?.url || "",
+      source: "MANUAL",
+      type: sendingType,
+    });
   }
   async function handleScheduleManualSend() {
     if (!workspace) {
@@ -1242,20 +1684,59 @@ function HomePageContent() {
   }
   async function handleRetryMessage(messageId: string) {
     if (!workspace || !messageId || retryingMessageId) return;
+
+    if (isOptimisticMessageId(messageId)) {
+      const optimisticMessage = (optimisticMessagesByCustomer[workspace.customer.id] || []).find((item) => item.id === messageId);
+      if (!optimisticMessage) return;
+      try {
+        setRetryingMessageId(messageId);
+        await submitOutboundMessage({
+          customerId: workspace.customer.id,
+          japaneseText: optimisticMessage.japaneseText,
+          chineseText: optimisticMessage.chineseText,
+          imageUrl: optimisticMessage.imageUrl,
+          source: optimisticMessage.source,
+          type: optimisticMessage.type,
+          replyDraftSetId: optimisticMessage.replyDraftSetId,
+          suggestionVariant: optimisticMessage.suggestionVariant ?? undefined,
+          optimisticMessageId: optimisticMessage.id,
+        });
+      } finally {
+        setRetryingMessageId("");
+      }
+      return;
+    }
+
     try {
       setRetryingMessageId(messageId);
+      updateWorkspaceMessage(workspace.customer.id, messageId, (message) => ({
+        ...message,
+        deliveryStatus: "PENDING",
+        sendError: null,
+        failedAt: null,
+        lastAttemptAt: new Date().toISOString(),
+      }));
       const response = await fetch(`/api/messages/${messageId}/retry`, {
         method: "POST",
       });
       const data = await response.json();
-      await loadWorkspace(workspace.customer.id, { preserveUi: true });
-      await loadCustomers({ preserveUi: true });
+      const serverMessage = normalizeWorkspaceMessagePayload(data?.message);
+      if (serverMessage) {
+        upsertWorkspaceMessage(workspace.customer.id, serverMessage);
+        updateCustomerLatestMessage(workspace.customer.id, serverMessage);
+      }
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "重发失败");
       }
     } catch (error) {
       console.error(error);
-      window.alert("重发失败，请看终端报错");
+      updateWorkspaceMessage(workspace.customer.id, messageId, (message) => ({
+        ...message,
+        deliveryStatus: "FAILED",
+        sendError: error instanceof Error ? error.message : String(error),
+        failedAt: new Date().toISOString(),
+        lastAttemptAt: new Date().toISOString(),
+      }));
     } finally {
       setRetryingMessageId("");
     }
@@ -1314,8 +1795,8 @@ function HomePageContent() {
     shouldStickToBottomRef.current = nearBottom;
   }
   const contextMenuCustomer = customerContextMenu?.customer || null;
-  const overdueFollowupCount = customers.filter((customer) => customer.followup?.isOverdue && customer.followup?.state === "ACTIVE").length;
-  const canManualSend = !!workspace && !isSendingManual && !isUploadingImage && (!!pendingImage || !!manualReply.trim());
+  const overdueFollowupCount = customerStats.overdueFollowupCount;
+  const canManualSend = !!workspace && !isUploadingImage && (!!pendingImage || !!manualReply.trim());
   const canScheduleManual = !!workspace && !isSchedulingManual && !isUploadingImage && (!!pendingImage || !!manualReply.trim());
   return (
     <div className="h-screen bg-gray-100 flex">
@@ -1348,7 +1829,7 @@ function HomePageContent() {
           <div className="text-sm text-gray-500">顾客列表加载中...</div>
         ) : (
           <div className="space-y-2">
-            {filteredCustomers.map((customer) => {
+            {displayedCustomers.map((customer) => {
               const isActive = customer.id === selectedCustomerId;
               const latestPreview = customer.latestMessage?.previewText || "暂时还没有消息";
               return (
@@ -1420,9 +1901,12 @@ function HomePageContent() {
                 </div>
               );
             })}
-            {filteredCustomers.length === 0 && (
+            {displayedCustomers.length === 0 && (
               <div className="text-sm text-gray-500 p-3">没有搜索到相关顾客</div>
             )}
+            <div ref={customerListLoadMoreRef} className="h-6 flex items-center justify-center text-xs text-gray-400">
+              {isLoadingMoreCustomers ? "正在加载更多顾客..." : hasMoreCustomers ? "下滑继续加载更多" : displayedCustomers.length > 0 ? "已经到底了" : ""}
+            </div>
           </div>
         )}
       </div>
@@ -1479,11 +1963,11 @@ function HomePageContent() {
             </div>
           ) : !workspace ? (
             <div className="text-sm text-gray-500">当前没有顾客数据</div>
-          ) : workspace.messages.length === 0 ? (
+          ) : displayedWorkspaceMessages.length === 0 ? (
             <div className="text-sm text-gray-500">当前顾客还没有聊天记录</div>
           ) : (
-            workspace.messages.map((msg, index) => {
-              const previousMessage = index > 0 ? workspace.messages[index - 1] : null;
+            displayedWorkspaceMessages.map((msg, index) => {
+              const previousMessage = index > 0 ? displayedWorkspaceMessages[index - 1] : null;
               const showDivider = shouldShowMessageDivider(previousMessage, msg);
               return (
                 <div key={msg.id}>
@@ -1711,7 +2195,7 @@ function HomePageContent() {
                 disabled={!canManualSend}
                 className="bg-green-600 text-white px-4 py-2.5 rounded-xl disabled:opacity-60"
               >
-                {isUploadingImage ? "上传中..." : isSendingManual ? "发送中..." : pendingImage ? "发送图片" : "发送"}
+                {isUploadingImage ? "上传中..." : pendingImage ? "发送图片" : "发送"}
               </button>
             </div>
             {workspace?.scheduledMessages?.length ? (

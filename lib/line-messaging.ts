@@ -1,6 +1,6 @@
 import { MessageType } from "@prisma/client";
 
-export async function pushLineMessages(to: string, messages: unknown[]) {
+export async function pushLineMessages(to: string, messages: unknown[], options?: { retryKey?: string }) {
   const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 
   if (!accessToken) {
@@ -12,6 +12,7 @@ export async function pushLineMessages(to: string, messages: unknown[]) {
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${accessToken}`,
+      ...(options?.retryKey ? { "X-Line-Retry-Key": options.retryKey } : {}),
     },
     body: JSON.stringify({
       to,

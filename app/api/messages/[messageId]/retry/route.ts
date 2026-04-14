@@ -1,7 +1,7 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
-import { buildLineMessages, pushLineMessages } from "@/lib/line-messaging";
+import { dispatchOutboundMessageById } from "@/lib/outbound-message";
 import { MessageRole, MessageSendStatus } from "@prisma/client";
 
 type Props = {
@@ -33,64 +33,33 @@ export async function POST(_: Request, { params }: Props) {
     }
 
     const attemptAt = new Date();
-    await prisma.message.update({
+    const pendingMessage = await prisma.message.update({
       where: { id: message.id },
       data: {
         deliveryStatus: MessageSendStatus.PENDING,
         sendError: null,
+        failedAt: null,
         lastAttemptAt: attemptAt,
       },
     });
 
     try {
-      const lineMessages = buildLineMessages({
-        type: message.type,
-        japaneseText: message.japaneseText,
-        imageUrl: message.imageUrl,
-      });
-      await pushLineMessages(message.customer.lineUserId, lineMessages);
-
-      const sentMessage = await prisma.message.update({
-        where: { id: message.id },
-        data: {
-          deliveryStatus: MessageSendStatus.SENT,
-          sendError: null,
-          failedAt: null,
-          lastAttemptAt: attemptAt,
-          retryCount: { increment: 1 },
-        },
-      });
-
-      try {
-        await publishRealtimeRefresh({ customerId: message.customer.id, reason: "retry-message-success" });
-      } catch (error) {
-        console.error("Ably publish retry-message-success error:", error);
-      }
-
-      return NextResponse.json({ ok: true, message: sentMessage });
+      await publishRealtimeRefresh({ customerId: message.customer.id, reason: "retry-message-queued" });
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const failedAt = new Date();
-
-      const failedMessage = await prisma.message.update({
-        where: { id: message.id },
-        data: {
-          deliveryStatus: MessageSendStatus.FAILED,
-          sendError: errorMessage,
-          failedAt,
-          lastAttemptAt: failedAt,
-          retryCount: { increment: 1 },
-        },
-      });
-
-      try {
-        await publishRealtimeRefresh({ customerId: message.customer.id, reason: "retry-message-failed" });
-      } catch (ablyError) {
-        console.error("Ably publish retry-message-failed error:", ablyError);
-      }
-
-      return NextResponse.json({ ok: false, error: errorMessage, message: failedMessage }, { status: 502 });
+      console.error("Ably publish retry-message-queued error:", error);
     }
+
+    after(async () => {
+      await dispatchOutboundMessageById(message.id, {
+        customerId: message.customer.id,
+        lineUserId: message.customer.lineUserId,
+        successReason: "retry-message-success",
+        failureReason: "retry-message-failed",
+        incrementRetryCount: true,
+      });
+    });
+
+    return NextResponse.json({ ok: true, message: pendingMessage });
   } catch (error) {
     console.error("POST /api/messages/[messageId]/retry error:", error);
     return NextResponse.json({ ok: false, error: String(error) }, { status: 500 });

@@ -1,7 +1,7 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
-import { buildLineMessages, pushLineMessages } from "@/lib/line-messaging";
+import { dispatchOutboundMessageById } from "@/lib/outbound-message";
 import {
   MessageRole,
   MessageSource,
@@ -95,68 +95,23 @@ export async function POST(req: Request, { params }: Props) {
     });
 
     try {
-      const lineMessages = buildLineMessages({
-        type,
-        japaneseText,
-        imageUrl: type === MessageType.IMAGE ? imageUrl : null,
-      });
-
-      await pushLineMessages(customer.lineUserId, lineMessages);
-
-      const sentMessage = await prisma.message.update({
-        where: { id: message.id },
-        data: {
-          deliveryStatus: MessageSendStatus.SENT,
-          sendError: null,
-          failedAt: null,
-        },
-      });
-
-      if (source === MessageSource.AI_SUGGESTION && replyDraftSetId && suggestionVariant) {
-        await prisma.replyDraftSet.updateMany({
-          where: {
-            id: replyDraftSetId,
-            customerId,
-          },
-          data: {
-            selectedVariant: suggestionVariant,
-            selectedAt: now,
-          },
-        });
-      }
-
-      try {
-        await publishRealtimeRefresh({ customerId, reason: "outbound-message" });
-      } catch (error) {
-        console.error("Ably publish outbound-message error:", error);
-      }
-
-      return NextResponse.json({ ok: true, message: sentMessage });
+      await publishRealtimeRefresh({ customerId, reason: "outbound-message-queued" });
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const failedAt = new Date();
-
-      const failedMessage = await prisma.message.update({
-        where: { id: message.id },
-        data: {
-          deliveryStatus: MessageSendStatus.FAILED,
-          sendError: errorMessage,
-          failedAt,
-          lastAttemptAt: failedAt,
-        },
-      });
-
-      try {
-        await publishRealtimeRefresh({ customerId, reason: "outbound-message-failed" });
-      } catch (ablyError) {
-        console.error("Ably publish outbound-message-failed error:", ablyError);
-      }
-
-      return NextResponse.json(
-        { ok: false, error: errorMessage, message: failedMessage },
-        { status: 502 }
-      );
+      console.error("Ably publish outbound-message-queued error:", error);
     }
+
+    after(async () => {
+      await dispatchOutboundMessageById(message.id, {
+        customerId,
+        lineUserId: customer.lineUserId,
+        replyDraftSetId: replyDraftSetId || null,
+        suggestionVariant,
+        successReason: "outbound-message",
+        failureReason: "outbound-message-failed",
+      });
+    });
+
+    return NextResponse.json({ ok: true, message });
   } catch (error) {
     console.error("POST /api/customers/[customerId]/messages error:", error);
     return NextResponse.json({ ok: false, error: String(error) }, { status: 500 });
