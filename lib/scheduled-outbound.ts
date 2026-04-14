@@ -24,7 +24,10 @@ export function normalizeScheduledAtInput(value: string) {
   return date;
 }
 
-export function validateScheduleWindow(scheduledFor: Date, minimumDelayMinutes = 30) {
+export function validateScheduleWindow(
+  scheduledFor: Date,
+  minimumDelayMinutes = 30
+) {
   const now = Date.now();
   const diff = scheduledFor.getTime() - now;
   if (diff < minimumDelayMinutes * 60 * 1000) {
@@ -32,7 +35,9 @@ export function validateScheduleWindow(scheduledFor: Date, minimumDelayMinutes =
   }
 }
 
-export async function dispatchScheduledMessageById(scheduledMessageId: string) {
+export async function dispatchScheduledMessageById(
+  scheduledMessageId: string
+) {
   const attemptAt = new Date();
 
   const claimed = await prisma.scheduledMessage.updateMany({
@@ -79,7 +84,11 @@ export async function dispatchScheduledMessageById(scheduledMessageId: string) {
         sendError: "当前客户没有 LINE userId，无法发送定时消息",
       },
     });
-    return { ok: false, scheduledMessageId: scheduled.id, reason: "missing-line-user" };
+    return {
+      ok: false,
+      scheduledMessageId: scheduled.id,
+      reason: "missing-line-user",
+    };
   }
 
   let messageId = scheduled.deliveredMessageId || null;
@@ -98,7 +107,8 @@ export async function dispatchScheduledMessageById(scheduledMessageId: string) {
           source: scheduled.source,
           japaneseText: normalizedText,
           chineseText: scheduled.chineseText,
-          imageUrl: scheduled.type === MessageType.IMAGE ? scheduled.imageUrl : null,
+          imageUrl:
+            scheduled.type === MessageType.IMAGE ? scheduled.imageUrl : null,
           sentAt: attemptAt,
           deliveryStatus: MessageSendStatus.PENDING,
           lastAttemptAt: attemptAt,
@@ -118,7 +128,8 @@ export async function dispatchScheduledMessageById(scheduledMessageId: string) {
         data: {
           japaneseText: normalizedText,
           chineseText: scheduled.chineseText,
-          imageUrl: scheduled.type === MessageType.IMAGE ? scheduled.imageUrl : null,
+          imageUrl:
+            scheduled.type === MessageType.IMAGE ? scheduled.imageUrl : null,
           sentAt: attemptAt,
           deliveryStatus: MessageSendStatus.PENDING,
           sendError: null,
@@ -126,6 +137,7 @@ export async function dispatchScheduledMessageById(scheduledMessageId: string) {
           lastAttemptAt: attemptAt,
         },
       });
+      messageId = messageRecord.id;
     }
 
     await prisma.customer.update({
@@ -139,10 +151,17 @@ export async function dispatchScheduledMessageById(scheduledMessageId: string) {
     const lineMessages = buildLineMessages({
       type: scheduled.type,
       japaneseText: normalizedText,
-      imageUrl: scheduled.type === MessageType.IMAGE ? scheduled.imageUrl : null,
+      imageUrl:
+        scheduled.type === MessageType.IMAGE ? scheduled.imageUrl : null,
     });
 
     await pushLineMessages(scheduled.customer.lineUserId, lineMessages);
+
+    if (!messageId) {
+      throw new Error(
+        "scheduled message 缺少关联的 messageId，无法更新发送状态"
+      );
+    }
 
     await prisma.message.update({
       where: { id: messageId },
@@ -184,7 +203,10 @@ export async function dispatchScheduledMessageById(scheduledMessageId: string) {
     }
 
     try {
-      await publishRealtimeRefresh({ customerId: scheduled.customerId, reason: "scheduled-message-sent" });
+      await publishRealtimeRefresh({
+        customerId: scheduled.customerId,
+        reason: "scheduled-message-sent",
+      });
     } catch (error) {
       console.error("Ably publish scheduled-message-sent error:", error);
     }
@@ -216,9 +238,15 @@ export async function dispatchScheduledMessageById(scheduledMessageId: string) {
     });
 
     try {
-      await publishRealtimeRefresh({ customerId: scheduled.customerId, reason: "scheduled-message-failed" });
+      await publishRealtimeRefresh({
+        customerId: scheduled.customerId,
+        reason: "scheduled-message-failed",
+      });
     } catch (ablyError) {
-      console.error("Ably publish scheduled-message-failed error:", ablyError);
+      console.error(
+        "Ably publish scheduled-message-failed error:",
+        ablyError
+      );
     }
 
     return { ok: false, scheduledMessageId: scheduled.id, error: errorMessage };
