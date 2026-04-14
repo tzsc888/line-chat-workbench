@@ -38,7 +38,7 @@ type CustomerListItem = {
     id: string;
     role: "CUSTOMER" | "OPERATOR";
     type: "TEXT" | "IMAGE";
-    source: MessageSource;
+    source: "LINE" | "MANUAL" | "AI_SUGGESTION";
     japaneseText: string;
     chineseText: string | null;
     sentAt: string;
@@ -50,7 +50,7 @@ type WorkspaceMessage = {
   customerId: string;
   role: "CUSTOMER" | "OPERATOR";
   type: "TEXT" | "IMAGE";
-  source: MessageSource;
+  source: "LINE" | "MANUAL" | "AI_SUGGESTION";
   lineMessageId: string | null;
   japaneseText: string;
   chineseText: string | null;
@@ -82,7 +82,7 @@ type ReplyDraftSet = {
 type ScheduledMessageItem = {
   id: string;
   type: "TEXT" | "IMAGE";
-  source: MessageSource;
+  source: "LINE" | "MANUAL" | "AI_SUGGESTION";
   japaneseText: string;
   chineseText: string | null;
   imageUrl: string | null;
@@ -293,12 +293,8 @@ function sortCustomerList(list: CustomerListItem[]) {
     const bLast = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
     if (bLast !== aLast) return bLast - aLast;
 
-    return b.id.localeCompare(a.id);
+    return a.originalName.localeCompare(b.originalName, "zh-CN");
   });
-}
-function getLoadedRegularPage(list: CustomerListItem[]) {
-  const regularCount = list.filter((item) => !item.pinnedAt).length;
-  return Math.max(1, Math.ceil(regularCount / CUSTOMER_PAGE_SIZE) || 1);
 }
 function mergeWorkspaceMessages(
   baseMessages: WorkspaceMessage[],
@@ -552,23 +548,17 @@ function HomePageContent() {
       search?: string;
       limitOverride?: number;
     }) => {
-      const shouldPreserveListUi =
-        !!options?.silent || !!options?.preserveUi || !!options?.loadMore;
+      const shouldPreserveListUi = !!options?.silent || !!options?.preserveUi || !!options?.loadMore;
       const listScrollTop = shouldPreserveListUi
         ? customerListScrollRef.current?.scrollTop ?? 0
         : 0;
       const isLoadMore = !!options?.loadMore;
+      const isReset = options?.reset ?? !isLoadMore;
       const activeSearch = options?.search ?? searchKeywordRef.current;
-      const currentRegularLoadedCount = customersRef.current.filter(
-        (item) => !item.pinnedAt
-      ).length;
+      const loadedPinnedCount = customersRef.current.filter((item) => !!item.pinnedAt).length;
+      const loadedRegularCount = Math.max(0, customersRef.current.length - loadedPinnedCount);
       const limit = Math.max(
-        options?.limitOverride ??
-          (isLoadMore
-            ? CUSTOMER_PAGE_SIZE
-            : shouldPreserveListUi
-            ? Math.max(currentRegularLoadedCount, CUSTOMER_PAGE_SIZE)
-            : CUSTOMER_PAGE_SIZE),
+        options?.limitOverride ?? CUSTOMER_PAGE_SIZE,
         CUSTOMER_PAGE_SIZE
       );
       const page = isLoadMore ? customerPageRef.current + 1 : 1;
@@ -603,45 +593,35 @@ function HomePageContent() {
 
         const list: CustomerListItem[] = data.customers || [];
         const nextHasMore = !!data.hasMore;
-        const nextStats: CustomerListStats = data.stats || {
-          overdueFollowupCount: 0,
-        };
+        const nextPage = Number(data.page || page);
+        const nextStats: CustomerListStats = data.stats || { overdueFollowupCount: 0 };
 
-        let nextCustomers: CustomerListItem[] = [];
         setCustomers((prev) => {
           if (isLoadMore) {
             const merged = new Map<string, CustomerListItem>();
             for (const item of prev) merged.set(item.id, item);
             for (const item of list) merged.set(item.id, item);
-            nextCustomers = sortCustomerList(Array.from(merged.values()));
-            return nextCustomers;
+            return sortCustomerList(Array.from(merged.values()));
           }
-          nextCustomers = sortCustomerList(list);
-          return nextCustomers;
+          return sortCustomerList(list);
         });
-
-        const nextPage = getLoadedRegularPage(
-          isLoadMore
-            ? [
-                ...customersRef.current.filter(
-                  (item) => !list.some((nextItem) => nextItem.id === item.id)
-                ),
-                ...list,
-              ]
-            : list
-        );
+        const loadedPinnedCountAfterFetch = list.filter((item) => !!item.pinnedAt).length;
+        const loadedRegularCountAfterFetch = Math.max(0, list.length - loadedPinnedCountAfterFetch);
+        const nextPageValue =
+          !activeSearch && !isLoadMore
+            ? Math.max(1, Math.ceil(loadedRegularCountAfterFetch / CUSTOMER_PAGE_SIZE))
+            : nextPage;
 
         setCustomerStats(nextStats);
-        setCustomerPage(nextPage);
+        setCustomerPage(nextPageValue);
         setHasMoreCustomers(nextHasMore);
-        customerPageRef.current = nextPage;
+        customerPageRef.current = nextPageValue;
         hasMoreCustomersRef.current = nextHasMore;
         searchKeywordRef.current = activeSearch;
 
         setSelectedCustomerId((prev) => {
           if (prev && list.some((item) => item.id === prev)) return prev;
-          if (prev && customersRef.current.some((item) => item.id === prev))
-            return prev;
+          if (prev && customersRef.current.some((item) => item.id === prev)) return prev;
           return prev;
         });
 
@@ -1276,10 +1256,14 @@ function HomePageContent() {
         const payload =
           message && typeof message === "object" ? message.data || {} : {};
         const activeCustomerId = selectedCustomerIdRef.current;
+        const loadedRegularCount = Math.max(
+          0,
+          customersRef.current.filter((item) => !item.pinnedAt).length
+        );
         loadCustomers({
           silent: true,
           preserveUi: true,
-          limitOverride: Math.max(customersRef.current.filter((item) => !item.pinnedAt).length, CUSTOMER_PAGE_SIZE),
+          limitOverride: Math.max(loadedRegularCount, CUSTOMER_PAGE_SIZE),
           search: searchKeywordRef.current,
         });
         if (
