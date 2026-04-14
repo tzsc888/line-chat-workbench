@@ -193,7 +193,7 @@ export async function GET(req: NextRequest) {
     if (keyword) {
       const items = await prisma.customer.findMany({
         where: buildSearchWhere(keyword),
-        orderBy: [{ pinnedAt: "desc" }, { lastMessageAt: "desc" }, { updatedAt: "desc" }],
+        orderBy: [{ pinnedAt: "desc" }, { lastMessageAt: "desc" }],
         skip,
         take: limit + 1,
         select: customerSelect,
@@ -209,7 +209,7 @@ export async function GET(req: NextRequest) {
                   not: null,
                 },
               },
-              orderBy: [{ pinnedAt: "desc" }, { lastMessageAt: "desc" }, { updatedAt: "desc" }],
+              orderBy: [{ pinnedAt: "desc" }, { lastMessageAt: "desc" }],
               select: customerSelect,
             })
           : [];
@@ -218,7 +218,7 @@ export async function GET(req: NextRequest) {
         where: {
           pinnedAt: null,
         },
-        orderBy: [{ lastMessageAt: "desc" }, { updatedAt: "desc" }],
+        orderBy: [{ lastMessageAt: "desc" }],
         skip,
         take: limit + 1,
         select: customerSelect,

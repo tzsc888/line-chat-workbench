@@ -3,7 +3,6 @@ import * as Ably from "ably";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from "react";
-import { MessageSource } from "@prisma/client";
 type FollowupSummary = {
   bucket: "UNCONVERTED" | "VIP";
   tier: "A" | "B" | "C";
@@ -512,6 +511,17 @@ function HomePageContent() {
   const audioEnabledRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastIncomingSoundAtRef = useRef(0);
+  const preserveCustomerListViewport = useCallback((apply: () => void) => {
+    const container = customerListScrollRef.current;
+    const previousScrollTop = container?.scrollTop ?? null;
+    apply();
+    if (previousScrollTop === null) return;
+    requestAnimationFrame(() => {
+      const current = customerListScrollRef.current;
+      if (!current) return;
+      current.scrollTop = previousScrollTop;
+    });
+  }, []);
   const loadPresetSnippets = useCallback(async () => {
     try {
       setIsPresetLoading(true);
@@ -804,21 +814,23 @@ function HomePageContent() {
   );
   const updateCustomerLatestMessage = useCallback(
     (customerId: string, message: WorkspaceMessage | OptimisticWorkspaceMessage) => {
-      setCustomers((prev) =>
-        sortCustomerList(
-          prev.map((item) =>
-            item.id === customerId
-              ? {
-                  ...item,
-                  lastMessageAt: message.sentAt,
-                  latestMessage: buildCustomerLatestMessage(message),
-                }
-              : item
+      preserveCustomerListViewport(() => {
+        setCustomers((prev) =>
+          sortCustomerList(
+            prev.map((item) =>
+              item.id === customerId
+                ? {
+                    ...item,
+                    lastMessageAt: message.sentAt,
+                    latestMessage: buildCustomerLatestMessage(message),
+                  }
+                : item
+            )
           )
-        )
-      );
+        );
+      });
     },
-    []
+    [preserveCustomerListViewport]
   );
   const attachAsyncTranslation = useCallback(async (messageId: string, japaneseText: string) => {
     if (!messageId || !japaneseText.trim()) return;
@@ -856,7 +868,7 @@ function HomePageContent() {
       chineseText?: string | null;
       imageUrl?: string | null;
       type: "TEXT" | "IMAGE";
-      source: MessageSource;
+      source: "MANUAL" | "AI_SUGGESTION";
       replyDraftSetId?: string;
       suggestionVariant?: "STABLE" | "ADVANCING";
       optimisticMessageId?: string;
@@ -969,23 +981,25 @@ function HomePageContent() {
       const previousCustomers = customersRef.current;
       const previousWorkspace = workspace;
 
-      setCustomers((prev) =>
-        sortCustomerList(
-          prev.map((item) => {
-            if (item.id !== customerId) return item;
-            return {
-              ...item,
-              ...(payload.remarkName !== undefined
-                ? { remarkName: payload.remarkName?.trim() || null }
-                : {}),
-              ...(payload.pinned !== undefined
-                ? { pinnedAt: payload.pinned ? new Date().toISOString() : null }
-                : {}),
-              ...(payload.markRead ? { unreadCount: 0 } : {}),
-            };
-          })
-        )
-      );
+      preserveCustomerListViewport(() => {
+        setCustomers((prev) =>
+          sortCustomerList(
+            prev.map((item) => {
+              if (item.id !== customerId) return item;
+              return {
+                ...item,
+                ...(payload.remarkName !== undefined
+                  ? { remarkName: payload.remarkName?.trim() || null }
+                  : {}),
+                ...(payload.pinned !== undefined
+                  ? { pinnedAt: payload.pinned ? new Date().toISOString() : null }
+                  : {}),
+                ...(payload.markRead ? { unreadCount: 0 } : {}),
+              };
+            })
+          )
+        );
+      });
       if (selectedCustomerIdRef.current === customerId) {
         setWorkspace((prev) => {
           if (!prev || prev.customer.id !== customerId) return prev;
@@ -1020,20 +1034,22 @@ function HomePageContent() {
       }
 
       const nextCustomer = data.customer;
-      setCustomers((prev) =>
-        sortCustomerList(
-          prev.map((item) =>
-            item.id === customerId
-              ? {
-                  ...item,
-                  remarkName: nextCustomer.remarkName,
-                  pinnedAt: nextCustomer.pinnedAt,
-                  unreadCount: nextCustomer.unreadCount,
-                }
-              : item
+      preserveCustomerListViewport(() => {
+        setCustomers((prev) =>
+          sortCustomerList(
+            prev.map((item) =>
+              item.id === customerId
+                ? {
+                    ...item,
+                    remarkName: nextCustomer.remarkName,
+                    pinnedAt: nextCustomer.pinnedAt,
+                    unreadCount: nextCustomer.unreadCount,
+                  }
+                : item
+            )
           )
-        )
-      );
+        );
+      });
       if (selectedCustomerIdRef.current === customerId) {
         setWorkspace((prev) => {
           if (!prev || prev.customer.id !== customerId) return prev;
@@ -1049,7 +1065,7 @@ function HomePageContent() {
         });
       }
     },
-    [workspace]
+    [preserveCustomerListViewport, workspace]
   );
   useEffect(() => {
     customersRef.current = customers;
