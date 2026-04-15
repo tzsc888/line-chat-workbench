@@ -4,10 +4,12 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from "react";
 import { MessageSource } from "@prisma/client";
+import { deriveDraftPresentation } from "@/lib/ai/draft-presentation";
+import { AiAssistantPanel } from "@/app/components/ai-assistant-panel";
 type FollowupSummary = {
   bucket: "UNCONVERTED" | "VIP";
   tier: "A" | "B" | "C";
-  state: "ACTIVE" | "DONE" | "PAUSED";
+  state: "ACTIVE" | "OBSERVING" | "WAITING_WINDOW" | "POST_PURCHASE_CARE" | "DONE" | "PAUSED";
   reason: string;
   nextFollowupAt: string | null;
   isOverdue: boolean;
@@ -28,6 +30,7 @@ type CustomerListItem = {
   aiCurrentStrategy: string | null;
   aiLastAnalyzedAt: string | null;
   lastMessageAt: string | null;
+  riskTags?: string[];
   followup: FollowupSummary | null;
   tags: {
     id: string;
@@ -74,6 +77,25 @@ type ReplyDraftSet = {
   advancingJapanese: string;
   advancingChinese: string;
   modelName: string;
+  translationPromptVersion: string | null;
+  analysisPromptVersion: string | null;
+  generationPromptVersion: string | null;
+  reviewPromptVersion: string | null;
+  sceneType: string | null;
+  routeType: string | null;
+  replyGoal: string | null;
+  pushLevel: string | null;
+  differenceNote: string | null;
+  generationBriefJson: string | null;
+  reviewFlagsJson: string | null;
+  programChecksJson: string | null;
+  aiReviewJson: string | null;
+  finalGateJson: string | null;
+  selfCheckJson: string | null;
+  recommendedVariant: "STABLE" | "ADVANCING" | null;
+  isStale: boolean;
+  staleReason: string | null;
+  staleAt: string | null;
   selectedVariant: "STABLE" | "ADVANCING" | null;
   selectedAt: string | null;
   createdAt: string;
@@ -87,7 +109,7 @@ type ScheduledMessageItem = {
   chineseText: string | null;
   imageUrl: string | null;
   scheduledFor: string;
-  status: "PENDING" | "PROCESSING" | "FAILED";
+  status: "PENDING" | "PROCESSING" | "FAILED" | "CANCELED";
   sendError: string | null;
   retryCount: number;
   createdAt: string;
@@ -110,6 +132,7 @@ type WorkspaceData = {
     aiCurrentStrategy: string | null;
     aiLastAnalyzedAt: string | null;
     lastMessageAt: string | null;
+    riskTags?: string[];
     followup: FollowupSummary | null;
   };
   tags: {
@@ -441,6 +464,7 @@ function HomePageContent() {
   const [pageError, setPageError] = useState("");
   const [apiError, setApiError] = useState("");
   const [helperError, setHelperError] = useState("");
+  const [aiNotice, setAiNotice] = useState("");
   const clearCustomerQuery = useCallback(() => {
     if (!requestedCustomerId) return;
     router.replace(pathname, { scroll: false });
@@ -693,6 +717,7 @@ function HomePageContent() {
           setPendingImage(null);
           setApiError("");
           setHelperError("");
+          setAiNotice("");
         }
         const response = await fetch(`/api/customers/${customerId}/workspace`, {
           cache: "no-store",
@@ -1358,25 +1383,37 @@ function HomePageContent() {
     workspace?.latestReplyDraftSet?.advancingChinese ||
     "";
   const latestDraft = workspace?.latestReplyDraftSet || null;
-  const isLatestDraftUsed = !!latestDraft?.selectedVariant;
-  const isLatestDraftStale =
-    !!latestDraft &&
-    !!workspace?.latestCustomerMessageId &&
-    !!latestDraft.targetCustomerMessageId &&
-    latestDraft.targetCustomerMessageId !== workspace.latestCustomerMessageId;
-  const shouldDimDraft = isLatestDraftUsed || isLatestDraftStale;
+  const draftPresentation = useMemo(
+    () => deriveDraftPresentation(latestDraft, workspace?.latestCustomerMessageId || null),
+    [latestDraft, workspace?.latestCustomerMessageId]
+  );
+  const latestDraftGenerationBrief = draftPresentation.generationBrief;
+  const latestDraftReviewFlags = draftPresentation.reviewFlags;
+  const latestDraftAiReview = draftPresentation.aiReview;
+  const latestDraftSelfCheck = draftPresentation.selfCheck;
+  const isLatestDraftUsed = draftPresentation.isUsed;
+  const isLatestDraftStale = draftPresentation.isStale;
+  const isLatestDraftBlocked = draftPresentation.isBlocked;
+  const shouldDimDraft = draftPresentation.shouldDimDraft;
+  const latestDraftIssues = draftPresentation.issues;
+  const latestDraftStatusNote = draftPresentation.statusNote;
+  const latestDraftReviewSummary = draftPresentation.reviewSummary;
+  const latestDraftPrimaryActionLabel = draftPresentation.primaryActionLabel;
+  const latestDraftPrimaryActionHint = draftPresentation.primaryActionHint;
+  useEffect(() => {
+    setCustomReply(null);
+    setAiNotice("");
+  }, [selectedCustomerId, workspace?.latestReplyDraftSet?.id, workspace?.latestCustomerMessageId]);
   async function handleRewrite() {
     if (!workspace) {
       window.alert("当前没有选中的顾客");
       return;
     }
-    if (!rewriteInput.trim()) {
-      window.alert("请先输入你的要求");
-      return;
-    }
     try {
       setIsGenerating(true);
       setApiError("");
+      setAiNotice("");
+      setCustomReply(null);
       const response = await fetch("/api/generate-replies", {
         method: "POST",
         headers: {
@@ -1391,12 +1428,18 @@ function HomePageContent() {
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "生成失败");
       }
-      setCustomReply({
-        suggestion1Ja: data.suggestion1Ja || "",
-        suggestion1Zh: data.suggestion1Zh || "",
-        suggestion2Ja: data.suggestion2Ja || "",
-        suggestion2Zh: data.suggestion2Zh || "",
-      });
+      if (!data?.skipped) {
+        setCustomReply({
+          suggestion1Ja: data.suggestion1Ja || "",
+          suggestion1Zh: data.suggestion1Zh || "",
+          suggestion2Ja: data.suggestion2Ja || "",
+          suggestion2Zh: data.suggestion2Zh || "",
+        });
+        setAiNotice("");
+      } else {
+        setAiNotice(data?.reason || "当前局面不建议生成建议回复，已刷新判断结果");
+      }
+      setRewriteInput("");
       await loadWorkspace(workspace.customer.id);
       await loadCustomers({ preserveUi: true });
     } catch (error) {
@@ -1415,6 +1458,8 @@ function HomePageContent() {
     try {
       setIsAnalyzing(true);
       setHelperError("");
+      setAiNotice("");
+      setCustomReply(null);
       const response = await fetch("/api/analyze-customer", {
         method: "POST",
         headers: {
@@ -1428,12 +1473,17 @@ function HomePageContent() {
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "分析失败");
       }
+      if (data?.analysis?.routing_decision?.should_generate_reply === false) {
+        setAiNotice(data?.analysis?.routing_decision?.route_reason || "当前局面不建议自动生成建议回复，已刷新判断结果");
+      } else {
+        setAiNotice("已刷新当前判断与跟进状态");
+      }
       await loadWorkspace(workspace.customer.id);
       await loadCustomers({ preserveUi: true });
     } catch (error) {
       console.error(error);
       setHelperError(String(error));
-      window.alert("副模型分析失败，请看右侧错误提示或终端报错");
+      window.alert("分析刷新失败，请看右侧错误提示或终端报错");
     } finally {
       setIsAnalyzing(false);
     }
@@ -2371,134 +2421,39 @@ function HomePageContent() {
           ) : null}
         </div>
       </div>
-      <div className="w-[30%] bg-white border-l border-gray-200 p-4 overflow-y-auto">
-        <h2 className="text-lg font-bold mb-4">AI 助理</h2>
-        <div className="space-y-5">
-          <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
-            <div className="flex items-center justify-between mb-2">
-              <div className="font-semibold text-amber-900">客户信息</div>
-              <button
-                onClick={handleAnalyzeCustomer}
-                disabled={isAnalyzing || !workspace}
-                className="text-xs px-3 py-1 rounded-lg bg-amber-900 text-white disabled:opacity-60"
-              >
-                {isAnalyzing ? "分析中..." : "副模型整理"}
-              </button>
-            </div>
-            <div className="text-sm text-amber-900/90">
-              <div>{workspace?.customer.aiCustomerInfo || ""}</div>
-              <div className="mt-2">{workspace?.customer.aiCurrentStrategy || ""}</div>
-            </div>
-            {helperError ? (
-              <div className="text-xs text-red-500 mt-2 break-all">{helperError}</div>
-            ) : null}
-          </div>
-          <div
-            className={`rounded-xl border p-4 ${
-              shouldDimDraft ? "border-gray-200 bg-gray-50 opacity-70" : "border-gray-200 bg-white"
-            }`}
-          >
-            <div className="font-semibold mb-2">更稳回复</div>
-            <div
-              className={`text-sm p-3 rounded-lg whitespace-pre-wrap min-h-[72px] ${
-                shouldDimDraft ? "bg-gray-200 text-gray-600" : "bg-gray-100"
-              }`}
-            >
-              {displayedSuggestion1Ja}
-            </div>
-            <div
-              className={`text-sm p-3 rounded-lg mt-2 whitespace-pre-wrap min-h-[72px] ${
-                shouldDimDraft ? "bg-gray-100 text-gray-500" : "bg-gray-50 text-gray-700"
-              }`}
-            >
-              {displayedSuggestion1Zh}
-            </div>
-            <button
-              onClick={() =>
-                addAiReplyToChat(
-                  displayedSuggestion1Ja,
-                  displayedSuggestion1Zh,
-                  "stable"
-                )
-              }
-              disabled={
-                !workspace || !displayedSuggestion1Ja || isSendingAi !== "" || shouldDimDraft
-              }
-              className="w-full mt-3 bg-blue-600 text-white py-2 rounded-lg disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500"
-            >
-              {isSendingAi === "stable"
-                ? "发送中..."
-                : isLatestDraftUsed
-                  ? "已使用"
-                  : isLatestDraftStale
-                    ? "已失效"
-                    : "发送"}
-            </button>
-          </div>
-          <div
-            className={`rounded-xl border p-4 ${
-              shouldDimDraft ? "border-gray-200 bg-gray-50 opacity-70" : "border-gray-200 bg-white"
-            }`}
-          >
-            <div className="font-semibold mb-2">更推进成交</div>
-            <div
-              className={`text-sm p-3 rounded-lg whitespace-pre-wrap min-h-[72px] ${
-                shouldDimDraft ? "bg-gray-200 text-gray-600" : "bg-gray-100"
-              }`}
-            >
-              {displayedSuggestion2Ja}
-            </div>
-            <div
-              className={`text-sm p-3 rounded-lg mt-2 whitespace-pre-wrap min-h-[72px] ${
-                shouldDimDraft ? "bg-gray-100 text-gray-500" : "bg-gray-50 text-gray-700"
-              }`}
-            >
-              {displayedSuggestion2Zh}
-            </div>
-            <button
-              onClick={() =>
-                addAiReplyToChat(
-                  displayedSuggestion2Ja,
-                  displayedSuggestion2Zh,
-                  "advancing"
-                )
-              }
-              disabled={
-                !workspace || !displayedSuggestion2Ja || isSendingAi !== "" || shouldDimDraft
-              }
-              className="w-full mt-3 bg-blue-600 text-white py-2 rounded-lg disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500"
-            >
-              {isSendingAi === "advancing"
-                ? "发送中..."
-                : isLatestDraftUsed
-                  ? "已使用"
-                  : isLatestDraftStale
-                    ? "已失效"
-                    : "发送"}
-            </button>
-          </div>
-          <div className="rounded-xl border border-gray-200 p-4 bg-white">
-            <div className="font-semibold mb-2">要求重写</div>
-            <input
-              type="text"
-              value={rewriteInput}
-              onChange={(e) => setRewriteInput(e.target.value)}
-              placeholder="例如：更自然一点，不要太销售"
-              className="w-full border rounded-lg px-3 py-2 text-sm"
-            />
-            <button
-              onClick={handleRewrite}
-              disabled={isGenerating || !workspace}
-              className="w-full mt-2 bg-black text-white py-2 rounded-lg disabled:opacity-60"
-            >
-              {isGenerating ? "生成中..." : "重新生成"}
-            </button>
-            {apiError ? (
-              <div className="text-xs text-red-500 mt-2 break-all">{apiError}</div>
-            ) : null}
-          </div>
-        </div>
-      </div>
+      <AiAssistantPanel
+        workspace={workspace}
+        latestDraft={latestDraft}
+        latestDraftGenerationBrief={latestDraftGenerationBrief}
+        latestDraftReviewFlags={latestDraftReviewFlags}
+        latestDraftAiReview={latestDraftAiReview}
+        latestDraftSelfCheck={latestDraftSelfCheck}
+        latestDraftIssues={latestDraftIssues}
+        latestDraftStatusNote={latestDraftStatusNote}
+        latestDraftReviewSummary={latestDraftReviewSummary}
+        latestDraftPrimaryActionLabel={latestDraftPrimaryActionLabel}
+        latestDraftPrimaryActionHint={latestDraftPrimaryActionHint}
+        isLatestDraftUsed={isLatestDraftUsed}
+        isLatestDraftStale={isLatestDraftStale}
+        isLatestDraftBlocked={isLatestDraftBlocked}
+        shouldDimDraft={shouldDimDraft}
+        displayedSuggestion1Ja={displayedSuggestion1Ja}
+        displayedSuggestion1Zh={displayedSuggestion1Zh}
+        displayedSuggestion2Ja={displayedSuggestion2Ja}
+        displayedSuggestion2Zh={displayedSuggestion2Zh}
+        rewriteInput={rewriteInput}
+        onRewriteInputChange={setRewriteInput}
+        onAnalyzeCustomer={handleAnalyzeCustomer}
+        onRewrite={handleRewrite}
+        onSendStable={() => addAiReplyToChat(displayedSuggestion1Ja, displayedSuggestion1Zh, "stable")}
+        onSendAdvancing={() => addAiReplyToChat(displayedSuggestion2Ja, displayedSuggestion2Zh, "advancing")}
+        isAnalyzing={isAnalyzing}
+        isGenerating={isGenerating}
+        isSendingAi={isSendingAi}
+        helperError={helperError}
+        apiError={apiError}
+        aiNotice={aiNotice}
+      />
       {customerContextMenu && contextMenuCustomer ? (
         <div
           className="fixed z-50 min-w-40 rounded-xl border border-gray-200 bg-white shadow-xl py-2"

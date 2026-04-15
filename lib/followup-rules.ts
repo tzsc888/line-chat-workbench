@@ -1,7 +1,7 @@
 export type EffectiveBucket = "UNCONVERTED" | "VIP";
 export type EffectiveTier = "A" | "B" | "C";
-export type EffectiveState = "ACTIVE" | "DONE" | "PAUSED";
-export type FollowupTimingKey = "24H" | "2D" | "5D" | "7D" | "14D" | "NONE";
+export type EffectiveState = "ACTIVE" | "OBSERVING" | "WAITING_WINDOW" | "POST_PURCHASE_CARE" | "DONE" | "PAUSED";
+export type FollowupTimingKey = "IMMEDIATE" | "TODAY" | "IN_1_DAY" | "IN_3_DAYS" | "IN_7_DAYS" | "NO_SET";
 
 type FollowupRuleCustomer = {
   isVip?: boolean;
@@ -14,6 +14,7 @@ type FollowupRuleCustomer = {
   followupBucket?: EffectiveBucket | null;
   followupTier?: EffectiveTier | null;
   followupState?: EffectiveState | null;
+  nextFollowupBucket?: FollowupTimingKey | null;
   nextFollowupAt?: Date | null;
   followupReason?: string | null;
   lastMessageAt?: Date | null;
@@ -66,44 +67,43 @@ export function deriveDefaultTier(customer: FollowupRuleCustomer): EffectiveTier
 }
 
 export function deriveDefaultTimingKey(customer: FollowupRuleCustomer): FollowupTimingKey {
+  if (customer.nextFollowupBucket) return customer.nextFollowupBucket;
+
   const bucket = deriveEffectiveBucket(customer);
   const tier = deriveDefaultTier(customer);
 
   if (bucket === "VIP") {
-    if (tier === "A") return "24H";
-    if (tier === "B") return "5D";
-    return "14D";
+    if (tier === "A") return "TODAY";
+    if (tier === "B") return "IN_3_DAYS";
+    return "IN_7_DAYS";
   }
 
-  if (tier === "A") return "24H";
-  if (tier === "B") return "2D";
-  return "14D";
+  if (tier === "A") return "TODAY";
+  if (tier === "B") return "IN_1_DAY";
+  return "IN_7_DAYS";
 }
 
 export function timingKeyToNextFollowupAt(key: FollowupTimingKey, baseDate?: Date | null) {
-  if (!key || key === "NONE") return null;
+  if (!key || key === "NO_SET") return null;
 
   const base = baseDate ? new Date(baseDate) : new Date();
   const next = new Date(base);
 
-  if (key === "24H") {
-    next.setHours(next.getHours() + 24);
+  if (key === "IMMEDIATE") return next;
+  if (key === "TODAY") {
+    next.setHours(next.getHours() + 2);
     return next;
   }
-  if (key === "2D") {
-    next.setDate(next.getDate() + 2);
+  if (key === "IN_1_DAY") {
+    next.setDate(next.getDate() + 1);
     return next;
   }
-  if (key === "5D") {
-    next.setDate(next.getDate() + 5);
+  if (key === "IN_3_DAYS") {
+    next.setDate(next.getDate() + 3);
     return next;
   }
-  if (key === "7D") {
+  if (key === "IN_7_DAYS") {
     next.setDate(next.getDate() + 7);
-    return next;
-  }
-  if (key === "14D") {
-    next.setDate(next.getDate() + 14);
     return next;
   }
 
@@ -127,7 +127,14 @@ export function deriveDefaultReason(customer: FollowupRuleCustomer) {
 }
 
 export function deriveEffectiveState(customer: FollowupRuleCustomer): EffectiveState {
-  if (customer.followupState === "ACTIVE" || customer.followupState === "DONE" || customer.followupState === "PAUSED") {
+  if (
+    customer.followupState === "ACTIVE" ||
+    customer.followupState === "OBSERVING" ||
+    customer.followupState === "WAITING_WINDOW" ||
+    customer.followupState === "POST_PURCHASE_CARE" ||
+    customer.followupState === "DONE" ||
+    customer.followupState === "PAUSED"
+  ) {
     return customer.followupState;
   }
   return "ACTIVE";
@@ -139,12 +146,7 @@ export function resolveFollowupView(customer: FollowupRuleCustomer) {
   const state = deriveEffectiveState(customer);
   const reason = deriveDefaultReason(customer);
 
-  const baseDate =
-    customer.lastInboundMessageAt ||
-    customer.lastMessageAt ||
-    customer.lastOutboundMessageAt ||
-    new Date();
-
+  const baseDate = customer.lastInboundMessageAt || customer.lastMessageAt || customer.lastOutboundMessageAt || new Date();
   const nextFollowupAt = customer.nextFollowupAt || timingKeyToNextFollowupAt(deriveDefaultTimingKey(customer), baseDate);
 
   return {

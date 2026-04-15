@@ -39,7 +39,7 @@ export async function GET(req: NextRequest) {
     const now = Date.now();
 
     const allItems = customers.map((customer) => {
-      const tagNames = customer.tags.map((item) => item.tag.name);
+      const tagNames = customer.tags.map((item: { tag: { name: string } }) => item.tag.name);
       const resolved = resolveFollowupView({
         isVip: customer.isVip,
         remarkName: customer.remarkName,

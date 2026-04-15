@@ -41,8 +41,10 @@ const customerSelect = {
   followupBucket: true,
   followupTier: true,
   followupState: true,
+  nextFollowupBucket: true,
   followupReason: true,
   nextFollowupAt: true,
+  riskTags: true,
   updatedAt: true,
   tags: {
     select: {
@@ -84,6 +86,7 @@ function mapCustomer(customer: any, now: number) {
     followupBucket: customer.followupBucket,
     followupTier: customer.followupTier,
     followupState: customer.followupState,
+    nextFollowupBucket: customer.nextFollowupBucket,
     nextFollowupAt: customer.nextFollowupAt,
     followupReason: customer.followupReason,
     lastMessageAt: customer.lastMessageAt,
@@ -107,11 +110,13 @@ function mapCustomer(customer: any, now: number) {
     aiCurrentStrategy: customer.aiCurrentStrategy,
     aiLastAnalyzedAt: customer.aiLastAnalyzedAt,
     lastMessageAt: customer.lastMessageAt,
+    riskTags: customer.riskTags,
     followup: {
       bucket: followup.bucket,
       tier: followup.tier,
       state: followup.state,
       reason: followup.reason,
+      nextFollowupBucket: customer.nextFollowupBucket,
       nextFollowupAt: followup.nextFollowupAt ? followup.nextFollowupAt.toISOString() : null,
       isOverdue:
         !!followup.nextFollowupAt &&

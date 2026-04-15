@@ -1,8 +1,7 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
+import { ingestCustomerMessage } from "@/lib/services/ingest-customer-message";
 
-export async function GET(req: NextRequest) {
-  const origin = new URL(req.url).origin;
-
+export async function GET() {
   const payload = {
     customerId: "demo-yamada-001",
     originalName: "山田花子",
@@ -12,40 +11,15 @@ export async function GET(req: NextRequest) {
   };
 
   try {
-    const response = await fetch(`${origin}/api/ingest-customer-message`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const text = await response.text();
-
-    if (!response.ok) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "测试接口调用失败",
-          detail: text,
-        },
-        { status: 500 }
-      );
-    }
-
-    return new NextResponse(text, {
-      status: 200,
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-      },
-    });
+    const result = await ingestCustomerMessage(payload);
+    return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json(
       {
         ok: false,
         error: String(error),
       },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

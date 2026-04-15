@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { dispatchDueScheduledMessages } from "@/lib/scheduled-outbound";
+import { constantTimeEqual } from "@/lib/security/secret";
 
 function isAuthorized(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
@@ -10,8 +11,8 @@ function isAuthorized(request: NextRequest) {
   const bearer = request.headers.get("authorization");
   const headerSecret = request.headers.get("x-cron-secret");
 
-  if (bearer === `Bearer ${cronSecret}`) return true;
-  if (headerSecret === cronSecret) return true;
+  if (bearer?.startsWith("Bearer ") && constantTimeEqual(bearer.slice(7), cronSecret)) return true;
+  if (headerSecret && constantTimeEqual(headerSecret, cronSecret)) return true;
   return false;
 }
 

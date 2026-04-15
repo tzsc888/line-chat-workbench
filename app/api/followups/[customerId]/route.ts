@@ -13,7 +13,8 @@ export async function PATCH(req: NextRequest, { params }: Props) {
     const data: {
       followupBucket?: "UNCONVERTED" | "VIP" | null;
       followupTier?: "A" | "B" | "C" | null;
-      followupState?: "ACTIVE" | "DONE" | "PAUSED";
+      followupState?: "ACTIVE" | "OBSERVING" | "WAITING_WINDOW" | "POST_PURCHASE_CARE" | "DONE" | "PAUSED";
+      nextFollowupBucket?: "IMMEDIATE" | "TODAY" | "IN_1_DAY" | "IN_3_DAYS" | "IN_7_DAYS" | "NO_SET" | null;
       nextFollowupAt?: Date | null;
       followupReason?: string | null;
       lastFollowupHandledAt?: Date | null;
@@ -28,8 +29,17 @@ export async function PATCH(req: NextRequest, { params }: Props) {
       data.followupTier = body.tier;
     }
 
-    if (body.state === "ACTIVE" || body.state === "DONE" || body.state === "PAUSED") {
+    if (["ACTIVE", "OBSERVING", "WAITING_WINDOW", "POST_PURCHASE_CARE", "DONE", "PAUSED"].includes(body.state)) {
       data.followupState = body.state;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, "nextFollowupBucket")) {
+      const nextBucket = typeof body.nextFollowupBucket === "string" ? body.nextFollowupBucket.trim() : "";
+      if (["IMMEDIATE", "TODAY", "IN_1_DAY", "IN_3_DAYS", "IN_7_DAYS", "NO_SET"].includes(nextBucket)) {
+        data.nextFollowupBucket = nextBucket as typeof data.nextFollowupBucket;
+      } else {
+        data.nextFollowupBucket = null;
+      }
     }
 
     if (Object.prototype.hasOwnProperty.call(body, "nextFollowupAt")) {
@@ -61,6 +71,7 @@ export async function PATCH(req: NextRequest, { params }: Props) {
         followupBucket: true,
         followupTier: true,
         followupState: true,
+        nextFollowupBucket: true,
         nextFollowupAt: true,
         followupReason: true,
         lastFollowupHandledAt: true,
