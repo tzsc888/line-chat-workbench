@@ -79,8 +79,20 @@ enum FollowupTier {
 
 enum FollowupState {
   ACTIVE
+  OBSERVING
+  WAITING_WINDOW
+  POST_PURCHASE_CARE
   DONE
   PAUSED
+}
+
+enum FollowupTimingBucket {
+  IMMEDIATE
+  TODAY
+  IN_1_DAY
+  IN_3_DAYS
+  IN_7_DAYS
+  NO_SET
 }
 
 enum LineRelationshipStatus {
@@ -105,8 +117,10 @@ model Customer {
   followupBucket         FollowupBucket?
   followupTier           FollowupTier?
   followupState          FollowupState @default(ACTIVE)
+  nextFollowupBucket     FollowupTimingBucket?
   nextFollowupAt         DateTime?
   followupReason         String?
+  riskTags               String[]       @default([])
   lastFollowupHandledAt  DateTime?
   followupUpdatedAt      DateTime?
 
@@ -135,6 +149,7 @@ model Customer {
   @@index([pinnedAt(sort: Desc)])
   @@index([lineRelationshipStatus])
   @@index([followupBucket, followupTier])
+  @@index([nextFollowupBucket])
   @@index([nextFollowupAt(sort: Asc)])
 }
 
@@ -235,6 +250,25 @@ model ReplyDraftSet {
   advancingChinese        String
 
   modelName               String
+  translationPromptVersion String?
+  analysisPromptVersion   String?
+  generationPromptVersion String?
+  reviewPromptVersion     String?
+  sceneType               String?
+  routeType               String?
+  replyGoal               String?
+  pushLevel               String?
+  generationBriefJson     String?
+  reviewFlagsJson         String?
+  programChecksJson       String?
+  aiReviewJson            String?
+  finalGateJson           String?
+  differenceNote          String?
+  selfCheckJson           String?
+  recommendedVariant      SuggestionVariant?
+  isStale                 Boolean           @default(false)
+  staleReason             String?
+  staleAt                 DateTime?
   selectedVariant         SuggestionVariant?
   selectedAt              DateTime?
 
@@ -245,6 +279,7 @@ model ReplyDraftSet {
 
   @@index([customerId, createdAt(sort: Desc)])
   @@index([customerId, targetCustomerMessageId])
+  @@index([customerId, isStale, createdAt(sort: Desc)])
 }
 
 model AutomationJob {
@@ -266,6 +301,19 @@ model AutomationJob {
   @@unique([customerId, targetMessageId, kind])
   @@index([status, scheduledFor])
   @@index([customerId, updatedAt(sort: Desc)])
+}
+
+
+model LineWebhookEventReceipt {
+  webhookEventId String   @id
+  lineUserId     String?
+  eventType      String
+  isRedelivery   Boolean  @default(false)
+  occurredAt     DateTime?
+  createdAt      DateTime @default(now())
+
+  @@index([lineUserId, createdAt(sort: Desc)])
+  @@index([eventType, createdAt(sort: Desc)])
 }
 
 model OperatorPresence {

@@ -6,7 +6,7 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
 type Bucket = "UNCONVERTED" | "VIP";
 type Tier = "A" | "B" | "C";
-type State = "ACTIVE" | "DONE" | "PAUSED";
+type State = "ACTIVE" | "OBSERVING" | "WAITING_WINDOW" | "POST_PURCHASE_CARE" | "DONE" | "PAUSED";
 
 type FollowupItem = {
   id: string;
@@ -335,6 +335,9 @@ function FollowupsPageContent() {
                     className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm outline-none focus:border-green-300"
                   >
                     <option value="ACTIVE">待跟进</option>
+                    <option value="OBSERVING">观察中</option>
+                    <option value="WAITING_WINDOW">等待窗口</option>
+                    <option value="POST_PURCHASE_CARE">成交后经营</option>
                     <option value="PAUSED">暂停</option>
                     <option value="DONE">已处理</option>
                   </select>

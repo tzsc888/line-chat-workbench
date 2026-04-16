@@ -1,13 +1,16 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import crypto from "crypto";
+import { Prisma } from "@prisma/client";
 import { put } from "@vercel/blob";
 import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
 import { runInboundAutomation } from "@/lib/inbound-automation";
+import { constantTimeEqual } from "@/lib/security/secret";
+import { ingestCustomerMessage, type IngestCustomerMessageInput } from "@/lib/services/ingest-customer-message";
 
 function verifyLineSignature(body: string, signature: string, secret: string) {
   const hash = crypto.createHmac("sha256", secret).update(body).digest("base64");
-  return hash === signature;
+  return constantTimeEqual(hash, signature);
 }
 
 async function getLineProfile(userId: string) {
@@ -21,6 +24,7 @@ async function getLineProfile(userId: string) {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
+      cache: "no-store",
     });
 
     if (!response.ok) return null;
@@ -41,6 +45,7 @@ async function getLineMessageContent(messageId: string) {
     headers: {
       Authorization: `Bearer ${accessToken}`,
     },
+    cache: "no-store",
   });
 
   if (!response.ok) {
@@ -73,15 +78,11 @@ async function uploadInboundImageToBlob(params: {
   }
 
   const ext = getExtByContentType(params.contentType);
-  const blob = await put(
-    `line-inbound/${params.customerId}/${params.lineMessageId}.${ext}`,
-    params.buffer,
-    {
-      access: "public",
-      addRandomSuffix: false,
-      contentType: params.contentType,
-    }
-  );
+  const blob = await put(`line-inbound/${params.customerId}/${params.lineMessageId}.${ext}`, params.buffer, {
+    access: "public",
+    addRandomSuffix: false,
+    contentType: params.contentType,
+  });
 
   return blob.url;
 }
@@ -103,11 +104,15 @@ function buildAutoRemarkName(originalName: string, lineUserId: string, now = new
   return `${year}.${month}.${day}${baseName}`;
 }
 
-async function markCustomerRelationshipStatus(lineUserId: string, status: "ACTIVE" | "UNFOLLOWED", options?: {
-  originalName?: string;
-  avatarUrl?: string;
-  refollowed?: boolean;
-}) {
+async function markCustomerRelationshipStatus(
+  lineUserId: string,
+  status: "ACTIVE" | "UNFOLLOWED",
+  options?: {
+    originalName?: string;
+    avatarUrl?: string;
+    refollowed?: boolean;
+  },
+) {
   const now = new Date();
 
   const existing = await prisma.customer.findUnique({
@@ -158,6 +163,32 @@ async function markCustomerRelationshipStatus(lineUserId: string, status: "ACTIV
   }
 }
 
+async function claimWebhookEvent(event: Record<string, unknown>) {
+  const webhookEventId = typeof event.webhookEventId === "string" ? event.webhookEventId.trim() : "";
+  if (!webhookEventId) return true;
+
+  try {
+    await prisma.lineWebhookEventReceipt.create({
+      data: {
+        webhookEventId,
+        eventType: typeof event.type === "string" ? event.type : "unknown",
+        lineUserId: typeof (event.source as { userId?: string } | undefined)?.userId === "string" ? (event.source as { userId?: string }).userId! : null,
+        isRedelivery: Boolean((event.deliveryContext as { isRedelivery?: boolean } | undefined)?.isRedelivery),
+        occurredAt: typeof event.timestamp === "number" ? new Date(event.timestamp) : null,
+      },
+    });
+    return true;
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const channelSecret = process.env.LINE_CHANNEL_SECRET;
@@ -175,10 +206,10 @@ export async function POST(req: NextRequest) {
 
     const body = JSON.parse(bodyText);
     const events = Array.isArray(body.events) ? body.events : [];
-    const internalBaseUrl = process.env.INTERNAL_APP_BASE_URL || "http://127.0.0.1:3000";
 
     for (const event of events) {
       if (event.source?.type !== "user") continue;
+      if (!(await claimWebhookEvent(event))) continue;
 
       const userId = String(event.source.userId || "").trim();
       if (!userId) continue;
@@ -192,9 +223,7 @@ export async function POST(req: NextRequest) {
         const profile = await getLineProfile(userId);
         await markCustomerRelationshipStatus(userId, "ACTIVE", {
           originalName:
-            typeof profile?.displayName === "string" && profile.displayName.trim()
-              ? profile.displayName.trim()
-              : userId,
+            typeof profile?.displayName === "string" && profile.displayName.trim() ? profile.displayName.trim() : userId,
           avatarUrl: typeof profile?.pictureUrl === "string" ? profile.pictureUrl : "",
           refollowed: true,
         });
@@ -210,13 +239,10 @@ export async function POST(req: NextRequest) {
       if (!lineMessageId) continue;
 
       const profile = await getLineProfile(userId);
-      const originalName =
-        typeof profile?.displayName === "string" && profile.displayName.trim()
-          ? profile.displayName.trim()
-          : userId;
+      const originalName = typeof profile?.displayName === "string" && profile.displayName.trim() ? profile.displayName.trim() : userId;
       const avatar = typeof profile?.pictureUrl === "string" ? profile.pictureUrl : "";
 
-      let ingestPayload: Record<string, unknown> | null = null;
+      let ingestPayload: IngestCustomerMessageInput | null = null;
       let shouldRunAutomation = false;
 
       if (lineType === "text") {
@@ -283,27 +309,20 @@ export async function POST(req: NextRequest) {
 
       if (!ingestPayload) continue;
 
-      let ingestJson: any = null;
-
+      let ingestResult: Awaited<ReturnType<typeof ingestCustomerMessage>> | null = null;
       try {
-        const ingestResponse = await fetch(`${internalBaseUrl}/api/ingest-customer-message`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(ingestPayload),
-        });
-
-        ingestJson = await ingestResponse.json();
+        ingestResult = await ingestCustomerMessage(ingestPayload);
       } catch (error) {
-        console.error("LINE ingest fetch error:", error);
+        console.error("LINE ingest error:", error);
         continue;
       }
 
-      if (!ingestJson?.ok || !ingestJson?.customer?.id || !ingestJson?.message?.id) {
+      if (!ingestResult?.ok || !ingestResult.customer?.id || !ingestResult.message?.id) {
         continue;
       }
 
-      const customerId = String(ingestJson.customer.id);
-      const messageId = String(ingestJson.message.id);
+      const customerId = String(ingestResult.customer.id);
+      const messageId = String(ingestResult.message.id);
 
       try {
         await publishRealtimeRefresh({ customerId, reason: "inbound-message" });
@@ -316,7 +335,6 @@ export async function POST(req: NextRequest) {
           await runInboundAutomation({
             customerId,
             targetMessageId: messageId,
-            internalBaseUrl,
           });
         });
       }
