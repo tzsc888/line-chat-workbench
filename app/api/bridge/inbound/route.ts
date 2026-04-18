@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { publishRealtimeRefresh } from "@/lib/ably";
 import { LineRelationshipStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ingestCustomerMessage } from "@/lib/services/ingest-customer-message";
@@ -221,6 +222,19 @@ export async function POST(req: NextRequest) {
         if (type === "TEXT") {
           latestLiveMessageId = result.message?.id || latestLiveMessageId;
         }
+      }
+    }
+
+    if (importedCount > 0) {
+      try {
+        await publishRealtimeRefresh({
+          customerId: customer.id,
+          reason: mode === "live" ? "bridge-inbound-message" : "bridge-backfill-imported",
+          importedCount,
+          mode,
+        });
+      } catch (error) {
+        console.error("Ably publish bridge inbound error:", error);
       }
     }
 
