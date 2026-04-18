@@ -1,4 +1,4 @@
-import { AutomationJobStatus } from "@prisma/client";
+import { AutomationJobStatus, UiRefreshOutboxStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 function daysAgo(days: number) {
@@ -16,8 +16,10 @@ export async function runDataRetentionCleanup() {
   const automationFailedDays = readDays("RETENTION_AUTOMATION_FAILED_DAYS", 30);
   const staleDraftDays = readDays("RETENTION_STALE_DRAFT_DAYS", 45);
   const selectedDraftDays = readDays("RETENTION_SELECTED_DRAFT_DAYS", 180);
+  const realtimeDeliveredDays = readDays("RETENTION_REALTIME_DELIVERED_DAYS", 7);
+  const realtimeFailedDays = readDays("RETENTION_REALTIME_FAILED_DAYS", 30);
 
-  const [webhookReceipts, automationDone, automationFailed, staleDrafts, selectedDrafts] = await prisma.$transaction([
+  const [webhookReceipts, automationDone, automationFailed, staleDrafts, selectedDrafts, realtimeDelivered, realtimeFailed] = await prisma.$transaction([
     prisma.lineWebhookEventReceipt.deleteMany({ where: { createdAt: { lt: daysAgo(webhookDays) } } }),
     prisma.automationJob.deleteMany({
       where: {
@@ -43,6 +45,18 @@ export async function runDataRetentionCleanup() {
         selectedAt: { lt: daysAgo(selectedDraftDays) },
       },
     }),
+    prisma.uiRefreshOutbox.deleteMany({
+      where: {
+        status: UiRefreshOutboxStatus.DELIVERED,
+        deliveredAt: { lt: daysAgo(realtimeDeliveredDays) },
+      },
+    }),
+    prisma.uiRefreshOutbox.deleteMany({
+      where: {
+        status: UiRefreshOutboxStatus.FAILED,
+        updatedAt: { lt: daysAgo(realtimeFailedDays) },
+      },
+    }),
   ]);
 
   return {
@@ -51,12 +65,16 @@ export async function runDataRetentionCleanup() {
     automationFailedDays,
     staleDraftDays,
     selectedDraftDays,
+    realtimeDeliveredDays,
+    realtimeFailedDays,
     deleted: {
       webhookReceipts: webhookReceipts.count,
       automationDone: automationDone.count,
       automationFailed: automationFailed.count,
       staleDrafts: staleDrafts.count,
       selectedDrafts: selectedDrafts.count,
+      realtimeDelivered: realtimeDelivered.count,
+      realtimeFailed: realtimeFailed.count,
     },
   };
 }

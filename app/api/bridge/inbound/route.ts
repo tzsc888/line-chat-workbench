@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { LineRelationshipStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { publishRealtimeRefresh } from "@/lib/ably";
+import { queueInboundAutomation, queueInboundTranslation } from "@/lib/inbound-automation";
 import { ingestCustomerMessage } from "@/lib/services/ingest-customer-message";
-import { runInboundAutomation } from "@/lib/inbound-automation";
 import {
   buildBridgePlaceholderName,
   cleanBridgeText,
@@ -52,6 +53,21 @@ type BridgePayload = {
     isCancelledLike?: boolean;
   };
   messages: BridgeMessage[];
+};
+
+type UpsertBridgeCustomerResult = {
+  customer: {
+    id: string;
+    lineUserId: string | null;
+    bridgeThreadId: string | null;
+    originalName: string;
+    remarkName: string | null;
+    avatarUrl: string | null;
+    lineRelationshipStatus: LineRelationshipStatus;
+  };
+  created: boolean;
+  profileChanged: boolean;
+  relationshipChanged: boolean;
 };
 
 function parseBridgeAuth(req: NextRequest) {
@@ -124,30 +140,75 @@ async function upsertBridgeCustomer(params: {
   incomingName: string;
   avatarUrl: string;
   relationshipStatus: LineRelationshipStatus;
-}) {
+}): Promise<UpsertBridgeCustomerResult> {
   const safeIncomingName = sanitizeBridgeDisplayName(params.incomingName);
   const safeAvatarUrl = cleanBridgeText(params.avatarUrl);
   const now = new Date();
 
-  return prisma.customer.upsert({
+  const existing = await prisma.customer.findUnique({
     where: { bridgeThreadId: params.threadId },
-    update: {
+    select: {
+      id: true,
+      lineUserId: true,
+      bridgeThreadId: true,
+      originalName: true,
+      remarkName: true,
+      avatarUrl: true,
+      lineRelationshipStatus: true,
+    },
+  });
+
+  if (!existing) {
+    const created = await prisma.customer.create({
+      data: {
+        bridgeThreadId: params.threadId,
+        lineUserId: params.threadId,
+        originalName: safeIncomingName || buildBridgePlaceholderName(params.threadId),
+        remarkName: safeIncomingName || buildBridgePlaceholderName(params.threadId),
+        avatarUrl: safeAvatarUrl || null,
+        lineRelationshipStatus: params.relationshipStatus,
+        lineRelationshipUpdatedAt: now,
+        lineRefollowedAt:
+          params.relationshipStatus === LineRelationshipStatus.ACTIVE ? now : null,
+      },
+      select: {
+        id: true,
+        lineUserId: true,
+        bridgeThreadId: true,
+        originalName: true,
+        remarkName: true,
+        avatarUrl: true,
+        lineRelationshipStatus: true,
+      },
+    });
+
+    return {
+      customer: created,
+      created: true,
+      profileChanged: true,
+      relationshipChanged: true,
+    };
+  }
+
+  const relationshipChanged = existing.lineRelationshipStatus !== params.relationshipStatus;
+  const profileChanged =
+    (!!safeIncomingName && safeIncomingName !== existing.originalName) ||
+    (!!safeAvatarUrl && safeAvatarUrl !== (existing.avatarUrl || ""));
+
+  const updated = await prisma.customer.update({
+    where: { id: existing.id },
+    data: {
       lineUserId: params.threadId,
       originalName: safeIncomingName || undefined,
-      remarkName: safeIncomingName || undefined,
       avatarUrl: safeAvatarUrl || undefined,
       lineRelationshipStatus: params.relationshipStatus,
-      lineRelationshipUpdatedAt: now,
-      lineRefollowedAt: params.relationshipStatus === LineRelationshipStatus.ACTIVE ? now : undefined,
-    },
-    create: {
-      bridgeThreadId: params.threadId,
-      lineUserId: params.threadId,
-      originalName: safeIncomingName || buildBridgePlaceholderName(params.threadId),
-      remarkName: safeIncomingName || buildBridgePlaceholderName(params.threadId),
-      avatarUrl: safeAvatarUrl || null,
-      lineRelationshipStatus: params.relationshipStatus,
-      lineRelationshipUpdatedAt: now,
+      lineRelationshipUpdatedAt: relationshipChanged ? now : undefined,
+      lineRefollowedAt:
+        params.relationshipStatus === LineRelationshipStatus.UNFOLLOWED
+          ? null
+          : relationshipChanged && existing.lineRelationshipStatus === LineRelationshipStatus.UNFOLLOWED
+            ? now
+            : undefined,
     },
     select: {
       id: true,
@@ -159,6 +220,13 @@ async function upsertBridgeCustomer(params: {
       lineRelationshipStatus: true,
     },
   });
+
+  return {
+    customer: updated,
+    created: false,
+    profileChanged,
+    relationshipChanged,
+  };
 }
 
 export async function POST(req: NextRequest) {
@@ -181,12 +249,13 @@ export async function POST(req: NextRequest) {
         ? LineRelationshipStatus.UNFOLLOWED
         : LineRelationshipStatus.ACTIVE;
 
-    const customer = await upsertBridgeCustomer({
+    const customerUpsert = await upsertBridgeCustomer({
       threadId,
       incomingName,
       avatarUrl,
       relationshipStatus,
     });
+    const customer = customerUpsert.customer;
 
     const normalizedMessages = (Array.isArray(body.messages) ? body.messages : [])
       .map(normalizeBridgeMessage)
@@ -196,7 +265,8 @@ export async function POST(req: NextRequest) {
     validateInboundBridgeMessages(normalizedMessages);
 
     let importedCount = 0;
-    let latestLiveMessageId = "";
+    let latestLiveTextMessageId = "";
+    const translationQueuedMessageIds: string[] = [];
 
     for (const msg of normalizedMessages) {
       const lineMessageId = buildImportedMessageUniqueId(threadId, msg);
@@ -211,7 +281,7 @@ export async function POST(req: NextRequest) {
         customerId: threadId,
         bridgeThreadId: threadId,
         originalName: incomingName,
-        noteName: incomingName,
+        noteName: "",
         avatar: avatarUrl,
         type,
         japanese,
@@ -220,23 +290,45 @@ export async function POST(req: NextRequest) {
         stickerId: hasSticker ? msg.stickerId : "",
         lineMessageId,
         fingerprint,
-        skipTranslate: mode !== "live",
+        skipTranslate: true,
         sentAt: msg.sentAtIso,
         strictSentAt: true,
       });
 
-      if (result?.created) {
-        importedCount += 1;
-        if (type === "TEXT") {
-          latestLiveMessageId = result.message?.id || latestLiveMessageId;
-        }
+      if (!result?.created) continue;
+
+      importedCount += 1;
+      const createdMessageId = result.message?.id || "";
+      if (mode === "live" && type === "TEXT" && createdMessageId) {
+        latestLiveTextMessageId = createdMessageId;
+        translationQueuedMessageIds.push(createdMessageId);
       }
     }
 
-    if (mode === "live" && latestLiveMessageId) {
-      await runInboundAutomation({
+    if (importedCount > 0 || customerUpsert.created || customerUpsert.profileChanged || customerUpsert.relationshipChanged) {
+      await publishRealtimeRefresh({
         customerId: customer.id,
-        targetMessageId: latestLiveMessageId,
+        reason:
+          importedCount > 0
+            ? "bridge-inbound-message"
+            : customerUpsert.relationshipChanged
+              ? "bridge-thread-status"
+              : "bridge-customer-updated",
+        scopes: ["workspace", "list"],
+      });
+    }
+
+    for (const messageId of translationQueuedMessageIds) {
+      await queueInboundTranslation({
+        customerId: customer.id,
+        targetMessageId: messageId,
+      });
+    }
+
+    if (mode === "live" && latestLiveTextMessageId) {
+      await queueInboundAutomation({
+        customerId: customer.id,
+        targetMessageId: latestLiveTextMessageId,
       });
     }
 
@@ -252,7 +344,8 @@ export async function POST(req: NextRequest) {
         lineRelationshipStatus: customer.lineRelationshipStatus,
       },
       importedCount,
-      aiTriggered: mode === "live" && !!latestLiveMessageId,
+      translationQueuedCount: translationQueuedMessageIds.length,
+      aiQueued: mode === "live" && !!latestLiveTextMessageId,
     });
   } catch (error) {
     console.error("POST /api/bridge/inbound error:", error);

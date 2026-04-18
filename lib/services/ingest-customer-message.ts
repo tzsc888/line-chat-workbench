@@ -1,6 +1,5 @@
 import { MessageRole, MessageSource, MessageType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { translateCustomerJapaneseMessage } from "@/lib/ai/translation-service";
 import { resolveIngestEventTime } from "@/lib/services/ingest-time";
 
 function buildAutoRemarkName(originalName: string, identity: string, now: Date) {
@@ -116,7 +115,6 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
         update: {
           lineUserId: lineUserId || bridgeThreadId,
           originalName: safeOriginalName || undefined,
-          remarkName: safeRemarkName || undefined,
           avatarUrl: safeAvatar || undefined,
         },
         create: {
@@ -143,7 +141,6 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
         where: { lineUserId },
         update: {
           originalName: safeOriginalName || undefined,
-          remarkName: safeRemarkName || undefined,
           avatarUrl: safeAvatar || undefined,
         },
         create: {
@@ -210,59 +207,20 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
     },
   });
 
-  if (skipTranslate || type !== MessageType.TEXT) {
-    return {
-      ok: true,
-      created: true,
-      line:
-        skipTranslate
-          ? "已快速入库，跳过同步翻译"
-          : type === MessageType.IMAGE
-            ? "图片消息已入库"
-            : "贴图消息已入库",
-      model: process.env.HELPER_MODEL || "",
-      translated: false,
-      translateError: "",
-      customer: {
-        id: customer.id,
-        lineUserId: customer.lineUserId,
-        bridgeThreadId: customer.bridgeThreadId,
-        originalName: customer.originalName,
-        remarkName: customer.remarkName,
-        avatarUrl: customer.avatarUrl,
-      },
-      message,
-    };
-  }
-
-  let translated = false;
-  let translateError = "";
-  let line = "未调用翻译线路";
-  let chinese = "";
-
-  try {
-    const translation = await translateCustomerJapaneseMessage({ japaneseText: japanese });
-    line = translation.line;
-    chinese = translation.parsed.translation;
-    if (chinese) {
-      translated = true;
-      await prisma.message.update({
-        where: { id: message.id },
-        data: { chineseText: chinese },
-      });
-    }
-  } catch (error) {
-    translateError = String(error);
-    console.error("ingestCustomerMessage translate error:", error);
-  }
-
   return {
     ok: true,
     created: true,
-    line,
+    line:
+      type === MessageType.TEXT
+        ? skipTranslate
+          ? "文本消息已快速入库，翻译将异步处理"
+          : "文本消息已入库，翻译将异步处理"
+        : type === MessageType.IMAGE
+          ? "图片消息已入库"
+          : "贴图消息已入库",
     model: process.env.HELPER_MODEL || "",
-    translated,
-    translateError,
+    translated: false,
+    translateError: "",
     customer: {
       id: customer.id,
       lineUserId: customer.lineUserId,
@@ -271,9 +229,6 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
       remarkName: customer.remarkName,
       avatarUrl: customer.avatarUrl,
     },
-    message: {
-      ...message,
-      chineseText: translated ? chinese : null,
-    },
+    message,
   };
 }

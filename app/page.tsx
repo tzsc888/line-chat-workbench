@@ -182,6 +182,11 @@ type CustomerListStats = {
 };
 const CUSTOMER_PAGE_SIZE = 50;
 const OPTIMISTIC_ID_PREFIX = "optimistic:";
+
+function isAbortError(error: unknown) {
+  return (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError");
+}
 function getDisplayName(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null | undefined) {
   if (!customer) return "未选择顾客";
   return customer.remarkName?.trim() || customer.originalName || "未命名顾客";
@@ -529,7 +534,14 @@ function HomePageContent() {
   const hasMoreCustomersRef = useRef(false);
   const searchKeywordRef = useRef("");
   const isCustomerListRequestInFlightRef = useRef(false);
+  const customerListRequestIdRef = useRef(0);
+  const customerListAbortControllerRef = useRef<AbortController | null>(null);
   const isSilentRefreshingRef = useRef(false);
+  const workspaceRequestIdRef = useRef(0);
+  const workspaceAbortControllerRef = useRef<AbortController | null>(null);
+  const isRealtimeRefreshInFlightRef = useRef(false);
+  const pendingRealtimeRefreshRef = useRef(false);
+  const pendingRealtimeRefreshCustomerIdRef = useRef<string | null>(null);
   const selectedCustomerIdRef = useRef("");
   const realtimeRefreshTimerRef = useRef<number | null>(null);
   const ablyClientRef = useRef<Ably.Realtime | null>(null);
@@ -545,6 +557,12 @@ function HomePageContent() {
   const audioEnabledRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastIncomingSoundAtRef = useRef(0);
+  useEffect(() => {
+    return () => {
+      customerListAbortControllerRef.current?.abort();
+      workspaceAbortControllerRef.current?.abort();
+    };
+  }, []);
   const preserveCustomerListViewport = useCallback((apply: () => void) => {
     const container = customerListScrollRef.current;
     const previousScrollTop = container?.scrollTop ?? null;
@@ -586,19 +604,19 @@ function HomePageContent() {
         ? customerListScrollRef.current?.scrollTop ?? 0
         : 0;
       const isLoadMore = !!options?.loadMore;
-      const isReset = options?.reset ?? !isLoadMore;
       const activeSearch = options?.search ?? searchKeywordRef.current;
-      const loadedPinnedCount = customersRef.current.filter((item) => !!item.pinnedAt).length;
-      const loadedRegularCount = Math.max(0, customersRef.current.length - loadedPinnedCount);
-      const limit = Math.max(
-        options?.limitOverride ?? CUSTOMER_PAGE_SIZE,
-        CUSTOMER_PAGE_SIZE
-      );
+      const limit = Math.max(options?.limitOverride ?? CUSTOMER_PAGE_SIZE, CUSTOMER_PAGE_SIZE);
       const page = isLoadMore ? customerPageRef.current + 1 : 1;
 
       if (isCustomerListRequestInFlightRef.current && isLoadMore) {
         return;
       }
+
+      const requestId = customerListRequestIdRef.current + 1;
+      customerListRequestIdRef.current = requestId;
+      const abortController = new AbortController();
+      customerListAbortControllerRef.current?.abort();
+      customerListAbortControllerRef.current = abortController;
 
       try {
         isCustomerListRequestInFlightRef.current = true;
@@ -618,10 +636,15 @@ function HomePageContent() {
 
         const response = await fetch(`/api/customers?${params.toString()}`, {
           cache: "no-store",
+          signal: abortController.signal,
         });
         const data = await response.json();
         if (!response.ok || !data.ok) {
           throw new Error(data?.error || "读取顾客列表失败");
+        }
+
+        if (requestId !== customerListRequestIdRef.current) {
+          return;
         }
 
         const list: CustomerListItem[] = data.customers || [];
@@ -638,6 +661,7 @@ function HomePageContent() {
           }
           return sortCustomerList(list);
         });
+
         const loadedPinnedCountAfterFetch = list.filter((item) => !!item.pinnedAt).length;
         const loadedRegularCountAfterFetch = Math.max(0, list.length - loadedPinnedCountAfterFetch);
         const nextPageValue =
@@ -666,14 +690,23 @@ function HomePageContent() {
           });
         }
       } catch (error) {
+        if (isAbortError(error)) {
+          return;
+        }
         console.error(error);
-        setPageError(String(error));
+        if (requestId === customerListRequestIdRef.current) {
+          setPageError(String(error));
+        }
       } finally {
-        isCustomerListRequestInFlightRef.current = false;
-        if (isLoadMore) {
+        if (requestId === customerListRequestIdRef.current) {
+          isCustomerListRequestInFlightRef.current = false;
+          if (customerListAbortControllerRef.current === abortController) {
+            customerListAbortControllerRef.current = null;
+          }
           setIsLoadingMoreCustomers(false);
-        } else if (!options?.silent && !shouldPreserveListUi) {
-          setIsListLoading(false);
+          if (!isLoadMore) {
+            setIsListLoading(false);
+          }
         }
       }
     },
@@ -701,10 +734,18 @@ function HomePageContent() {
   const loadWorkspace = useCallback(
     async (customerId: string, options?: { preserveUi?: boolean }) => {
       if (!customerId) {
+        workspaceAbortControllerRef.current?.abort();
+        workspaceAbortControllerRef.current = null;
         setWorkspace(null);
         return;
       }
       const preserveUi = !!options?.preserveUi;
+      const requestId = workspaceRequestIdRef.current + 1;
+      workspaceRequestIdRef.current = requestId;
+      const abortController = new AbortController();
+      workspaceAbortControllerRef.current?.abort();
+      workspaceAbortControllerRef.current = abortController;
+
       const container = chatScrollRef.current;
       let previousScrollTop = 0;
       let previousScrollHeight = 0;
@@ -730,11 +771,17 @@ function HomePageContent() {
         }
         const response = await fetch(`/api/customers/${customerId}/workspace`, {
           cache: "no-store",
+          signal: abortController.signal,
         });
         const data = await response.json();
         if (!response.ok || !data.ok) {
           throw new Error(data?.error || "读取顾客工作台失败");
         }
+
+        if (requestId !== workspaceRequestIdRef.current) {
+          return;
+        }
+
         const nextWorkspace: WorkspaceData | null = data.workspace || null;
         setWorkspace(nextWorkspace);
         if (nextWorkspace?.customer) {
@@ -765,19 +812,64 @@ function HomePageContent() {
           });
         }
       } catch (error) {
+        if (isAbortError(error)) {
+          return;
+        }
         console.error(error);
-        if (!preserveUi) {
+        if (!preserveUi && requestId === workspaceRequestIdRef.current) {
           setWorkspace(null);
           setPageError(String(error));
         }
       } finally {
-        if (!preserveUi) {
+        if (requestId === workspaceRequestIdRef.current) {
           setIsWorkspaceLoading(false);
+          if (workspaceAbortControllerRef.current === abortController) {
+            workspaceAbortControllerRef.current = null;
+          }
+          isSilentRefreshingRef.current = false;
         }
-        isSilentRefreshingRef.current = false;
       }
     },
     []
+  );
+  const runRealtimeRefresh = useCallback(
+    async (targetCustomerId?: string | null) => {
+      const nextTargetCustomerId = targetCustomerId || selectedCustomerIdRef.current || null;
+      if (isRealtimeRefreshInFlightRef.current) {
+        pendingRealtimeRefreshRef.current = true;
+        if (nextTargetCustomerId) {
+          pendingRealtimeRefreshCustomerIdRef.current = nextTargetCustomerId;
+        }
+        return;
+      }
+
+      isRealtimeRefreshInFlightRef.current = true;
+      try {
+        const loadedRegularCount = Math.max(
+          0,
+          customersRef.current.filter((item) => !item.pinnedAt).length
+        );
+        await loadCustomers({
+          silent: true,
+          preserveUi: true,
+          limitOverride: Math.max(loadedRegularCount, CUSTOMER_PAGE_SIZE),
+          search: searchKeywordRef.current,
+        });
+        const activeCustomerId = selectedCustomerIdRef.current;
+        if (activeCustomerId && (!nextTargetCustomerId || nextTargetCustomerId === activeCustomerId)) {
+          await loadWorkspace(activeCustomerId, { preserveUi: true });
+        }
+      } finally {
+        isRealtimeRefreshInFlightRef.current = false;
+        if (pendingRealtimeRefreshRef.current) {
+          const queuedCustomerId = pendingRealtimeRefreshCustomerIdRef.current;
+          pendingRealtimeRefreshRef.current = false;
+          pendingRealtimeRefreshCustomerIdRef.current = null;
+          void runRealtimeRefresh(queuedCustomerId);
+        }
+      }
+    },
+    [loadCustomers, loadWorkspace]
   );
   const addOptimisticMessage = useCallback((customerId: string, message: OptimisticWorkspaceMessage) => {
     setOptimisticMessagesByCustomer((prev) => {
@@ -1272,6 +1364,7 @@ function HomePageContent() {
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
         void pingPresence();
+        void runRealtimeRefresh(selectedCustomerIdRef.current || null);
       }
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -1279,7 +1372,7 @@ function HomePageContent() {
       if (timer) window.clearInterval(timer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [selectedCustomerId]);
+  }, [runRealtimeRefresh, selectedCustomerId]);
   useEffect(() => {
     const client = new Ably.Realtime({
       authUrl: "/api/ably/token",
@@ -1292,38 +1385,35 @@ function HomePageContent() {
         window.clearTimeout(realtimeRefreshTimerRef.current);
       }
       realtimeRefreshTimerRef.current = window.setTimeout(() => {
-        if (isSilentRefreshingRef.current) return;
         const payload =
           message && typeof message === "object" ? message.data || {} : {};
-        const activeCustomerId = selectedCustomerIdRef.current;
-        const loadedRegularCount = Math.max(
-          0,
-          customersRef.current.filter((item) => !item.pinnedAt).length
-        );
-        loadCustomers({
-          silent: true,
-          preserveUi: true,
-          limitOverride: Math.max(loadedRegularCount, CUSTOMER_PAGE_SIZE),
-          search: searchKeywordRef.current,
-        });
-        if (
-          activeCustomerId &&
-          (!payload.customerId || payload.customerId === activeCustomerId)
-        ) {
-          loadWorkspace(activeCustomerId, { preserveUi: true });
-        }
+        const targetCustomerId =
+          payload && typeof payload.customerId === "string" && payload.customerId.trim()
+            ? payload.customerId.trim()
+            : null;
+        void runRealtimeRefresh(targetCustomerId);
       }, 250);
     };
+    const handleConnectionStateChange = (stateChange: Ably.ConnectionStateChange) => {
+      if (
+        stateChange.current === "connected" &&
+        ["disconnected", "suspended", "connecting"].includes(stateChange.previous || "")
+      ) {
+        void runRealtimeRefresh(selectedCustomerIdRef.current || null);
+      }
+    };
     channel.subscribe("refresh", handleRefresh);
+    client.connection.on(handleConnectionStateChange);
     return () => {
       if (realtimeRefreshTimerRef.current) {
         window.clearTimeout(realtimeRefreshTimerRef.current);
       }
       channel.unsubscribe("refresh", handleRefresh);
+      client.connection.off(handleConnectionStateChange);
       client.close();
       ablyClientRef.current = null;
     };
-  }, [loadCustomers, loadWorkspace]);
+  }, [runRealtimeRefresh]);
   const displayedCustomers = useMemo(() => {
     return sortCustomerList(
       customers.map((customer) => {

@@ -66,6 +66,13 @@ enum SuggestionVariant {
 
 enum AutomationJobKind {
   INBOUND_WORKFLOW
+  INBOUND_TRANSLATION
+}
+
+enum UiRefreshOutboxStatus {
+  PENDING
+  DELIVERED
+  FAILED
 }
 
 enum AutomationJobStatus {
@@ -151,6 +158,7 @@ model Customer {
   scheduledMessages      ScheduledMessage[]
   replyDraftSets         ReplyDraftSet[]
   automationJobs         AutomationJob[]
+  uiRefreshOutboxEntries UiRefreshOutbox[]
 
   @@index([stage])
   @@index([isVip])
@@ -342,6 +350,27 @@ model AutomationJob {
   @@index([customerId, updatedAt(sort: Desc)])
 }
 
+
+
+model UiRefreshOutbox {
+  id           String              @id @default(cuid())
+  customerId   String?
+  reason       String
+  scopes       String[]            @default([])
+  payload      Json?
+  status       UiRefreshOutboxStatus @default(PENDING)
+  attemptCount Int                 @default(0)
+  lastError    String?
+  nextRetryAt  DateTime?
+  deliveredAt  DateTime?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  customer     Customer?           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextRetryAt, createdAt(sort: Asc)])
+  @@index([customerId, createdAt(sort: Desc)])
+}
 
 model LineWebhookEventReceipt {
   webhookEventId String   @id
