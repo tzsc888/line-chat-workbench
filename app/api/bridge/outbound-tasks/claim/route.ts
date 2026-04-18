@@ -25,6 +25,8 @@ export async function POST(req: NextRequest) {
           type: task.message.type,
           japaneseText: task.message.japaneseText,
           imageUrl: task.message.imageUrl,
+          stickerPackageId: task.message.stickerPackageId,
+          stickerId: task.message.stickerId,
           source: task.message.source,
         },
       },

@@ -26,6 +26,7 @@ enum MessageRole {
 enum MessageType {
   TEXT
   IMAGE
+  STICKER
 }
 
 enum MessageSource {
@@ -201,6 +202,8 @@ model Message {
   japaneseText    String
   chineseText     String?
   imageUrl        String?
+  stickerPackageId String?
+  stickerId       String?
 
   deliveryStatus  MessageSendStatus?
   sendError       String?

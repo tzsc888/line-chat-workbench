@@ -40,7 +40,7 @@ type CustomerListItem = {
   latestMessage: {
     id: string;
     role: "CUSTOMER" | "OPERATOR";
-    type: "TEXT" | "IMAGE";
+    type: "TEXT" | "IMAGE" | "STICKER";
     source: "LINE" | "MANUAL" | "AI_SUGGESTION";
     japaneseText: string;
     chineseText: string | null;
@@ -52,12 +52,14 @@ type WorkspaceMessage = {
   id: string;
   customerId: string;
   role: "CUSTOMER" | "OPERATOR";
-  type: "TEXT" | "IMAGE";
+  type: "TEXT" | "IMAGE" | "STICKER";
   source: "LINE" | "MANUAL" | "AI_SUGGESTION";
   lineMessageId: string | null;
   japaneseText: string;
   chineseText: string | null;
   imageUrl: string | null;
+  stickerPackageId: string | null;
+  stickerId: string | null;
   deliveryStatus: "PENDING" | "SENT" | "FAILED" | null;
   sendError: string | null;
   lastAttemptAt: string | null;
@@ -103,7 +105,7 @@ type ReplyDraftSet = {
 };
 type ScheduledMessageItem = {
   id: string;
-  type: "TEXT" | "IMAGE";
+  type: "TEXT" | "IMAGE" | "STICKER";
   source: "LINE" | "MANUAL" | "AI_SUGGESTION";
   japaneseText: string;
   chineseText: string | null;
@@ -286,7 +288,12 @@ function getDeliveryStatusMeta(message: WorkspaceMessage) {
   }
 }
 function buildPreviewTextFromMessage(message: Pick<WorkspaceMessage, "role" | "type" | "japaneseText">) {
-  const baseText = message.type === "IMAGE" ? "[图片]" : message.japaneseText.trim() || "[空消息]";
+  const baseText =
+    message.type === "IMAGE"
+      ? "[图片]"
+      : message.type === "STICKER"
+        ? "[贴图]"
+        : message.japaneseText.trim() || "[空消息]";
   return `${message.role === "OPERATOR" ? "我：" : ""}${baseText}`;
 }
 function buildCustomerLatestMessage(message: WorkspaceMessage | OptimisticWorkspaceMessage): CustomerListItem["latestMessage"] {
@@ -349,6 +356,8 @@ function normalizeWorkspaceMessagePayload(payload: any): WorkspaceMessage | null
     japaneseText: payload.japaneseText ?? "",
     chineseText: payload.chineseText ?? null,
     imageUrl: payload.imageUrl ?? null,
+    stickerPackageId: payload.stickerPackageId ?? null,
+    stickerId: payload.stickerId ?? null,
     deliveryStatus: payload.deliveryStatus ?? null,
     sendError: payload.sendError ?? null,
     lastAttemptAt: payload.lastAttemptAt ?? null,
@@ -901,7 +910,9 @@ function HomePageContent() {
       japaneseText: string;
       chineseText?: string | null;
       imageUrl?: string | null;
-      type: "TEXT" | "IMAGE";
+      stickerPackageId?: string | null;
+      stickerId?: string | null;
+      type: "TEXT" | "IMAGE" | "STICKER";
       source: MessageSource;
       replyDraftSetId?: string;
       suggestionVariant?: "STABLE" | "ADVANCING";
@@ -919,6 +930,8 @@ function HomePageContent() {
         japaneseText: params.japaneseText,
         chineseText: params.chineseText ?? null,
         imageUrl: params.type === "IMAGE" ? params.imageUrl ?? null : null,
+        stickerPackageId: params.type === "STICKER" ? params.stickerPackageId ?? null : null,
+        stickerId: params.type === "STICKER" ? params.stickerId ?? null : null,
         deliveryStatus: "PENDING",
         sendError: null,
         lastAttemptAt: sentAt,
@@ -949,6 +962,8 @@ function HomePageContent() {
             japaneseText: params.japaneseText,
             chineseText: params.chineseText ?? "",
             imageUrl: params.imageUrl || "",
+            stickerPackageId: params.stickerPackageId || "",
+            stickerId: params.stickerId || "",
             source: params.source,
             type: params.type,
             replyDraftSetId: params.replyDraftSetId || "",
@@ -1734,6 +1749,39 @@ function HomePageContent() {
       type: "TEXT",
     });
   }
+  async function handleSendSticker() {
+    if (!workspace) {
+      window.alert("当前没有选中的顾客");
+      return;
+    }
+
+    const packageIdInput = window.prompt("请输入 LINE 贴图 packageId", "11537");
+    if (packageIdInput === null) return;
+    const stickerIdInput = window.prompt("请输入 LINE 贴图 stickerId", "52002734");
+    if (stickerIdInput === null) return;
+
+    const stickerPackageId = packageIdInput.trim();
+    const stickerId = stickerIdInput.trim();
+
+    if (!stickerPackageId || !stickerId) {
+      window.alert("packageId 和 stickerId 都不能为空");
+      return;
+    }
+
+    setIsComposerMenuOpen(false);
+    const result = await submitOutboundMessage({
+      customerId: workspace.customer.id,
+      japaneseText: "[贴图]",
+      source: "MANUAL",
+      type: "STICKER",
+      stickerPackageId,
+      stickerId,
+    });
+
+    if (!result.ok) {
+      window.alert("贴图发送失败，请重试");
+    }
+  }
   async function handleScheduleManualSend() {
     if (!workspace) {
       window.alert("当前没有选中的顾客");
@@ -1824,6 +1872,8 @@ function HomePageContent() {
           japaneseText: optimisticMessage.japaneseText,
           chineseText: optimisticMessage.chineseText,
           imageUrl: optimisticMessage.imageUrl,
+          stickerPackageId: optimisticMessage.stickerPackageId,
+          stickerId: optimisticMessage.stickerId,
           source: optimisticMessage.source,
           type: optimisticMessage.type,
           replyDraftSetId: optimisticMessage.replyDraftSetId,
@@ -2133,7 +2183,7 @@ function HomePageContent() {
                               {msg.chineseText || ""}
                             </div>
                           </>
-                        ) : (
+                        ) : msg.type === "IMAGE" ? (
                           <>
                             {msg.imageUrl ? (
                               <a href={msg.imageUrl} target="_blank" rel="noreferrer" className="block">
@@ -2161,6 +2211,17 @@ function HomePageContent() {
                               >
                                 {msg.chineseText}
                               </div>
+                            ) : null}
+                          </>
+                        ) : (
+                          <>
+                            <div className={`rounded-xl border px-3 py-2 ${msg.role === "CUSTOMER" ? "border-gray-200 bg-gray-50 text-gray-700" : "border-white/20 bg-white/15 text-white"}`}>
+                              <div className="text-xs font-semibold tracking-wide">LINE贴图</div>
+                              <div className="mt-1 text-xs opacity-80">packageId: {msg.stickerPackageId || "-"}</div>
+                              <div className="text-xs opacity-80">stickerId: {msg.stickerId || "-"}</div>
+                            </div>
+                            {msg.japaneseText && msg.japaneseText !== "[贴图]" ? (
+                              <div className="mt-2 whitespace-pre-wrap">{msg.japaneseText}</div>
                             ) : null}
                           </>
                         )}
@@ -2267,6 +2328,13 @@ function HomePageContent() {
                     >
                       添加图片
                       <div className="text-[11px] text-gray-400 mt-1">支持点击选择，也支持把图片拖到输入区</div>
+                    </button>
+                    <button
+                      onClick={handleSendSticker}
+                      className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50 border-t border-gray-100"
+                    >
+                      发送贴图
+                      <div className="text-[11px] text-gray-400 mt-1">输入 packageId 和 stickerId 后立即发送</div>
                     </button>
                     <button
                       onClick={openPresetPanel}

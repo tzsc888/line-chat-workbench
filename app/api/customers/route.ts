@@ -14,10 +14,15 @@ function parsePositiveInt(value: string | null, fallback: number) {
 
 function getLatestPreview(message: {
   role: "CUSTOMER" | "OPERATOR";
-  type: "TEXT" | "IMAGE";
+  type: "TEXT" | "IMAGE" | "STICKER";
   japaneseText: string;
 }) {
-  const baseText = message.type === "IMAGE" ? "[图片]" : message.japaneseText.trim() || "[空消息]";
+  const baseText =
+    message.type === "IMAGE"
+      ? "[图片]"
+      : message.type === "STICKER"
+        ? "[贴图]"
+        : message.japaneseText.trim() || "[空消息]";
   return `${message.role === "OPERATOR" ? "我：" : ""}${baseText}`;
 }
 

@@ -39,7 +39,14 @@ export async function POST(req: Request, { params }: Props) {
     const japaneseText = japaneseTextRaw.replace(/\r\n/g, "\n");
     const chineseText = typeof body.chineseText === "string" ? body.chineseText.trim() : null;
     const imageUrl = typeof body.imageUrl === "string" ? body.imageUrl.trim() : "";
-    const type = body.type === "IMAGE" ? MessageType.IMAGE : MessageType.TEXT;
+    const stickerPackageId = typeof body.stickerPackageId === "string" ? body.stickerPackageId.trim() : "";
+    const stickerId = typeof body.stickerId === "string" ? body.stickerId.trim() : "";
+    const type =
+      body.type === "IMAGE"
+        ? MessageType.IMAGE
+        : body.type === "STICKER"
+          ? MessageType.STICKER
+          : MessageType.TEXT;
     const source = body.source === "AI_SUGGESTION" ? MessageSource.AI_SUGGESTION : MessageSource.MANUAL;
     const replyDraftSetId = typeof body.replyDraftSetId === "string" ? body.replyDraftSetId.trim() : "";
     const suggestionVariantRaw = typeof body.suggestionVariant === "string" ? body.suggestionVariant.trim() : "";
@@ -56,6 +63,9 @@ export async function POST(req: Request, { params }: Props) {
       return NextResponse.json({ ok: false, error: "图片消息缺少 imageUrl" }, { status: 400 });
     }
 
+    if (type === MessageType.STICKER && (!stickerPackageId || !stickerId)) {
+      return NextResponse.json({ ok: false, error: "贴图消息缺少 stickerPackageId / stickerId" }, { status: 400 });
+    }
 
     const customer = await prisma.customer.findUnique({
       where: { id: customerId },
@@ -72,8 +82,9 @@ export async function POST(req: Request, { params }: Props) {
 
     const now = new Date();
 
-    const outboundJapaneseText = type === MessageType.IMAGE ? "" : japaneseText;
-    const outboundChineseText = type === MessageType.IMAGE ? null : chineseText;
+    const outboundJapaneseText =
+      type === MessageType.TEXT ? japaneseText : type === MessageType.STICKER ? japaneseText.trim() || "[贴图]" : "";
+    const outboundChineseText = type === MessageType.TEXT ? chineseText : null;
 
     const message = await prisma.message.create({
       data: {
@@ -84,6 +95,8 @@ export async function POST(req: Request, { params }: Props) {
         japaneseText: outboundJapaneseText,
         chineseText: outboundChineseText,
         imageUrl: type === MessageType.IMAGE ? imageUrl : null,
+        stickerPackageId: type === MessageType.STICKER ? stickerPackageId : null,
+        stickerId: type === MessageType.STICKER ? stickerId : null,
         sentAt: now,
         deliveryStatus: MessageSendStatus.PENDING,
         lastAttemptAt: now,

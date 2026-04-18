@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { publishRealtimeRefresh } from "@/lib/ably";
 import { LineRelationshipStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ingestCustomerMessage } from "@/lib/services/ingest-customer-message";
@@ -29,6 +28,8 @@ type BridgeMessage = {
   text?: string;
   time?: string;
   imageUrls?: string[];
+  stickerPackageId?: string;
+  stickerId?: string;
   previewCards?: BridgePreviewCard[];
   fingerprint?: string;
 };
@@ -76,6 +77,8 @@ function buildImportedMessageUniqueId(threadId: string, message: BridgeMessage) 
     message.header || "",
     cleanBridgeText(message.text || ""),
     ...(message.imageUrls || []),
+    cleanBridgeText(message.stickerPackageId || ""),
+    cleanBridgeText(message.stickerId || ""),
   ].join("||");
 
   return `web:${threadId}:raw:${Buffer.from(fallback).toString("base64url")}`;
@@ -93,6 +96,8 @@ function normalizeBridgeMessage(message: BridgeMessage) {
     imageUrls: Array.isArray(message.imageUrls)
       ? message.imageUrls.filter((item) => typeof item === "string" && item.trim())
       : [],
+    stickerPackageId: cleanBridgeText(message.stickerPackageId || ""),
+    stickerId: cleanBridgeText(message.stickerId || ""),
     previewCards: Array.isArray(message.previewCards) ? message.previewCards : [],
     sentAtIso: cleanBridgeText(message.sentAtIso || ""),
   };
@@ -196,10 +201,11 @@ export async function POST(req: NextRequest) {
     for (const msg of normalizedMessages) {
       const lineMessageId = buildImportedMessageUniqueId(threadId, msg);
       const fingerprint = buildImportedMessageFingerprint(threadId, msg);
-      const hasImage = (msg.imageUrls || []).length > 0;
+      const hasSticker = !!(msg.stickerPackageId && msg.stickerId);
+      const hasImage = !hasSticker && (msg.imageUrls || []).length > 0;
       const imageUrl = hasImage ? msg.imageUrls![0] : "";
-      const type = hasImage && !msg.text ? "IMAGE" : "TEXT";
-      const japanese = msg.text || (hasImage ? "[图片]" : "[空消息]");
+      const type = hasSticker ? "STICKER" : hasImage && !msg.text ? "IMAGE" : "TEXT";
+      const japanese = msg.text || (hasSticker ? "[贴图]" : hasImage ? "[图片]" : "[空消息]");
 
       const result = await ingestCustomerMessage({
         customerId: threadId,
@@ -210,6 +216,8 @@ export async function POST(req: NextRequest) {
         type,
         japanese,
         imageUrl,
+        stickerPackageId: hasSticker ? msg.stickerPackageId : "",
+        stickerId: hasSticker ? msg.stickerId : "",
         lineMessageId,
         fingerprint,
         skipTranslate: mode !== "live",
@@ -222,19 +230,6 @@ export async function POST(req: NextRequest) {
         if (type === "TEXT") {
           latestLiveMessageId = result.message?.id || latestLiveMessageId;
         }
-      }
-    }
-
-    if (importedCount > 0) {
-      try {
-        await publishRealtimeRefresh({
-          customerId: customer.id,
-          reason: mode === "live" ? "bridge-inbound-message" : "bridge-backfill-imported",
-          importedCount,
-          mode,
-        });
-      } catch (error) {
-        console.error("Ably publish bridge inbound error:", error);
       }
     }
 

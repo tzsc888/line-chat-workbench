@@ -24,9 +24,11 @@ export type IngestCustomerMessageInput = {
   originalName?: string;
   noteName?: string;
   avatar?: string;
-  type?: "TEXT" | "IMAGE";
+  type?: "TEXT" | "IMAGE" | "STICKER";
   japanese?: string;
   imageUrl?: string;
+  stickerPackageId?: string;
+  stickerId?: string;
   lineMessageId?: string;
   fingerprint?: string;
   skipTranslate?: boolean;
@@ -41,9 +43,16 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
   const originalName = String(input.originalName || "").trim();
   const remarkName = String(input.noteName || "").trim();
   const avatar = String(input.avatar || "").trim();
-  const type = input.type === "IMAGE" ? MessageType.IMAGE : MessageType.TEXT;
+  const type =
+    input.type === "IMAGE"
+      ? MessageType.IMAGE
+      : input.type === "STICKER"
+        ? MessageType.STICKER
+        : MessageType.TEXT;
   const japanese = String(input.japanese || "").trim();
   const imageUrl = String(input.imageUrl || "").trim();
+  const stickerPackageId = String(input.stickerPackageId || "").trim();
+  const stickerId = String(input.stickerId || "").trim();
   const lineMessageId = String(input.lineMessageId || "").trim();
   const fingerprint = String(input.fingerprint || "").trim();
   const skipTranslate = input.skipTranslate === true;
@@ -60,6 +69,9 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
   }
   if (type === MessageType.IMAGE && !imageUrl && !japanese) {
     throw new Error("IMAGE 消息缺少 imageUrl");
+  }
+  if (type === MessageType.STICKER && (!stickerPackageId || !stickerId)) {
+    throw new Error("STICKER 消息缺少 stickerPackageId / stickerId");
   }
 
   const dedupeOr = [] as Array<Record<string, string>>;
@@ -163,6 +175,8 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
       japaneseText: japanese,
       chineseText: null,
       imageUrl: type === MessageType.IMAGE ? imageUrl || null : null,
+      stickerPackageId: type === MessageType.STICKER ? stickerPackageId || null : null,
+      stickerId: type === MessageType.STICKER ? stickerId || null : null,
       sentAt: eventTime,
     },
   });
@@ -196,11 +210,16 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
     },
   });
 
-  if (skipTranslate || type === MessageType.IMAGE) {
+  if (skipTranslate || type !== MessageType.TEXT) {
     return {
       ok: true,
       created: true,
-      line: skipTranslate ? "已快速入库，跳过同步翻译" : "图片消息已入库",
+      line:
+        skipTranslate
+          ? "已快速入库，跳过同步翻译"
+          : type === MessageType.IMAGE
+            ? "图片消息已入库"
+            : "贴图消息已入库",
       model: process.env.HELPER_MODEL || "",
       translated: false,
       translateError: "",
