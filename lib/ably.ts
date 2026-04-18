@@ -1,6 +1,6 @@
 const Ably = require("ably");
 
-import { UiRefreshOutboxStatus } from "@prisma/client";
+import { Prisma, UiRefreshOutboxStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 const globalForAbly = globalThis as unknown as {
@@ -39,7 +39,7 @@ function sanitizeScopes(value: unknown) {
     .filter(Boolean);
 }
 
-function sanitizePayload(data?: RealtimeRefreshPayload) {
+function sanitizePayload(data?: RealtimeRefreshPayload): Prisma.InputJsonObject {
   const payload = {
     ...(data || {}),
   } as Record<string, unknown>;
@@ -63,7 +63,7 @@ function sanitizePayload(data?: RealtimeRefreshPayload) {
     delete payload.scopes;
   }
 
-  return JSON.parse(JSON.stringify(payload)) as Record<string, unknown>;
+  return JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonObject;
 }
 
 function computeRetryDelayMs(attemptCount: number) {
