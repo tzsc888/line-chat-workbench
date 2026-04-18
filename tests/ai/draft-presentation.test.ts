@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveDraftPresentation } from '../../lib/ai/draft-presentation.ts';
+import { deriveDraftPresentation } from '../../lib/ai/draft-presentation';
 
 test('deriveDraftPresentation marks mismatched target message as stale', () => {
   const result = deriveDraftPresentation({

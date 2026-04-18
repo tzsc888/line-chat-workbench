@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computeAiEvalMetricsFromDrafts } from '../../lib/ai/metrics/eval-metrics-core.ts';
+import { computeAiEvalMetricsFromDrafts } from '../../lib/ai/metrics/eval-metrics-core';
 
 test('computeAiEvalMetricsFromDrafts aggregates route scene risk and prompt breakdowns', () => {
   const metrics = computeAiEvalMetricsFromDrafts([

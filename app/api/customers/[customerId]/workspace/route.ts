@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { publishRealtimeRefresh } from "@/lib/ably";
 import { prisma } from "@/lib/prisma";
 import { resolveFollowupView } from "@/lib/followup-rules";
+import { failExpiredOutboundTasks } from "@/lib/bridge-outbound";
 
 type Props = {
   params: Promise<{ customerId: string }>;
@@ -9,6 +10,8 @@ type Props = {
 
 export async function GET(_: Request, { params }: Props) {
   try {
+    await failExpiredOutboundTasks();
+
     const { customerId } = await params;
 
     const customer = await prisma.customer.findUnique({
@@ -78,6 +81,7 @@ export async function GET(_: Request, { params }: Props) {
         customer: {
           id: customer.id,
           lineUserId: customer.lineUserId,
+          bridgeThreadId: customer.bridgeThreadId,
           remarkName: customer.remarkName,
           originalName: customer.originalName,
           avatarUrl: customer.avatarUrl,

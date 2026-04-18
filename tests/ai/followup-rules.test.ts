@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveEffectiveBucket, resolveFollowupView } from '../../lib/followup-rules.ts';
+import { deriveEffectiveBucket, resolveFollowupView } from '../../lib/followup-rules';
 
 test('VIP markers force VIP bucket', () => {
   assert.equal(deriveEffectiveBucket({ isVip: true }), 'VIP');

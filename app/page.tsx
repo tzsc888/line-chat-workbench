@@ -449,7 +449,7 @@ function HomePageContent() {
   const [editingPresetId, setEditingPresetId] = useState("");
   const [presetTitle, setPresetTitle] = useState("");
   const [presetContent, setPresetContent] = useState("");
-  const [pendingImage, setPendingImage] = useState<PendingUploadImage | null>(null);
+  const [pendingImages, setPendingImages] = useState<PendingUploadImage[]>([]);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [isComposerDragOver, setIsComposerDragOver] = useState(false);
   const [isListLoading, setIsListLoading] = useState(true);
@@ -714,7 +714,7 @@ function HomePageContent() {
           setCustomReply(null);
           setRewriteInput("");
           setManualReply("");
-          setPendingImage(null);
+          setPendingImages([]);
           setApiError("");
           setHelperError("");
           setAiNotice("");
@@ -1601,29 +1601,38 @@ function HomePageContent() {
     setIsSchedulePanelOpen(false);
     imageInputRef.current?.click();
   }
-  async function uploadImageFile(file: File) {
-    if (!file.type.startsWith("image/")) {
+  async function uploadImageFiles(files: File[]) {
+    const validFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (!validFiles.length) {
       window.alert("只能上传图片文件");
       return;
     }
+    if (validFiles.length !== files.length) {
+      window.alert("已自动忽略非图片文件");
+    }
+
     try {
       setIsUploadingImage(true);
-      const formData = new FormData();
-      formData.append("file", file);
-      const response = await fetch("/api/uploads/images", {
-        method: "POST",
-        body: formData,
-      });
-      const data = await response.json();
-      if (!response.ok || !data.ok || !data.image?.url) {
-        throw new Error(data?.error || "上传图片失败");
+      const uploaded: PendingUploadImage[] = [];
+      for (const file of validFiles) {
+        const formData = new FormData();
+        formData.append("file", file);
+        const response = await fetch("/api/uploads/images", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok || !data.image?.url) {
+          throw new Error(data?.error || `上传图片失败：${file.name}`);
+        }
+        uploaded.push({
+          url: data.image.url,
+          originalName: data.image.originalName || file.name,
+          size: Number(data.image.size || file.size || 0),
+          contentType: typeof data.image.contentType === "string" ? data.image.contentType : file.type,
+        });
       }
-      setPendingImage({
-        url: data.image.url,
-        originalName: data.image.originalName || file.name,
-        size: Number(data.image.size || file.size || 0),
-        contentType: typeof data.image.contentType === "string" ? data.image.contentType : file.type,
-      });
+      setPendingImages((current) => [...current, ...uploaded]);
       setIsComposerMenuOpen(false);
     } catch (error) {
       console.error(error);
@@ -1633,13 +1642,16 @@ function HomePageContent() {
     }
   }
   function handleImageInputChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    void uploadImageFile(file);
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
+    void uploadImageFiles(files);
     event.target.value = "";
   }
-  function clearPendingImage() {
-    setPendingImage(null);
+  function removePendingImage(targetUrl: string) {
+    setPendingImages((current) => current.filter((item) => item.url !== targetUrl));
+  }
+  function clearPendingImages() {
+    setPendingImages([]);
   }
   function handleComposerDragOver(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -1652,9 +1664,9 @@ function HomePageContent() {
   function handleComposerDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsComposerDragOver(false);
-    const file = event.dataTransfer.files?.[0];
-    if (!file) return;
-    void uploadImageFile(file);
+    const files = Array.from(event.dataTransfer.files || []);
+    if (!files.length) return;
+    void uploadImageFiles(files);
   }
   function handleManualReplyKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== "Enter") return;
@@ -1662,7 +1674,7 @@ function HomePageContent() {
     if (event.nativeEvent.isComposing) return;
     event.preventDefault();
     if (isUploadingImage || !workspace) return;
-    if (!manualReply.trim() && !pendingImage) return;
+    if (!manualReply.trim() && pendingImages.length === 0) return;
     void handleManualSend();
   }
   async function handleManualSend() {
@@ -1670,21 +1682,56 @@ function HomePageContent() {
       window.alert("当前没有选中的顾客");
       return;
     }
-    if (!manualReply.trim() && !pendingImage) {
+    if (!manualReply.trim() && pendingImages.length === 0) {
       window.alert("请先输入文本或选择图片");
       return;
     }
-    const japaneseText = manualReply.replace(/\r\n/g, "\n");
-    const sendingType = pendingImage ? "IMAGE" : "TEXT";
-    const nextImage = pendingImage;
+    const japaneseText = manualReply.replace(/\r\n/g, "\n").trim();
+    const nextImages = [...pendingImages];
     setManualReply("");
-    setPendingImage(null);
+    setPendingImages([]);
+
+    if (nextImages.length > 0) {
+      for (let index = 0; index < nextImages.length; index += 1) {
+        const imageItem = nextImages[index];
+        const imageResult = await submitOutboundMessage({
+          customerId: workspace.customer.id,
+          japaneseText: "",
+          imageUrl: imageItem.url,
+          source: "MANUAL",
+          type: "IMAGE",
+        });
+        if (!imageResult.ok) {
+          const remainingImages = nextImages.slice(index);
+          if (japaneseText) {
+            setManualReply(japaneseText);
+          }
+          setPendingImages(remainingImages);
+          window.alert(remainingImages.length > 1 ? "部分图片发送失败，剩余图片已保留，请重试" : "图片发送失败，请重试");
+          return;
+        }
+      }
+
+      if (japaneseText) {
+        const textResult = await submitOutboundMessage({
+          customerId: workspace.customer.id,
+          japaneseText,
+          source: "MANUAL",
+          type: "TEXT",
+        });
+        if (!textResult.ok) {
+          setManualReply(japaneseText);
+          window.alert("图片已排队发送，但补充文字发送失败，请重试文字消息");
+        }
+      }
+      return;
+    }
+
     void submitOutboundMessage({
       customerId: workspace.customer.id,
       japaneseText,
-      imageUrl: nextImage?.url || "",
       source: "MANUAL",
-      type: sendingType,
+      type: "TEXT",
     });
   }
   async function handleScheduleManualSend() {
@@ -1692,8 +1739,12 @@ function HomePageContent() {
       window.alert("当前没有选中的顾客");
       return;
     }
-    if (!manualReply.trim() && !pendingImage) {
-      window.alert("请先输入文本或选择图片");
+    if (pendingImages.length > 0) {
+      window.alert("定时发送当前只支持文字。图片请直接发送，不要加入定时发送。");
+      return;
+    }
+    if (!manualReply.trim()) {
+      window.alert("请先输入要定时发送的文字内容");
       return;
     }
     if (!scheduleAtInput) {
@@ -1710,7 +1761,6 @@ function HomePageContent() {
       return;
     }
     const japaneseText = manualReply.replace(/\r\n/g, "\n");
-    const sendingType = pendingImage ? "IMAGE" : "TEXT";
     try {
       setIsSchedulingManual(true);
       const response = await fetch(`/api/customers/${workspace.customer.id}/scheduled-messages`, {
@@ -1720,9 +1770,9 @@ function HomePageContent() {
         },
         body: JSON.stringify({
           japaneseText,
-          imageUrl: pendingImage?.url || "",
+          imageUrl: "",
           source: "MANUAL",
-          type: sendingType,
+          type: "TEXT",
           scheduledFor: scheduledFor.toISOString(),
         }),
       });
@@ -1731,7 +1781,7 @@ function HomePageContent() {
         throw new Error(data?.error || "创建定时发送失败");
       }
       setManualReply("");
-      setPendingImage(null);
+      setPendingImages([]);
       setIsSchedulePanelOpen(false);
       setScheduleAtInput(buildDefaultScheduledInputValue());
       await loadWorkspace(workspace.customer.id, { preserveUi: true });
@@ -1875,8 +1925,8 @@ function HomePageContent() {
   }
   const contextMenuCustomer = customerContextMenu?.customer || null;
   const overdueFollowupCount = customerStats.overdueFollowupCount;
-  const canManualSend = !!workspace && !isUploadingImage && (!!pendingImage || !!manualReply.trim());
-  const canScheduleManual = !!workspace && !isSchedulingManual && !isUploadingImage && (!!pendingImage || !!manualReply.trim());
+  const canManualSend = !!workspace && !isUploadingImage && (pendingImages.length > 0 || !!manualReply.trim());
+  const canScheduleManual = !!workspace && !isSchedulingManual && !isUploadingImage && pendingImages.length === 0 && !!manualReply.trim();
   return (
     <div className="h-screen bg-gray-100 flex">
       <div ref={customerListScrollRef} className="w-[24%] bg-gray-50 border-r border-gray-200 p-4 overflow-y-auto">
@@ -2154,6 +2204,7 @@ function HomePageContent() {
             ref={imageInputRef}
             type="file"
             accept="image/*"
+            multiple
             className="hidden"
             onChange={handleImageInputChange}
           />
@@ -2165,26 +2216,37 @@ function HomePageContent() {
               isComposerDragOver ? "bg-green-50 ring-2 ring-green-300" : ""
             }`}
           >
-            {pendingImage ? (
+            {pendingImages.length > 0 ? (
               <div className="mb-3 rounded-2xl border border-gray-200 bg-gray-50 p-3">
-                <div className="flex items-start gap-3">
-                  <img
-                    src={pendingImage.url}
-                    alt={pendingImage.originalName}
-                    className="h-20 w-20 rounded-xl object-cover border border-gray-200 bg-white"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-gray-900 truncate">{pendingImage.originalName}</div>
-                    <div className="mt-1 text-xs text-gray-500">
-                      已上传，可直接发送给顾客
-                    </div>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium text-gray-900">已上传 {pendingImages.length} 张图片</div>
+                    <div className="mt-1 text-xs text-gray-500">发送时会按顺序逐张发送；你也可以补充一条文字，系统会拆成“多张图片 + 文字”消息。</div>
                   </div>
                   <button
-                    onClick={clearPendingImage}
+                    onClick={clearPendingImages}
                     className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 hover:bg-gray-50"
                   >
-                    移除
+                    清空
                   </button>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                  {pendingImages.map((image) => (
+                    <div key={image.url} className="rounded-xl border border-gray-200 bg-white p-2">
+                      <img
+                        src={image.url}
+                        alt={image.originalName}
+                        className="h-24 w-full rounded-lg object-cover border border-gray-200 bg-gray-50"
+                      />
+                      <div className="mt-2 truncate text-xs text-gray-700">{image.originalName}</div>
+                      <button
+                        onClick={() => removePendingImage(image.url)}
+                        className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
+                      >
+                        移除
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </div>
             ) : null}
@@ -2222,7 +2284,7 @@ function HomePageContent() {
                 onChange={(e) => setManualReply(e.target.value)}
                 onKeyDown={handleManualReplyKeyDown}
                 rows={1}
-                placeholder={pendingImage ? "可选填写图片说明或补充文字…" : "输入要发送给顾客的日语内容…"}
+                placeholder={pendingImages.length > 0 ? "可选填写补充文字；发送时会拆成“多张图片 + 文字”多条消息…" : "输入要发送给顾客的日语内容…"}
                 className="min-h-[44px] max-h-44 flex-1 rounded-xl border border-gray-300 bg-white px-4 py-[10px] leading-6 resize-none whitespace-pre-wrap break-words outline-none focus:border-green-300 focus:ring-2 focus:ring-green-100"
               />
               <div className="relative" ref={schedulePanelRef}>
@@ -2240,7 +2302,7 @@ function HomePageContent() {
                 {isSchedulePanelOpen ? (
                   <div className="absolute bottom-14 right-0 z-20 w-[320px] rounded-2xl border border-gray-200 bg-white p-4 shadow-2xl">
                     <div className="text-sm font-semibold text-gray-900">定时发送</div>
-                    <div className="mt-1 text-xs text-gray-500">至少比当前时间晚 30 分钟。到点后系统会自动发送，就算你关掉页面也照样会发。</div>
+                    <div className="mt-1 text-xs text-gray-500">至少比当前时间晚 30 分钟。到点后系统会自动发送，就算你关掉页面也照样会发。当前定时发送只支持文字。</div>
                     <input
                       type="datetime-local"
                       step={1800}
@@ -2274,7 +2336,7 @@ function HomePageContent() {
                 disabled={!canManualSend}
                 className="bg-green-600 text-white px-4 py-2.5 rounded-xl disabled:opacity-60"
               >
-                {isUploadingImage ? "上传中..." : pendingImage ? "发送图片" : "发送"}
+                {isUploadingImage ? "上传中..." : pendingImages.length > 0 ? `发送${pendingImages.length}张图片` : "发送"}
               </button>
             </div>
             {workspace?.scheduledMessages?.length ? (

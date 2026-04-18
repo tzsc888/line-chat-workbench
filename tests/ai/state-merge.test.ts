@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mapAnalysisFollowupState, mergeUniqueTags, mergeUniqueText, timingBucketToDate } from '../../lib/ai/state-merge-helpers.ts';
+import { mapAnalysisFollowupState, mergeUniqueTags, mergeUniqueText, timingBucketToDate } from '../../lib/ai/state-merge-helpers';
 
 test('mergeUniqueText deduplicates and keeps stable order', () => {
   const result = mergeUniqueText('A\nB', ['B', 'C', '']);

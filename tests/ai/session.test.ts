@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createSessionToken, verifySessionToken } from "../../lib/security/session.ts";
+import { createSessionToken, verifySessionToken } from "../../lib/security/session";
 
 test("session token round-trip verifies successfully", async () => {
   const token = await createSessionToken("alice", "super-secret", 60);

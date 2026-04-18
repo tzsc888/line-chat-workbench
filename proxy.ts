@@ -8,6 +8,7 @@ import {
 } from "@/lib/security/session";
 
 const PUBLIC_PATH_PREFIXES = ["/_next", "/favicon.ico", "/public", "/login"];
+
 const PUBLIC_API_PATHS = [
   "/api/line/webhook",
   "/api/cron/scheduled-messages",
@@ -15,13 +16,21 @@ const PUBLIC_API_PATHS = [
   "/api/cron/maintenance",
   "/api/auth/login",
   "/api/auth/logout",
+  "/api/bridge/inbound",
+  "/api/bridge/outbound-tasks/claim",
 ];
 
 function isPublicPath(pathname: string) {
   if (PUBLIC_PATH_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`))) {
     return true;
   }
+
   if (PUBLIC_API_PATHS.some((path) => pathname === path)) return true;
+
+  if (pathname.startsWith("/api/bridge/outbound-tasks/") && pathname.endsWith("/complete")) {
+    return true;
+  }
+
   if (/\.(?:png|jpg|jpeg|gif|webp|svg|ico|txt|xml|woff2?)$/i.test(pathname)) return true;
   return false;
 }

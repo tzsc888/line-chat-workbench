@@ -35,6 +35,10 @@ export async function POST(req: Request, { params }: Props) {
       return NextResponse.json({ ok: false, error: "定时发送图片时缺少 imageUrl" }, { status: 400 });
     }
 
+    if (type === MessageType.IMAGE) {
+      return NextResponse.json({ ok: false, error: "当前 bridge 第一阶段仅支持文字定时发送" }, { status: 400 });
+    }
+
     if (!scheduledForRaw) {
       return NextResponse.json({ ok: false, error: "请选择定时发送时间" }, { status: 400 });
     }
@@ -43,7 +47,7 @@ export async function POST(req: Request, { params }: Props) {
       where: { id: customerId },
       select: {
         id: true,
-        lineUserId: true,
+        bridgeThreadId: true,
       },
     });
 
@@ -51,8 +55,8 @@ export async function POST(req: Request, { params }: Props) {
       return NextResponse.json({ ok: false, error: "客户不存在" }, { status: 404 });
     }
 
-    if (!customer.lineUserId) {
-      return NextResponse.json({ ok: false, error: "当前客户没有 LINE userId，无法定时发送" }, { status: 400 });
+    if (!customer.bridgeThreadId) {
+      return NextResponse.json({ ok: false, error: "当前客户没有 bridgeThreadId，无法定时发送" }, { status: 400 });
     }
 
     const scheduledFor = normalizeScheduledAtInput(scheduledForRaw);
@@ -75,7 +79,7 @@ export async function POST(req: Request, { params }: Props) {
         source,
         japaneseText,
         chineseText,
-        imageUrl: type === MessageType.IMAGE ? imageUrl : null,
+        imageUrl: null,
         scheduledFor,
         replyDraftSetId: replyDraftSetId || null,
         suggestionVariant,

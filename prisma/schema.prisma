@@ -42,6 +42,14 @@ enum MessageSendStatus {
   FAILED
 }
 
+enum OutboundTaskStatus {
+  PENDING
+  CLAIMED
+  SENT
+  FAILED
+  CANCELED
+}
+
 enum ScheduledMessageStatus {
   PENDING
   PROCESSING
@@ -103,6 +111,7 @@ enum LineRelationshipStatus {
 model Customer {
   id                     String        @id @default(cuid())
   lineUserId             String?       @unique
+  bridgeThreadId         String?       @unique
   remarkName             String?
   originalName           String
   avatarUrl              String?
@@ -137,6 +146,7 @@ model Customer {
 
   tags                   CustomerTag[]
   messages               Message[]
+  outboundTasks          OutboundTask[]
   scheduledMessages      ScheduledMessage[]
   replyDraftSets         ReplyDraftSet[]
   automationJobs         AutomationJob[]
@@ -146,6 +156,7 @@ model Customer {
   @@index([lastMessageAt(sort: Desc)])
   @@index([originalName])
   @@index([remarkName])
+  @@index([bridgeThreadId])
   @@index([pinnedAt(sort: Desc)])
   @@index([lineRelationshipStatus])
   @@index([followupBucket, followupTier])
@@ -185,6 +196,7 @@ model Message {
   type            MessageType   @default(TEXT)
   source          MessageSource
   lineMessageId   String?       @unique
+  fingerprint     String?       @unique
 
   japaneseText    String
   chineseText     String?
@@ -201,11 +213,35 @@ model Message {
   updatedAt       DateTime      @updatedAt
 
   customer        Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  outboundTask    OutboundTask?
 
   @@index([customerId, sentAt(sort: Asc)])
   @@index([customerId, role, sentAt(sort: Desc)])
 }
 
+
+model OutboundTask {
+  id             String             @id @default(cuid())
+  customerId     String
+  messageId      String             @unique
+  bridgeThreadId String
+  status         OutboundTaskStatus @default(PENDING)
+  claimedAt      DateTime?
+  completedAt    DateTime?
+  failedAt       DateTime?
+  lastError      String?
+  attemptCount   Int                @default(0)
+  nextRetryAt    DateTime?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  customer       Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  message        Message            @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt(sort: Asc)])
+  @@index([bridgeThreadId, status])
+  @@index([nextRetryAt])
+}
 
 model ScheduledMessage {
   id                String                 @id @default(cuid())

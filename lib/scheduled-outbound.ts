@@ -1,13 +1,11 @@
 import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
-import { buildLineMessages, pushLineMessages } from "@/lib/line-messaging";
+import { queueOutboundMessageTask } from "@/lib/bridge-outbound";
 import {
   MessageRole,
   MessageSendStatus,
   ScheduledMessageStatus,
   MessageType,
-  MessageSource,
-  SuggestionVariant,
 } from "@prisma/client";
 
 const DUE_BATCH_SIZE = 20;
@@ -24,10 +22,7 @@ export function normalizeScheduledAtInput(value: string) {
   return date;
 }
 
-export function validateScheduleWindow(
-  scheduledFor: Date,
-  minimumDelayMinutes = 30
-) {
+export function validateScheduleWindow(scheduledFor: Date, minimumDelayMinutes = 30) {
   const now = Date.now();
   const diff = scheduledFor.getTime() - now;
   if (diff < minimumDelayMinutes * 60 * 1000) {
@@ -35,9 +30,7 @@ export function validateScheduleWindow(
   }
 }
 
-export async function dispatchScheduledMessageById(
-  scheduledMessageId: string
-) {
+export async function dispatchScheduledMessageById(scheduledMessageId: string) {
   const attemptAt = new Date();
 
   const claimed = await prisma.scheduledMessage.updateMany({
@@ -63,7 +56,7 @@ export async function dispatchScheduledMessageById(
       customer: {
         select: {
           id: true,
-          lineUserId: true,
+          bridgeThreadId: true,
         },
       },
     },
@@ -75,28 +68,42 @@ export async function dispatchScheduledMessageById(
 
   const normalizedText = normalizeMessageContent(scheduled.japaneseText);
 
-  if (!scheduled.customer.lineUserId) {
+  if (scheduled.type === MessageType.IMAGE) {
     await prisma.scheduledMessage.update({
       where: { id: scheduled.id },
       data: {
         status: ScheduledMessageStatus.FAILED,
         failedAt: attemptAt,
-        sendError: "当前客户没有 LINE userId，无法发送定时消息",
+        sendError: "当前 bridge 第一阶段仅支持文字定时发送",
       },
     });
     return {
       ok: false,
       scheduledMessageId: scheduled.id,
-      reason: "missing-line-user",
+      reason: "image-not-supported-yet",
+    };
+  }
+
+  if (!scheduled.customer.bridgeThreadId) {
+    await prisma.scheduledMessage.update({
+      where: { id: scheduled.id },
+      data: {
+        status: ScheduledMessageStatus.FAILED,
+        failedAt: attemptAt,
+        sendError: "当前客户没有 bridgeThreadId，无法发送定时消息",
+      },
+    });
+    return {
+      ok: false,
+      scheduledMessageId: scheduled.id,
+      reason: "missing-bridge-thread-id",
     };
   }
 
   let messageId = scheduled.deliveredMessageId || null;
 
   try {
-    let messageRecord = messageId
-      ? await prisma.message.findUnique({ where: { id: messageId } })
-      : null;
+    let messageRecord = messageId ? await prisma.message.findUnique({ where: { id: messageId } }) : null;
 
     if (!messageRecord) {
       messageRecord = await prisma.message.create({
@@ -107,8 +114,7 @@ export async function dispatchScheduledMessageById(
           source: scheduled.source,
           japaneseText: normalizedText,
           chineseText: scheduled.chineseText,
-          imageUrl:
-            scheduled.type === MessageType.IMAGE ? scheduled.imageUrl : null,
+          imageUrl: null,
           sentAt: attemptAt,
           deliveryStatus: MessageSendStatus.PENDING,
           lastAttemptAt: attemptAt,
@@ -128,8 +134,7 @@ export async function dispatchScheduledMessageById(
         data: {
           japaneseText: normalizedText,
           chineseText: scheduled.chineseText,
-          imageUrl:
-            scheduled.type === MessageType.IMAGE ? scheduled.imageUrl : null,
+          imageUrl: null,
           sentAt: attemptAt,
           deliveryStatus: MessageSendStatus.PENDING,
           sendError: null,
@@ -148,70 +153,23 @@ export async function dispatchScheduledMessageById(
       },
     });
 
-    const lineMessages = buildLineMessages({
-      type: scheduled.type,
-      japaneseText: normalizedText,
-      imageUrl:
-        scheduled.type === MessageType.IMAGE ? scheduled.imageUrl : null,
-    });
-
-    await pushLineMessages(scheduled.customer.lineUserId, lineMessages);
-
     if (!messageId) {
-      throw new Error(
-        "scheduled message 缺少关联的 messageId，无法更新发送状态"
-      );
+      throw new Error("scheduled message 缺少关联的 messageId，无法加入发送队列");
     }
 
-    await prisma.message.update({
-      where: { id: messageId },
-      data: {
-        deliveryStatus: MessageSendStatus.SENT,
-        sendError: null,
-        failedAt: null,
-        lastAttemptAt: attemptAt,
-      },
+    const task = await queueOutboundMessageTask({
+      messageId,
+      customerId: scheduled.customerId,
+      bridgeThreadId: scheduled.customer.bridgeThreadId,
     });
-
-    await prisma.scheduledMessage.update({
-      where: { id: scheduled.id },
-      data: {
-        status: ScheduledMessageStatus.SENT,
-        processedAt: attemptAt,
-        failedAt: null,
-        sendError: null,
-      },
-    });
-
-    if (
-      scheduled.source === MessageSource.AI_SUGGESTION &&
-      scheduled.replyDraftSetId &&
-      scheduled.suggestionVariant &&
-      (scheduled.suggestionVariant === SuggestionVariant.STABLE ||
-        scheduled.suggestionVariant === SuggestionVariant.ADVANCING)
-    ) {
-      await prisma.replyDraftSet.updateMany({
-        where: {
-          id: scheduled.replyDraftSetId,
-          customerId: scheduled.customerId,
-        },
-        data: {
-          selectedVariant: scheduled.suggestionVariant,
-          selectedAt: attemptAt,
-        },
-      });
-    }
 
     try {
-      await publishRealtimeRefresh({
-        customerId: scheduled.customerId,
-        reason: "scheduled-message-sent",
-      });
+      await publishRealtimeRefresh({ customerId: scheduled.customerId, reason: "scheduled-message-queued" });
     } catch (error) {
-      console.error("Ably publish scheduled-message-sent error:", error);
+      console.error("Ably publish scheduled-message-queued error:", error);
     }
 
-    return { ok: true, scheduledMessageId: scheduled.id, messageId };
+    return { ok: true, scheduledMessageId: scheduled.id, messageId, taskId: task.id };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const failedAt = new Date();
@@ -238,15 +196,9 @@ export async function dispatchScheduledMessageById(
     });
 
     try {
-      await publishRealtimeRefresh({
-        customerId: scheduled.customerId,
-        reason: "scheduled-message-failed",
-      });
+      await publishRealtimeRefresh({ customerId: scheduled.customerId, reason: "scheduled-message-failed" });
     } catch (ablyError) {
-      console.error(
-        "Ably publish scheduled-message-failed error:",
-        ablyError
-      );
+      console.error("Ably publish scheduled-message-failed error:", ablyError);
     }
 
     return { ok: false, scheduledMessageId: scheduled.id, error: errorMessage };

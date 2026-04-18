@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateAnalysisResult, validateGenerationResult, validateAiReviewResult } from '../../lib/ai/protocol-validator.ts';
+import { validateAnalysisResult, validateGenerationResult, validateAiReviewResult } from '../../lib/ai/protocol-validator';
 
 test('validateAnalysisResult fills safe defaults', () => {
   const parsed = validateAnalysisResult({});

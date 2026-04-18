@@ -64,6 +64,7 @@ export async function GET(req: NextRequest) {
       return {
         id: customer.id,
         lineUserId: customer.lineUserId,
+        bridgeThreadId: customer.bridgeThreadId,
         remarkName: customer.remarkName,
         originalName: customer.originalName,
         stage: customer.stage,
