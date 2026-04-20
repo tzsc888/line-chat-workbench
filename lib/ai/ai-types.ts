@@ -77,7 +77,6 @@ export type AnalysisResult = {
     reasoning: string;
   };
   routing_decision: {
-    should_generate_reply: boolean;
     route_type: RouteType;
     reply_goal: string;
     route_reason: string;

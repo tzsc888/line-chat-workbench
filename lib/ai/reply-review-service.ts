@@ -2,6 +2,7 @@ import type { AiReviewResult, AnalysisResult, GenerationResult, ReviewContextPac
 import { requestStructuredJson } from "./model-client";
 import { buildReviewPipelineResult, validateAiReviewResult } from "./protocol-validator";
 import { replyReviewPrompt } from "./prompts/reply-review";
+import { resolveReviewStrategy } from "./strategy";
 
 function normalize(text: string) {
   return text.replace(/\s+/g, " ").trim();
@@ -18,7 +19,7 @@ export function runProgramChecks(input: {
     issues.push("回复文本缺失");
   }
   if (!generation.reply_a.chinese_meaning || !generation.reply_b.chinese_meaning) {
-    issues.push("中文解释缺失");
+    issues.push("中文释义缺失");
   }
   if (!generation.difference_note) {
     issues.push("两版差异说明缺失");
@@ -31,23 +32,19 @@ export function runProgramChecks(input: {
   }
 
   if (generation.reply_a.japanese.length > 220 || generation.reply_b.japanese.length > 220) {
-    issues.push("回复长度偏长，不适合 LINE 短聊");
+    issues.push("回复偏长，不适合 LINE 短聊");
   }
 
   if (analysis.routing_decision.route_type === "DO_NOT_PUSH" || analysis.generation_brief.push_level === "NO_PUSH") {
-    const riskySignals = ["ご購入", "お申込み", "詳細にみる", "今進め", "料金"];
+    const riskySignals = ["ご購入", "お申し込み", "料金", "今なら", "申请"];
     if (riskySignals.some((signal) => aText.includes(signal) || bText.includes(signal))) {
-      issues.push("上游要求不推进，但生成结果含明显推进信号");
+      issues.push("上游判定不推进，但生成文本带有推进信号");
     }
   }
 
   if (analysis.scene_assessment.industry_stage === "INTAKE_RECEPTION") {
-    const intakePushSignals = ["個別希望", "詳しく希望", "占い", "料金", "お申込み"];
     if (generation.reply_a.japanese.length > 140 || generation.reply_b.japanese.length > 140) {
-      issues.push("首轮接待阶段回复过长，不像一句接住后自然收口的LINE首响");
-    }
-    if (intakePushSignals.some((signal) => aText.includes(signal) || bText.includes(signal))) {
-      issues.push("首轮接待阶段不应直接进入个别付费推进");
+      issues.push("首轮接待回复过长");
     }
   }
 
@@ -56,7 +53,7 @@ export function runProgramChecks(input: {
     ["BUILD_PAID_NECESSITY", "INVITE_INDIVIDUAL"].includes(analysis.generation_brief.conversion_step) &&
     !analysis.generation_brief.boundary_to_establish
   ) {
-    issues.push("免费文后承接缺少“免费不够”的边界提醒");
+    issues.push("免费文后承接缺少边界提醒");
   }
 
   return {
@@ -73,8 +70,10 @@ export async function runAiReview(context: ReviewContextPack): Promise<{ line: s
   const model = process.env.MAIN_MODEL;
 
   if (!apiKey || !baseUrl || !model) {
-    throw new Error("第四层环境变量缺失");
+    throw new Error("review service missing env");
   }
+
+  const strategy = resolveReviewStrategy();
 
   const response = await requestStructuredJson({
     apiKey,
@@ -83,7 +82,7 @@ export async function runAiReview(context: ReviewContextPack): Promise<{ line: s
     model,
     system: replyReviewPrompt.system,
     user: JSON.stringify(context, null, 2),
-    temperature: 0.1,
+    temperature: strategy.temperature,
   });
 
   return {

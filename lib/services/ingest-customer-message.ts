@@ -1,21 +1,7 @@
-import { MessageRole, MessageSource, MessageType } from "@prisma/client";
+﻿import { MessageRole, MessageSource, MessageType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { buildDefaultRemarkName } from "@/lib/customers/default-remark-name";
 import { resolveIngestEventTime } from "@/lib/services/ingest-time";
-
-function buildAutoRemarkName(originalName: string, identity: string, now: Date) {
-  const formatter = new Intl.DateTimeFormat("ja-JP", {
-    timeZone: "Asia/Tokyo",
-    year: "2-digit",
-    month: "numeric",
-    day: "numeric",
-  });
-  const parts = formatter.formatToParts(now);
-  const year = parts.find((item) => item.type === "year")?.value || String(now.getFullYear()).slice(-2);
-  const month = parts.find((item) => item.type === "month")?.value || String(now.getMonth() + 1);
-  const day = parts.find((item) => item.type === "day")?.value || String(now.getDate());
-  const baseName = originalName.trim() || identity.trim() || "未命名顾客";
-  return `${year}.${month}.${day}${baseName}`;
-}
 
 export type IngestCustomerMessageInput = {
   customerId?: string;
@@ -61,16 +47,16 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
   });
 
   if (!identity) {
-    throw new Error("缺少 customerId / bridgeThreadId");
+    throw new Error("missing customerId / bridgeThreadId");
   }
   if (type === MessageType.TEXT && !japanese) {
-    throw new Error("TEXT 消息缺少 japanese");
+    throw new Error("TEXT message missing japanese");
   }
   if (type === MessageType.IMAGE && !imageUrl && !japanese) {
-    throw new Error("IMAGE 消息缺少 imageUrl");
+    throw new Error("IMAGE message missing imageUrl");
   }
   if (type === MessageType.STICKER && (!stickerPackageId || !stickerId)) {
-    throw new Error("STICKER 消息缺少 stickerPackageId / stickerId");
+    throw new Error("STICKER message missing stickerPackageId / stickerId");
   }
 
   const dedupeOr = [] as Array<Record<string, string>>;
@@ -95,7 +81,7 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
       return {
         ok: true,
         created: false,
-        line: "重复消息，已跳过重复入库",
+        line: "duplicate message skipped",
         model: process.env.HELPER_MODEL || "",
         translated: !!existingMessage.chineseText,
         translateError: "",
@@ -121,9 +107,7 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
           bridgeThreadId,
           lineUserId: lineUserId || bridgeThreadId,
           originalName: safeOriginalName || bridgeThreadId,
-          remarkName:
-            safeRemarkName ||
-            buildAutoRemarkName(originalName, bridgeThreadId || lineUserId, eventTime),
+          remarkName: safeRemarkName || buildDefaultRemarkName(originalName, bridgeThreadId || lineUserId, eventTime),
           avatarUrl: safeAvatar || null,
         },
         select: {
@@ -146,7 +130,7 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
         create: {
           lineUserId,
           originalName: safeOriginalName || lineUserId,
-          remarkName: safeRemarkName || buildAutoRemarkName(originalName, lineUserId, eventTime),
+          remarkName: safeRemarkName || buildDefaultRemarkName(originalName, lineUserId, eventTime),
           avatarUrl: safeAvatar || null,
         },
         select: {
@@ -213,11 +197,11 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
     line:
       type === MessageType.TEXT
         ? skipTranslate
-          ? "文本消息已快速入库，翻译将异步处理"
-          : "文本消息已入库，翻译将异步处理"
+          ? "text message ingested (translation async)"
+          : "text message ingested"
         : type === MessageType.IMAGE
-          ? "图片消息已入库"
-          : "贴图消息已入库",
+          ? "image message ingested"
+          : "sticker message ingested",
     model: process.env.HELPER_MODEL || "",
     translated: false,
     translateError: "",

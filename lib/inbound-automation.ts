@@ -1,7 +1,9 @@
 import { AutomationJobKind, AutomationJobStatus, MessageType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
+import { PIPELINE_REASON_CODES, parsePipelineReasonCode } from "@/lib/ai/pipeline-reason";
 import { translateCustomerJapaneseMessage } from "@/lib/ai/translation-service";
+import { planPartialInboundJobReconcile } from "@/lib/inbound/reconcile-plan";
 import { generateRepliesWorkflow } from "@/lib/services/generate-replies-workflow";
 
 const OPERATOR_PRESENCE_ID = "default";
@@ -54,17 +56,6 @@ async function executeInboundWorkflowJob(job: {
   customerId: string;
   targetMessageId: string;
 }) {
-  const latestText = await prisma.message.findFirst({
-    where: { customerId: job.customerId, role: "CUSTOMER", type: MessageType.TEXT },
-    orderBy: { sentAt: "desc" },
-    select: { id: true },
-  });
-
-  if (!latestText || latestText.id !== job.targetMessageId) {
-    await finishJob(job.id, AutomationJobStatus.SKIPPED, "已有更新消息，旧任务跳过");
-    return { ok: true, skipped: true } as const;
-  }
-
   await prisma.replyDraftSet.updateMany({
     where: {
       customerId: job.customerId,
@@ -85,10 +76,11 @@ async function executeInboundWorkflowJob(job: {
     targetCustomerMessageId: job.targetMessageId,
     autoMode: true,
     publishRefresh: false,
+    triggerSource: "AUTO_FIRST_INBOUND",
   });
 
   if (!json?.ok) {
-    throw new Error((json as { error?: string } | undefined)?.error || "自动生成建议失败");
+    throw new Error((json as { error?: string } | undefined)?.error || "generate_replies_failed");
   }
 
   await publishRealtimeRefresh({
@@ -96,6 +88,15 @@ async function executeInboundWorkflowJob(job: {
     reason: (json as { skipped?: boolean } | undefined)?.skipped ? "analysis-updated" : "automation-updated",
     scopes: ["workspace", "list", "analysis"],
   });
+
+  const workflowResult = json as {
+    reusedExistingDraft?: boolean;
+  };
+
+  if (workflowResult.reusedExistingDraft) {
+    await finishJob(job.id, AutomationJobStatus.SKIPPED, PIPELINE_REASON_CODES.REUSED_EXISTING_DRAFT);
+    return json;
+  }
 
   await finishJob(job.id, AutomationJobStatus.DONE, null);
   return json;
@@ -119,12 +120,12 @@ async function executeInboundTranslationJob(job: {
   });
 
   if (!message || message.customerId !== job.customerId || message.role !== "CUSTOMER" || message.type !== MessageType.TEXT) {
-    await finishJob(job.id, AutomationJobStatus.SKIPPED, "消息不存在或无需翻译");
+    await finishJob(job.id, AutomationJobStatus.SKIPPED, PIPELINE_REASON_CODES.MESSAGE_NOT_FOUND);
     return { ok: true, skipped: true } as const;
   }
 
   if (message.chineseText?.trim()) {
-    await finishJob(job.id, AutomationJobStatus.SKIPPED, "消息已有中文翻译");
+    await finishJob(job.id, AutomationJobStatus.SKIPPED, PIPELINE_REASON_CODES.ALREADY_TRANSLATED);
     return { ok: true, skipped: true } as const;
   }
 
@@ -132,7 +133,7 @@ async function executeInboundTranslationJob(job: {
   const chineseText = translation.parsed.translation?.trim() || "";
 
   if (!chineseText) {
-    throw new Error("翻译结果为空");
+    throw new Error(PIPELINE_REASON_CODES.JOB_EXECUTION_ERROR);
   }
 
   await prisma.message.update({
@@ -173,7 +174,11 @@ async function processSpecificJob(jobId: string) {
     return await executeInboundWorkflowJob(job);
   } catch (error) {
     console.error("processSpecificInboundAutomationJob error:", error);
-    await finishJob(job.id, AutomationJobStatus.FAILED, error instanceof Error ? error.message : String(error));
+    await finishJob(
+      job.id,
+      AutomationJobStatus.FAILED,
+      parsePipelineReasonCode(error instanceof Error ? error.message : String(error)) || PIPELINE_REASON_CODES.JOB_EXECUTION_ERROR,
+    );
     throw error;
   }
 }
@@ -250,7 +255,67 @@ export async function queueInboundTranslation(options: {
   });
 }
 
-export async function processSpecificInboundAutomationJob(customerId: string, targetMessageId: string, kind: AutomationJobKind = AutomationJobKind.INBOUND_WORKFLOW) {
+export async function markInboundMessageJobsSkipped(options: {
+  customerId: string;
+  targetMessageId: string;
+  reasonCode: string;
+  kinds?: AutomationJobKind[];
+}) {
+  const now = new Date();
+  const kinds = options.kinds || [AutomationJobKind.INBOUND_TRANSLATION, AutomationJobKind.INBOUND_WORKFLOW];
+
+  for (const kind of kinds) {
+    const existing = await prisma.automationJob.findUnique({
+      where: {
+        customerId_targetMessageId_kind: {
+          customerId: options.customerId,
+          targetMessageId: options.targetMessageId,
+          kind,
+        },
+      },
+      select: {
+        id: true,
+        status: true,
+      },
+    });
+
+    if (!existing) {
+      await prisma.automationJob.create({
+        data: {
+          customerId: options.customerId,
+          targetMessageId: options.targetMessageId,
+          kind,
+          status: AutomationJobStatus.SKIPPED,
+          scheduledFor: now,
+          startedAt: now,
+          finishedAt: now,
+          attemptCount: 1,
+          lastError: options.reasonCode,
+        },
+      });
+      continue;
+    }
+
+    if (existing.status === AutomationJobStatus.DONE) continue;
+
+    await prisma.automationJob.update({
+      where: { id: existing.id },
+      data: {
+        status: AutomationJobStatus.SKIPPED,
+        scheduledFor: now,
+        startedAt: now,
+        finishedAt: now,
+        lastError: options.reasonCode,
+      },
+    });
+  }
+}
+
+export async function processSpecificInboundAutomationJob(
+  customerId: string,
+  targetMessageId: string,
+  kind: AutomationJobKind = AutomationJobKind.INBOUND_WORKFLOW,
+) {
   const job = await prisma.automationJob.findUnique({
     where: {
       customerId_targetMessageId_kind: {
@@ -266,7 +331,105 @@ export async function processSpecificInboundAutomationJob(customerId: string, ta
   return processSpecificJob(job.id);
 }
 
+export async function tryProcessInboundJobsImmediately(options: {
+  customerId: string;
+  targetMessageId: string;
+  includeTranslation?: boolean;
+  includeWorkflow?: boolean;
+  maxWaitMs?: number;
+}) {
+  const includeTranslation = options.includeTranslation !== false;
+  const includeWorkflow = options.includeWorkflow !== false;
+  const maxWaitMs = Math.max(200, Math.min(options.maxWaitMs ?? 1200, 3000));
+
+  const kinds = [
+    ...(includeTranslation ? [AutomationJobKind.INBOUND_TRANSLATION] : []),
+    ...(includeWorkflow ? [AutomationJobKind.INBOUND_WORKFLOW] : []),
+  ];
+
+  const jobs = await Promise.all(
+    kinds.map(async (kind) => {
+      try {
+        const result = await Promise.race([
+          processSpecificInboundAutomationJob(options.customerId, options.targetMessageId, kind),
+          new Promise<{ ok: false; skipped: true; reason: string }>((resolve) =>
+            setTimeout(() => resolve({ ok: false, skipped: true, reason: PIPELINE_REASON_CODES.JOB_NOT_RUN_YET }), maxWaitMs),
+          ),
+        ]);
+        return { kind, result };
+      } catch (error) {
+        console.error("tryProcessInboundJobsImmediately error:", error);
+        return {
+          kind,
+          result: { ok: false, skipped: true, reason: PIPELINE_REASON_CODES.JOB_EXECUTION_ERROR },
+        };
+      }
+    }),
+  );
+
+  return {
+    ok: true,
+    jobs,
+  };
+}
+
+export async function reconcilePartialInboundJobsForRecentMessages(limit = 200) {
+  const recentMessages = await prisma.message.findMany({
+    where: {
+      role: "CUSTOMER",
+      type: MessageType.TEXT,
+    },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+    select: {
+      id: true,
+      customerId: true,
+      chineseText: true,
+    },
+  });
+
+  if (!recentMessages.length) {
+    return { scanned: 0, queued: 0 };
+  }
+
+  const targetMessageIds = recentMessages.map((message) => message.id);
+  const jobs = await prisma.automationJob.findMany({
+    where: { targetMessageId: { in: targetMessageIds } },
+    select: {
+      customerId: true,
+      targetMessageId: true,
+      kind: true,
+    },
+  });
+
+  const actions = planPartialInboundJobReconcile({
+    messages: recentMessages,
+    jobs,
+  });
+
+  for (const action of actions) {
+    if (action.kind === AutomationJobKind.INBOUND_TRANSLATION) {
+      await queueInboundTranslation({
+        customerId: action.customerId,
+        targetMessageId: action.targetMessageId,
+      });
+      continue;
+    }
+    await queueInboundAutomation({
+      customerId: action.customerId,
+      targetMessageId: action.targetMessageId,
+    });
+  }
+
+  return {
+    scanned: recentMessages.length,
+    queued: actions.length,
+  };
+}
+
 export async function processDueInboundAutomationJobs(limit = 20) {
+  const reconciled = await reconcilePartialInboundJobsForRecentMessages();
+
   const jobs = await prisma.automationJob.findMany({
     where: {
       status: AutomationJobStatus.PENDING,
@@ -290,7 +453,7 @@ export async function processDueInboundAutomationJobs(limit = 20) {
         customerId: job.customerId,
         targetMessageId: job.targetMessageId,
         kind: job.kind,
-        status: result.skipped ? "SKIPPED" : "DONE",
+        status: "skipped" in result && result.skipped ? "SKIPPED" : "DONE",
       });
     } catch {
       results.push({
@@ -303,6 +466,7 @@ export async function processDueInboundAutomationJobs(limit = 20) {
   }
 
   return {
+    reconciled,
     scanned: jobs.length,
     results,
   };

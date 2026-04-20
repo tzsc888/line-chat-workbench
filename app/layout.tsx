@@ -14,7 +14,12 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN" className="h-full antialiased">
-      <body className="min-h-full flex flex-col"><AppShellHeader />{children}</body>
+      <body className="h-screen overflow-hidden bg-white">
+        <div className="flex h-full min-h-0 flex-col">
+          <AppShellHeader />
+          <main className="min-h-0 flex-1">{children}</main>
+        </div>
+      </body>
     </html>
   );
 }

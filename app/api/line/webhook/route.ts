@@ -4,7 +4,11 @@ import { Prisma } from "@prisma/client";
 import { put } from "@vercel/blob";
 import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
-import { runInboundAutomation } from "@/lib/inbound-automation";
+import { queueInboundTranslation, runInboundAutomation } from "@/lib/inbound-automation";
+import { buildDefaultRemarkName } from "@/lib/customers/default-remark-name";
+import { computeLineRefollowedAt } from "@/lib/customers/relationship-transition";
+import { decideInboundTriggerPolicy } from "@/lib/inbound/trigger-policy";
+import { isFirstInboundTextMessage } from "@/lib/inbound/first-inbound";
 import { constantTimeEqual } from "@/lib/security/secret";
 import { ingestCustomerMessage, type IngestCustomerMessageInput } from "@/lib/services/ingest-customer-message";
 
@@ -87,37 +91,19 @@ async function uploadInboundImageToBlob(params: {
   return blob.url;
 }
 
-function buildAutoRemarkName(originalName: string, lineUserId: string, now = new Date()) {
-  const formatter = new Intl.DateTimeFormat("ja-JP", {
-    timeZone: "Asia/Tokyo",
-    year: "2-digit",
-    month: "numeric",
-    day: "numeric",
-  });
-
-  const parts = formatter.formatToParts(now);
-  const year = parts.find((item) => item.type === "year")?.value || String(now.getFullYear()).slice(-2);
-  const month = parts.find((item) => item.type === "month")?.value || String(now.getMonth() + 1);
-  const day = parts.find((item) => item.type === "day")?.value || String(now.getDate());
-  const baseName = originalName.trim() || lineUserId.trim() || "未命名顾客";
-
-  return `${year}.${month}.${day}${baseName}`;
-}
-
 async function markCustomerRelationshipStatus(
   lineUserId: string,
   status: "ACTIVE" | "UNFOLLOWED",
   options?: {
     originalName?: string;
     avatarUrl?: string;
-    refollowed?: boolean;
   },
 ) {
   const now = new Date();
 
   const existing = await prisma.customer.findUnique({
     where: { lineUserId },
-    select: { id: true },
+    select: { id: true, lineRelationshipStatus: true, lineRefollowedAt: true },
   });
 
   if (existing) {
@@ -126,7 +112,13 @@ async function markCustomerRelationshipStatus(
       data: {
         lineRelationshipStatus: status,
         lineRelationshipUpdatedAt: now,
-        lineRefollowedAt: options?.refollowed ? now : null,
+        lineRefollowedAt: computeLineRefollowedAt({
+          previousStatus: existing.lineRelationshipStatus,
+          nextStatus: status,
+          previousLineRefollowedAt: existing.lineRefollowedAt,
+          now,
+          isCreate: false,
+        }),
         originalName: options?.originalName || undefined,
         avatarUrl: options?.avatarUrl || undefined,
       },
@@ -146,11 +138,16 @@ async function markCustomerRelationshipStatus(
       data: {
         lineUserId,
         originalName: options?.originalName || lineUserId,
-        remarkName: buildAutoRemarkName(options?.originalName || "", lineUserId, now),
+        remarkName: buildDefaultRemarkName(options?.originalName || "", lineUserId, now),
         avatarUrl: options?.avatarUrl || null,
         lineRelationshipStatus: "ACTIVE",
         lineRelationshipUpdatedAt: now,
-        lineRefollowedAt: options?.refollowed ? now : null,
+        lineRefollowedAt: computeLineRefollowedAt({
+          previousStatus: null,
+          nextStatus: "ACTIVE",
+          now,
+          isCreate: true,
+        }),
       },
       select: { id: true },
     });
@@ -225,7 +222,6 @@ export async function POST(req: NextRequest) {
           originalName:
             typeof profile?.displayName === "string" && profile.displayName.trim() ? profile.displayName.trim() : userId,
           avatarUrl: typeof profile?.pictureUrl === "string" ? profile.pictureUrl : "",
-          refollowed: true,
         });
         continue;
       }
@@ -239,12 +235,10 @@ export async function POST(req: NextRequest) {
       if (!lineMessageId) continue;
 
       const profile = await getLineProfile(userId);
-      const originalName = typeof profile?.displayName === "string" && profile.displayName.trim() ? profile.displayName.trim() : userId;
+      const originalName = typeof profile?.displayName === "string" && profile.displayName.trim() ? profile.displayName.trim() : "";
       const avatar = typeof profile?.pictureUrl === "string" ? profile.pictureUrl : "";
 
       let ingestPayload: IngestCustomerMessageInput | null = null;
-      let shouldRunAutomation = false;
-
       if (lineType === "text") {
         const japanese = String(event.message?.text || "").trim();
         if (!japanese) continue;
@@ -259,7 +253,6 @@ export async function POST(req: NextRequest) {
           lineMessageId,
           skipTranslate: true,
         };
-        shouldRunAutomation = true;
       } else if (lineType === "image") {
         try {
           const content = await getLineMessageContent(lineMessageId);
@@ -323,6 +316,19 @@ export async function POST(req: NextRequest) {
 
       const customerId = String(ingestResult.customer.id);
       const messageId = String(ingestResult.message.id);
+      const triggerDecision = decideInboundTriggerPolicy({
+        mode: "live",
+        messageType: lineType === "image" ? "IMAGE" : lineType === "sticker" ? "STICKER" : "TEXT",
+        created: !!ingestResult.created,
+        isFirstInboundText:
+          lineType === "text" &&
+          !!ingestResult.created &&
+          await isFirstInboundTextMessage({
+            customerId,
+            messageId,
+            sentAt: ingestResult.message.sentAt,
+          }),
+      });
 
       try {
         await publishRealtimeRefresh({ customerId, reason: "inbound-message" });
@@ -330,7 +336,14 @@ export async function POST(req: NextRequest) {
         console.error("Ably publish inbound-message error:", error);
       }
 
-      if (shouldRunAutomation) {
+      if (triggerDecision.shouldQueueTranslation) {
+        await queueInboundTranslation({
+          customerId,
+          targetMessageId: messageId,
+        });
+      }
+
+      if (triggerDecision.shouldQueueWorkflow) {
         after(async () => {
           await runInboundAutomation({
             customerId,

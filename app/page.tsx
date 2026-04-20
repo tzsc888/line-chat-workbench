@@ -447,6 +447,7 @@ function HomePageContent() {
   const [isLoadingMoreCustomers, setIsLoadingMoreCustomers] = useState(false);
   const [optimisticMessagesByCustomer, setOptimisticMessagesByCustomer] = useState<Record<string, OptimisticWorkspaceMessage[]>>({});
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
+  const [loggingOut, setLoggingOut] = useState(false);
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
   const [searchText, setSearchText] = useState("");
   const [debouncedSearchText, setDebouncedSearchText] = useState("");
@@ -475,6 +476,8 @@ function HomePageContent() {
   const [scheduleAtInput, setScheduleAtInput] = useState(() => buildDefaultScheduledInputValue());
   const [retryingMessageId, setRetryingMessageId] = useState("");
   const [isSendingAi, setIsSendingAi] = useState<"stable" | "advancing" | "">("");
+  const [isPostGenerateSyncing, setIsPostGenerateSyncing] = useState(false);
+  const [postGenerateSyncMessage, setPostGenerateSyncMessage] = useState("");
   const [pageError, setPageError] = useState("");
   const [apiError, setApiError] = useState("");
   const [helperError, setHelperError] = useState("");
@@ -1508,7 +1511,32 @@ function HomePageContent() {
   useEffect(() => {
     setCustomReply(null);
     setAiNotice("");
+    setIsPostGenerateSyncing(false);
+    setPostGenerateSyncMessage("");
   }, [selectedCustomerId, workspace?.latestReplyDraftSet?.id, workspace?.latestCustomerMessageId]);
+  const runPostGenerateRefresh = useCallback((customerId: string) => {
+    setIsPostGenerateSyncing(true);
+    setPostGenerateSyncMessage("");
+    void (async () => {
+      const [workspaceResult, customersResult] = await Promise.allSettled([
+        loadWorkspace(customerId, { preserveUi: true }),
+        loadCustomers({ preserveUi: true }),
+      ]);
+      const failures = [workspaceResult, customersResult].filter((result) => result.status === "rejected");
+      if (failures.length > 0) {
+        const hasNonAbortFailure = failures.some((result) => {
+          const reason = (result as PromiseRejectedResult).reason;
+          return !isAbortError(reason);
+        });
+        if (hasNonAbortFailure) {
+          setPostGenerateSyncMessage("建议已可用，后台同步失败；稍后会自动重试。");
+        }
+      } else {
+        setPostGenerateSyncMessage("");
+      }
+      setIsPostGenerateSyncing(false);
+    })();
+  }, [loadCustomers, loadWorkspace]);
   async function handleRewrite() {
     if (!workspace) {
       window.alert("当前没有选中的顾客");
@@ -1519,6 +1547,7 @@ function HomePageContent() {
       setApiError("");
       setAiNotice("");
       setCustomReply(null);
+      setPostGenerateSyncMessage("");
       const response = await fetch("/api/generate-replies", {
         method: "POST",
         headers: {
@@ -1545,8 +1574,7 @@ function HomePageContent() {
         setAiNotice(data?.reason || "当前局面不建议生成建议回复，已刷新判断结果");
       }
       setRewriteInput("");
-      await loadWorkspace(workspace.customer.id);
-      await loadCustomers({ preserveUi: true });
+      runPostGenerateRefresh(workspace.customer.id);
     } catch (error) {
       console.error(error);
       setApiError(String(error));
@@ -2056,6 +2084,20 @@ function HomePageContent() {
       window.alert("备注名更新失败");
     }
   }
+  async function handleLogout() {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+      router.push("/login");
+      router.refresh();
+    } catch (error) {
+      console.error(error);
+      window.alert("Logout failed, please retry.");
+    } finally {
+      setLoggingOut(false);
+    }
+  }
   function handleChatScroll() {
     const container = chatScrollRef.current;
     if (!container) return;
@@ -2180,24 +2222,24 @@ function HomePageContent() {
         )}
       </div>
       <div className="w-[46%] flex flex-col bg-gray-50">
-        <div className="p-4 border-b bg-white space-y-2">
+        <div className="border-b bg-white px-4 py-3 flex flex-wrap items-center gap-2">
           <div className="font-bold">{selectedCustomerId ? getDisplayName(workspace?.customer || null) : "未打开顾客会话"}</div>
           {workspace?.customer && getSecondaryName(workspace.customer) ? (
-            <div className="text-xs text-gray-500 mt-1">
+            <div className="order-3 w-full text-xs text-gray-500">
               {getSecondaryName(workspace.customer)}
             </div>
           ) : null}
           {workspace?.customer?.lineRelationshipStatus === "UNFOLLOWED" ? (
-            <div className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[12px] font-medium text-rose-700">
+            <div className="order-2 inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-[11px] font-medium text-rose-700">
               顾客已取消关注
             </div>
           ) : workspace?.customer && shouldShowRefollowNotice(workspace.customer.lineRefollowedAt, workspace.customer.lineRelationshipStatus) ? (
-            <div className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[12px] font-medium text-emerald-700">
+            <div className="order-2 inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[11px] font-medium text-emerald-700">
               顾客重新加为好友
             </div>
           ) : null}
           {workspace?.customer?.followup ? (
-            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-[12px] text-gray-600">
+            <div className="order-4 w-full flex flex-wrap items-center gap-2 border-t border-gray-100 pt-1.5 text-[12px] text-gray-600">
               <span className={`rounded-full px-2 py-0.5 font-medium ${workspace.customer.followup.bucket === "VIP" ? "bg-amber-50 text-amber-700 border border-amber-200" : "bg-sky-50 text-sky-700 border border-sky-200"}`}>
                 {getFollowupBucketLabel(workspace.customer.followup.bucket)}
               </span>
@@ -2210,7 +2252,7 @@ function HomePageContent() {
               <span className="truncate">原因：{workspace.customer.followup.reason}</span>
               <Link
                 href={`/followups?customerId=${workspace.customer.id}`}
-                className="ml-auto rounded-full border border-gray-200 bg-white px-2.5 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50"
+                className="rounded-full border border-gray-200 bg-white px-2.5 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50 sm:ml-auto"
               >
                 编辑跟进
               </Link>
@@ -2641,6 +2683,7 @@ function HomePageContent() {
           ) : null}
         </div>
       </div>
+      <div className="flex h-full min-h-0 min-w-0 w-[30%] flex-col border-l border-gray-200 bg-white">
       <AiAssistantPanel
         workspace={workspace}
         latestDraft={latestDraft}
@@ -2673,7 +2716,12 @@ function HomePageContent() {
         helperError={helperError}
         apiError={apiError}
         aiNotice={aiNotice}
+        onLogout={handleLogout}
+        loggingOut={loggingOut}
+        isPostGenerateSyncing={isPostGenerateSyncing}
+        postGenerateSyncMessage={postGenerateSyncMessage}
       />
+      </div>
       {customerContextMenu && contextMenuCustomer ? (
         <div
           className="fixed z-50 min-w-40 rounded-xl border border-gray-200 bg-white shadow-xl py-2"

@@ -1,6 +1,7 @@
 import type { TranslationResult } from "./ai-types";
 import { requestStructuredJson } from "./model-client";
 import { translationPrompt } from "./prompts/translation";
+import { resolveTranslationStrategy } from "./strategy";
 
 export async function translateCustomerJapaneseMessage(input: {
   japaneseText: string;
@@ -13,8 +14,10 @@ export async function translateCustomerJapaneseMessage(input: {
   const model = process.env.HELPER_MODEL;
 
   if (!apiKey || !baseUrl || !model) {
-    throw new Error("翻译层环境变量缺失");
+    throw new Error("translation service missing env");
   }
+
+  const strategy = resolveTranslationStrategy();
 
   const user = JSON.stringify(
     {
@@ -24,8 +27,8 @@ export async function translateCustomerJapaneseMessage(input: {
         previous_message_chinese: input.previousChinese || "",
       },
       translation_rules: {
-        special_terms: [],
-        style_notes: ["保留语气、保留保留感、保留软拒绝或试探感"],
+        special_terms: strategy.specialTerms,
+        style_notes: strategy.preserveToneNotes,
       },
     },
     null,
@@ -39,7 +42,7 @@ export async function translateCustomerJapaneseMessage(input: {
     model,
     system: translationPrompt.system,
     user,
-    temperature: 0.1,
+    temperature: strategy.temperature,
   });
 
   return {

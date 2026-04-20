@@ -90,28 +90,28 @@ export function parseDraftJson<T>(value: string | null | undefined): T | null {
 
 export function getSceneTypeLabel(value?: string | null) {
   const map: Record<string, string> = {
-    INITIAL_CONTACT: "初接触",
-    POST_FREE_CONTENT_FIRST_REAL_FEEDBACK: "免费内容后首次真实反馈",
+    INITIAL_CONTACT: "初次接触",
+    POST_FREE_CONTENT_FIRST_REAL_FEEDBACK: "免费内容后首轮反馈",
     INTERESTED_BUT_INFO_INSUFFICIENT: "有兴趣但信息不足",
-    CLEAR_OBJECTION: "明显异议",
+    CLEAR_OBJECTION: "明确异议",
     BUDGET_HESITATION: "预算犹豫",
     LIGHT_NURTURE: "轻养熟",
     POST_PURCHASE_FOLLOWUP: "成交后经营",
-    DO_NOT_PUSH_OR_NOT_WORTH_GENERATING: "暂不推进",
+    DO_NOT_PUSH_OR_NOT_WORTH_GENERATING: "谨慎承接",
   };
   return value ? map[value] || value : "";
 }
 
 export function getRouteTypeLabel(value?: string | null) {
   const map: Record<string, string> = {
-    NO_GENERATION: "不生成",
+    NO_GENERATION: "保守承接",
     JUST_HOLD: "仅承接",
     LIGHT_HOLD: "轻承接",
-    STEADY_PUSH: "稳妥推进",
+    STEADY_PUSH: "稳步推进",
     OBJECTION_HANDLING: "异议处理",
     LIGHT_NURTURE: "轻养熟",
     POST_PURCHASE_CARE: "成交后经营",
-    DO_NOT_PUSH: "暂不推进",
+    DO_NOT_PUSH: "不强推",
   };
   return value ? map[value] || value : "";
 }
@@ -120,7 +120,7 @@ export function getPushLevelLabel(value?: string | null) {
   const map: Record<string, string> = {
     NO_PUSH: "不推进",
     LIGHT_HOLD: "轻承接",
-    STEADY_PUSH: "稳妥推进",
+    STEADY_PUSH: "稳步推进",
     HALF_STEP_PUSH: "半步推进",
   };
   return value ? map[value] || value : "";
@@ -156,8 +156,8 @@ export function getReviewResultLabel(value?: string | null) {
 
 export function getDraftStaleReasonLabel(value?: string | null) {
   const map: Record<string, string> = {
-    "new-inbound-message": "顾客发来了更新消息，旧建议已过期",
-    "new-analysis-generated": "已生成更新建议，旧草稿已过期",
+    "new-inbound-message": "客户有更新消息，旧草稿已过期",
+    "new-analysis-generated": "已有更新草稿，当前草稿已过期",
   };
   return value ? map[value] || value : "";
 }
@@ -177,42 +177,30 @@ export function deriveDraftPresentation(latestDraft: ReplyDraftLike | null, late
     !!latestDraft.targetCustomerMessageId &&
     latestDraft.targetCustomerMessageId !== latestCustomerMessageId
   );
-  const isBlocked = !!latestDraft && finalGate?.can_show_to_human === false;
-  const shouldDimDraft = isUsed || isStale || isBlocked;
+  const isBlocked = false;
+  const shouldDimDraft = isUsed || isStale;
   const issues = [
     ...(programChecks?.issues || []),
     ...((aiReview?.issues_found || []).map((item) => item.explanation).filter(Boolean) as string[]),
   ];
 
   const statusNote = isUsed
-    ? `已采用${latestDraft?.selectedVariant === "STABLE" ? "A 更稳" : "B 半步推进"}`
+    ? `已采用 ${latestDraft?.selectedVariant === "STABLE" ? "A 更稳" : "B 半步推进"}`
     : isStale
-      ? getDraftStaleReasonLabel(latestDraft?.staleReason) || "当前草稿已失效，请重新分析或生成"
-      : isBlocked
-        ? "当前草稿已被质检拦截，建议直接重新生成"
-        : finalGate?.can_recommend_direct_use === false
-          ? "当前结果可供参考，但不建议直接使用"
-          : "当前草稿可供审核";
+      ? getDraftStaleReasonLabel(latestDraft?.staleReason) || "当前草稿已失效，请重新生成"
+      : "当前草稿可供人工判断";
 
   const primaryActionLabel = !latestDraft
-    ? "先分析后生成"
+    ? "生成回复"
     : isStale
       ? "基于最新消息重生"
-      : isBlocked
-        ? "重新生成可用版本"
-        : finalGate?.can_recommend_direct_use === false
-          ? "重新生成更稳版本"
-          : "重新生成";
+      : "重新生成";
 
   const primaryActionHint = !latestDraft
-    ? "当前还没有建议草稿，先跑一次完整链路。"
+    ? "当前没有建议草稿，点击生成回复"
     : isStale
-      ? "旧草稿对应的上下文已经过期，建议先按最新消息重跑。"
-      : isBlocked
-        ? "当前草稿已被质检判定不建议继续使用，建议直接重生。"
-        : finalGate?.can_recommend_direct_use === false
-          ? "当前草稿可参考，但建议再生成一次更稳、更贴路线的版本。"
-          : "如需调整语气、推进力度或避雷点，可以重新生成。";
+      ? "旧草稿上下文已过期，建议按最新消息重生"
+      : "如需调整语气或推进力度，可重新生成";
 
   const reviewSummary = aiReview?.human_attention_note || reviewFlags?.review_reason || "";
 
@@ -234,3 +222,4 @@ export function deriveDraftPresentation(latestDraft: ReplyDraftLike | null, late
     reviewSummary,
   };
 }
+

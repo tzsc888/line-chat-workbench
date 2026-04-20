@@ -2,8 +2,18 @@ import { NextRequest, NextResponse } from "next/server";
 import { LineRelationshipStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
-import { queueInboundAutomation, queueInboundTranslation } from "@/lib/inbound-automation";
+import {
+  markInboundMessageJobsSkipped,
+  queueInboundAutomation,
+  queueInboundTranslation,
+  tryProcessInboundJobsImmediately,
+} from "@/lib/inbound-automation";
+import { PIPELINE_REASON_CODES } from "@/lib/ai/pipeline-reason";
 import { ingestCustomerMessage } from "@/lib/services/ingest-customer-message";
+import { buildDefaultRemarkName } from "@/lib/customers/default-remark-name";
+import { computeLineRefollowedAt } from "@/lib/customers/relationship-transition";
+import { decideInboundTriggerPolicy } from "@/lib/inbound/trigger-policy";
+import { isFirstInboundTextMessage } from "@/lib/inbound/first-inbound";
 import {
   buildBridgePlaceholderName,
   cleanBridgeText,
@@ -164,12 +174,20 @@ async function upsertBridgeCustomer(params: {
         bridgeThreadId: params.threadId,
         lineUserId: params.threadId,
         originalName: safeIncomingName || buildBridgePlaceholderName(params.threadId),
-        remarkName: safeIncomingName || buildBridgePlaceholderName(params.threadId),
+        remarkName: buildDefaultRemarkName(
+          safeIncomingName,
+          params.threadId,
+          now,
+        ),
         avatarUrl: safeAvatarUrl || null,
         lineRelationshipStatus: params.relationshipStatus,
         lineRelationshipUpdatedAt: now,
-        lineRefollowedAt:
-          params.relationshipStatus === LineRelationshipStatus.ACTIVE ? now : null,
+        lineRefollowedAt: computeLineRefollowedAt({
+          previousStatus: null,
+          nextStatus: params.relationshipStatus,
+          now,
+          isCreate: true,
+        }),
       },
       select: {
         id: true,
@@ -203,12 +221,12 @@ async function upsertBridgeCustomer(params: {
       avatarUrl: safeAvatarUrl || undefined,
       lineRelationshipStatus: params.relationshipStatus,
       lineRelationshipUpdatedAt: relationshipChanged ? now : undefined,
-      lineRefollowedAt:
-        params.relationshipStatus === LineRelationshipStatus.UNFOLLOWED
-          ? null
-          : relationshipChanged && existing.lineRelationshipStatus === LineRelationshipStatus.UNFOLLOWED
-            ? now
-            : undefined,
+      lineRefollowedAt: computeLineRefollowedAt({
+        previousStatus: existing.lineRelationshipStatus,
+        nextStatus: params.relationshipStatus,
+        now,
+        isCreate: false,
+      }),
     },
     select: {
       id: true,
@@ -295,13 +313,48 @@ export async function POST(req: NextRequest) {
         strictSentAt: true,
       });
 
-      if (!result?.created) continue;
+      const created = !!result?.created;
+      const createdMessageId = result.message?.id || "";
+      const createdMessageSentAt = result.message?.sentAt instanceof Date ? result.message.sentAt : null;
+      const messageType = type === "STICKER" ? "STICKER" : type === "IMAGE" ? "IMAGE" : "TEXT";
+      const isFirstInboundText =
+        created &&
+        messageType === "TEXT" &&
+        !!createdMessageId &&
+        !!createdMessageSentAt &&
+        await isFirstInboundTextMessage({
+          customerId: customer.id,
+          messageId: createdMessageId,
+          sentAt: createdMessageSentAt,
+        });
+      const triggerDecision = decideInboundTriggerPolicy({
+        mode: mode === "live" ? "live" : "non_live",
+        messageType,
+        created,
+        isFirstInboundText,
+      });
+
+      if (!created) continue;
 
       importedCount += 1;
-      const createdMessageId = result.message?.id || "";
-      if (mode === "live" && type === "TEXT" && createdMessageId) {
-        latestLiveTextMessageId = createdMessageId;
+      if (
+        !triggerDecision.shouldQueueTranslation &&
+        !triggerDecision.shouldQueueWorkflow &&
+        triggerDecision.workflowReasonCode === PIPELINE_REASON_CODES.NON_LIVE_MODE &&
+        createdMessageId
+      ) {
+        await markInboundMessageJobsSkipped({
+          customerId: customer.id,
+          targetMessageId: createdMessageId,
+          reasonCode: PIPELINE_REASON_CODES.NON_LIVE_MODE,
+        });
+      }
+
+      if (triggerDecision.shouldQueueTranslation && createdMessageId) {
         translationQueuedMessageIds.push(createdMessageId);
+      }
+      if (triggerDecision.shouldQueueWorkflow && createdMessageId) {
+        latestLiveTextMessageId = createdMessageId;
       }
     }
 
@@ -330,6 +383,18 @@ export async function POST(req: NextRequest) {
         customerId: customer.id,
         targetMessageId: latestLiveTextMessageId,
       });
+
+      try {
+        await tryProcessInboundJobsImmediately({
+          customerId: customer.id,
+          targetMessageId: latestLiveTextMessageId,
+          includeTranslation: true,
+          includeWorkflow: true,
+          maxWaitMs: 1200,
+        });
+      } catch (error) {
+        console.error("bridge immediate inbound attempt error:", error);
+      }
     }
 
     return NextResponse.json({
