@@ -27,7 +27,7 @@ type FollowupItem = {
   latestMessage: {
     id: string;
     role: "CUSTOMER" | "OPERATOR";
-    type: "TEXT" | "IMAGE";
+    type: "TEXT" | "IMAGE" | "STICKER";
     sentAt: string;
     previewText: string;
   } | null;

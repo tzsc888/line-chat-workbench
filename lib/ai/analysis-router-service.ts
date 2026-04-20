@@ -2,6 +2,7 @@ import type { AnalysisContextPack, AnalysisResult } from "./ai-types";
 import { requestStructuredJson } from "./model-client";
 import { validateAnalysisResult } from "./protocol-validator";
 import { analysisRouterPrompt } from "./prompts/analysis-router";
+import { resolveAnalysisStrategy } from "./strategy";
 
 export async function runAnalysisRouter(context: AnalysisContextPack) {
   const apiKey = process.env.EKAN8_API_KEY;
@@ -10,8 +11,10 @@ export async function runAnalysisRouter(context: AnalysisContextPack) {
   const model = process.env.MAIN_MODEL;
 
   if (!apiKey || !baseUrl || !model) {
-    throw new Error("第二层环境变量缺失");
+    throw new Error("analysis service missing env");
   }
+
+  const strategy = resolveAnalysisStrategy();
 
   const response = await requestStructuredJson<AnalysisResult>({
     apiKey,
@@ -20,7 +23,7 @@ export async function runAnalysisRouter(context: AnalysisContextPack) {
     model,
     system: analysisRouterPrompt.system,
     user: JSON.stringify(context, null, 2),
-    temperature: 0.15,
+    temperature: strategy.temperature,
   });
 
   return {

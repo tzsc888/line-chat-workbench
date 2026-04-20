@@ -40,7 +40,7 @@ type CustomerListItem = {
   latestMessage: {
     id: string;
     role: "CUSTOMER" | "OPERATOR";
-    type: "TEXT" | "IMAGE";
+    type: "TEXT" | "IMAGE" | "STICKER";
     source: "LINE" | "MANUAL" | "AI_SUGGESTION";
     japaneseText: string;
     chineseText: string | null;
@@ -52,12 +52,14 @@ type WorkspaceMessage = {
   id: string;
   customerId: string;
   role: "CUSTOMER" | "OPERATOR";
-  type: "TEXT" | "IMAGE";
+  type: "TEXT" | "IMAGE" | "STICKER";
   source: "LINE" | "MANUAL" | "AI_SUGGESTION";
   lineMessageId: string | null;
   japaneseText: string;
   chineseText: string | null;
   imageUrl: string | null;
+  stickerPackageId: string | null;
+  stickerId: string | null;
   deliveryStatus: "PENDING" | "SENT" | "FAILED" | null;
   sendError: string | null;
   lastAttemptAt: string | null;
@@ -103,7 +105,7 @@ type ReplyDraftSet = {
 };
 type ScheduledMessageItem = {
   id: string;
-  type: "TEXT" | "IMAGE";
+  type: "TEXT" | "IMAGE" | "STICKER";
   source: "LINE" | "MANUAL" | "AI_SUGGESTION";
   japaneseText: string;
   chineseText: string | null;
@@ -180,6 +182,11 @@ type CustomerListStats = {
 };
 const CUSTOMER_PAGE_SIZE = 50;
 const OPTIMISTIC_ID_PREFIX = "optimistic:";
+
+function isAbortError(error: unknown) {
+  return (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError");
+}
 function getDisplayName(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null | undefined) {
   if (!customer) return "未选择顾客";
   return customer.remarkName?.trim() || customer.originalName || "未命名顾客";
@@ -286,7 +293,12 @@ function getDeliveryStatusMeta(message: WorkspaceMessage) {
   }
 }
 function buildPreviewTextFromMessage(message: Pick<WorkspaceMessage, "role" | "type" | "japaneseText">) {
-  const baseText = message.type === "IMAGE" ? "[图片]" : message.japaneseText.trim() || "[空消息]";
+  const baseText =
+    message.type === "IMAGE"
+      ? "[图片]"
+      : message.type === "STICKER"
+        ? "[贴图]"
+        : message.japaneseText.trim() || "[空消息]";
   return `${message.role === "OPERATOR" ? "我：" : ""}${baseText}`;
 }
 function buildCustomerLatestMessage(message: WorkspaceMessage | OptimisticWorkspaceMessage): CustomerListItem["latestMessage"] {
@@ -349,6 +361,8 @@ function normalizeWorkspaceMessagePayload(payload: any): WorkspaceMessage | null
     japaneseText: payload.japaneseText ?? "",
     chineseText: payload.chineseText ?? null,
     imageUrl: payload.imageUrl ?? null,
+    stickerPackageId: payload.stickerPackageId ?? null,
+    stickerId: payload.stickerId ?? null,
     deliveryStatus: payload.deliveryStatus ?? null,
     sendError: payload.sendError ?? null,
     lastAttemptAt: payload.lastAttemptAt ?? null,
@@ -433,6 +447,7 @@ function HomePageContent() {
   const [isLoadingMoreCustomers, setIsLoadingMoreCustomers] = useState(false);
   const [optimisticMessagesByCustomer, setOptimisticMessagesByCustomer] = useState<Record<string, OptimisticWorkspaceMessage[]>>({});
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
+  const [loggingOut, setLoggingOut] = useState(false);
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
   const [searchText, setSearchText] = useState("");
   const [debouncedSearchText, setDebouncedSearchText] = useState("");
@@ -449,7 +464,7 @@ function HomePageContent() {
   const [editingPresetId, setEditingPresetId] = useState("");
   const [presetTitle, setPresetTitle] = useState("");
   const [presetContent, setPresetContent] = useState("");
-  const [pendingImage, setPendingImage] = useState<PendingUploadImage | null>(null);
+  const [pendingImages, setPendingImages] = useState<PendingUploadImage[]>([]);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [isComposerDragOver, setIsComposerDragOver] = useState(false);
   const [isListLoading, setIsListLoading] = useState(true);
@@ -461,6 +476,8 @@ function HomePageContent() {
   const [scheduleAtInput, setScheduleAtInput] = useState(() => buildDefaultScheduledInputValue());
   const [retryingMessageId, setRetryingMessageId] = useState("");
   const [isSendingAi, setIsSendingAi] = useState<"stable" | "advancing" | "">("");
+  const [isPostGenerateSyncing, setIsPostGenerateSyncing] = useState(false);
+  const [postGenerateSyncMessage, setPostGenerateSyncMessage] = useState("");
   const [pageError, setPageError] = useState("");
   const [apiError, setApiError] = useState("");
   const [helperError, setHelperError] = useState("");
@@ -520,7 +537,14 @@ function HomePageContent() {
   const hasMoreCustomersRef = useRef(false);
   const searchKeywordRef = useRef("");
   const isCustomerListRequestInFlightRef = useRef(false);
+  const customerListRequestIdRef = useRef(0);
+  const customerListAbortControllerRef = useRef<AbortController | null>(null);
   const isSilentRefreshingRef = useRef(false);
+  const workspaceRequestIdRef = useRef(0);
+  const workspaceAbortControllerRef = useRef<AbortController | null>(null);
+  const isRealtimeRefreshInFlightRef = useRef(false);
+  const pendingRealtimeRefreshRef = useRef(false);
+  const pendingRealtimeRefreshCustomerIdRef = useRef<string | null>(null);
   const selectedCustomerIdRef = useRef("");
   const realtimeRefreshTimerRef = useRef<number | null>(null);
   const ablyClientRef = useRef<Ably.Realtime | null>(null);
@@ -536,6 +560,12 @@ function HomePageContent() {
   const audioEnabledRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastIncomingSoundAtRef = useRef(0);
+  useEffect(() => {
+    return () => {
+      customerListAbortControllerRef.current?.abort();
+      workspaceAbortControllerRef.current?.abort();
+    };
+  }, []);
   const preserveCustomerListViewport = useCallback((apply: () => void) => {
     const container = customerListScrollRef.current;
     const previousScrollTop = container?.scrollTop ?? null;
@@ -577,19 +607,19 @@ function HomePageContent() {
         ? customerListScrollRef.current?.scrollTop ?? 0
         : 0;
       const isLoadMore = !!options?.loadMore;
-      const isReset = options?.reset ?? !isLoadMore;
       const activeSearch = options?.search ?? searchKeywordRef.current;
-      const loadedPinnedCount = customersRef.current.filter((item) => !!item.pinnedAt).length;
-      const loadedRegularCount = Math.max(0, customersRef.current.length - loadedPinnedCount);
-      const limit = Math.max(
-        options?.limitOverride ?? CUSTOMER_PAGE_SIZE,
-        CUSTOMER_PAGE_SIZE
-      );
+      const limit = Math.max(options?.limitOverride ?? CUSTOMER_PAGE_SIZE, CUSTOMER_PAGE_SIZE);
       const page = isLoadMore ? customerPageRef.current + 1 : 1;
 
       if (isCustomerListRequestInFlightRef.current && isLoadMore) {
         return;
       }
+
+      const requestId = customerListRequestIdRef.current + 1;
+      customerListRequestIdRef.current = requestId;
+      const abortController = new AbortController();
+      customerListAbortControllerRef.current?.abort();
+      customerListAbortControllerRef.current = abortController;
 
       try {
         isCustomerListRequestInFlightRef.current = true;
@@ -609,10 +639,15 @@ function HomePageContent() {
 
         const response = await fetch(`/api/customers?${params.toString()}`, {
           cache: "no-store",
+          signal: abortController.signal,
         });
         const data = await response.json();
         if (!response.ok || !data.ok) {
           throw new Error(data?.error || "读取顾客列表失败");
+        }
+
+        if (requestId !== customerListRequestIdRef.current) {
+          return;
         }
 
         const list: CustomerListItem[] = data.customers || [];
@@ -629,6 +664,7 @@ function HomePageContent() {
           }
           return sortCustomerList(list);
         });
+
         const loadedPinnedCountAfterFetch = list.filter((item) => !!item.pinnedAt).length;
         const loadedRegularCountAfterFetch = Math.max(0, list.length - loadedPinnedCountAfterFetch);
         const nextPageValue =
@@ -657,14 +693,23 @@ function HomePageContent() {
           });
         }
       } catch (error) {
+        if (isAbortError(error)) {
+          return;
+        }
         console.error(error);
-        setPageError(String(error));
+        if (requestId === customerListRequestIdRef.current) {
+          setPageError(String(error));
+        }
       } finally {
-        isCustomerListRequestInFlightRef.current = false;
-        if (isLoadMore) {
+        if (requestId === customerListRequestIdRef.current) {
+          isCustomerListRequestInFlightRef.current = false;
+          if (customerListAbortControllerRef.current === abortController) {
+            customerListAbortControllerRef.current = null;
+          }
           setIsLoadingMoreCustomers(false);
-        } else if (!options?.silent && !shouldPreserveListUi) {
-          setIsListLoading(false);
+          if (!isLoadMore) {
+            setIsListLoading(false);
+          }
         }
       }
     },
@@ -692,10 +737,18 @@ function HomePageContent() {
   const loadWorkspace = useCallback(
     async (customerId: string, options?: { preserveUi?: boolean }) => {
       if (!customerId) {
+        workspaceAbortControllerRef.current?.abort();
+        workspaceAbortControllerRef.current = null;
         setWorkspace(null);
         return;
       }
       const preserveUi = !!options?.preserveUi;
+      const requestId = workspaceRequestIdRef.current + 1;
+      workspaceRequestIdRef.current = requestId;
+      const abortController = new AbortController();
+      workspaceAbortControllerRef.current?.abort();
+      workspaceAbortControllerRef.current = abortController;
+
       const container = chatScrollRef.current;
       let previousScrollTop = 0;
       let previousScrollHeight = 0;
@@ -714,18 +767,24 @@ function HomePageContent() {
           setCustomReply(null);
           setRewriteInput("");
           setManualReply("");
-          setPendingImage(null);
+          setPendingImages([]);
           setApiError("");
           setHelperError("");
           setAiNotice("");
         }
         const response = await fetch(`/api/customers/${customerId}/workspace`, {
           cache: "no-store",
+          signal: abortController.signal,
         });
         const data = await response.json();
         if (!response.ok || !data.ok) {
           throw new Error(data?.error || "读取顾客工作台失败");
         }
+
+        if (requestId !== workspaceRequestIdRef.current) {
+          return;
+        }
+
         const nextWorkspace: WorkspaceData | null = data.workspace || null;
         setWorkspace(nextWorkspace);
         if (nextWorkspace?.customer) {
@@ -756,19 +815,64 @@ function HomePageContent() {
           });
         }
       } catch (error) {
+        if (isAbortError(error)) {
+          return;
+        }
         console.error(error);
-        if (!preserveUi) {
+        if (!preserveUi && requestId === workspaceRequestIdRef.current) {
           setWorkspace(null);
           setPageError(String(error));
         }
       } finally {
-        if (!preserveUi) {
+        if (requestId === workspaceRequestIdRef.current) {
           setIsWorkspaceLoading(false);
+          if (workspaceAbortControllerRef.current === abortController) {
+            workspaceAbortControllerRef.current = null;
+          }
+          isSilentRefreshingRef.current = false;
         }
-        isSilentRefreshingRef.current = false;
       }
     },
     []
+  );
+  const runRealtimeRefresh = useCallback(
+    async (targetCustomerId?: string | null) => {
+      const nextTargetCustomerId = targetCustomerId || selectedCustomerIdRef.current || null;
+      if (isRealtimeRefreshInFlightRef.current) {
+        pendingRealtimeRefreshRef.current = true;
+        if (nextTargetCustomerId) {
+          pendingRealtimeRefreshCustomerIdRef.current = nextTargetCustomerId;
+        }
+        return;
+      }
+
+      isRealtimeRefreshInFlightRef.current = true;
+      try {
+        const loadedRegularCount = Math.max(
+          0,
+          customersRef.current.filter((item) => !item.pinnedAt).length
+        );
+        await loadCustomers({
+          silent: true,
+          preserveUi: true,
+          limitOverride: Math.max(loadedRegularCount, CUSTOMER_PAGE_SIZE),
+          search: searchKeywordRef.current,
+        });
+        const activeCustomerId = selectedCustomerIdRef.current;
+        if (activeCustomerId && (!nextTargetCustomerId || nextTargetCustomerId === activeCustomerId)) {
+          await loadWorkspace(activeCustomerId, { preserveUi: true });
+        }
+      } finally {
+        isRealtimeRefreshInFlightRef.current = false;
+        if (pendingRealtimeRefreshRef.current) {
+          const queuedCustomerId = pendingRealtimeRefreshCustomerIdRef.current;
+          pendingRealtimeRefreshRef.current = false;
+          pendingRealtimeRefreshCustomerIdRef.current = null;
+          void runRealtimeRefresh(queuedCustomerId);
+        }
+      }
+    },
+    [loadCustomers, loadWorkspace]
   );
   const addOptimisticMessage = useCallback((customerId: string, message: OptimisticWorkspaceMessage) => {
     setOptimisticMessagesByCustomer((prev) => {
@@ -901,7 +1005,9 @@ function HomePageContent() {
       japaneseText: string;
       chineseText?: string | null;
       imageUrl?: string | null;
-      type: "TEXT" | "IMAGE";
+      stickerPackageId?: string | null;
+      stickerId?: string | null;
+      type: "TEXT" | "IMAGE" | "STICKER";
       source: MessageSource;
       replyDraftSetId?: string;
       suggestionVariant?: "STABLE" | "ADVANCING";
@@ -919,6 +1025,8 @@ function HomePageContent() {
         japaneseText: params.japaneseText,
         chineseText: params.chineseText ?? null,
         imageUrl: params.type === "IMAGE" ? params.imageUrl ?? null : null,
+        stickerPackageId: params.type === "STICKER" ? params.stickerPackageId ?? null : null,
+        stickerId: params.type === "STICKER" ? params.stickerId ?? null : null,
         deliveryStatus: "PENDING",
         sendError: null,
         lastAttemptAt: sentAt,
@@ -949,6 +1057,8 @@ function HomePageContent() {
             japaneseText: params.japaneseText,
             chineseText: params.chineseText ?? "",
             imageUrl: params.imageUrl || "",
+            stickerPackageId: params.stickerPackageId || "",
+            stickerId: params.stickerId || "",
             source: params.source,
             type: params.type,
             replyDraftSetId: params.replyDraftSetId || "",
@@ -1257,6 +1367,7 @@ function HomePageContent() {
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
         void pingPresence();
+        void runRealtimeRefresh(selectedCustomerIdRef.current || null);
       }
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -1264,7 +1375,7 @@ function HomePageContent() {
       if (timer) window.clearInterval(timer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [selectedCustomerId]);
+  }, [runRealtimeRefresh, selectedCustomerId]);
   useEffect(() => {
     const client = new Ably.Realtime({
       authUrl: "/api/ably/token",
@@ -1277,38 +1388,35 @@ function HomePageContent() {
         window.clearTimeout(realtimeRefreshTimerRef.current);
       }
       realtimeRefreshTimerRef.current = window.setTimeout(() => {
-        if (isSilentRefreshingRef.current) return;
         const payload =
           message && typeof message === "object" ? message.data || {} : {};
-        const activeCustomerId = selectedCustomerIdRef.current;
-        const loadedRegularCount = Math.max(
-          0,
-          customersRef.current.filter((item) => !item.pinnedAt).length
-        );
-        loadCustomers({
-          silent: true,
-          preserveUi: true,
-          limitOverride: Math.max(loadedRegularCount, CUSTOMER_PAGE_SIZE),
-          search: searchKeywordRef.current,
-        });
-        if (
-          activeCustomerId &&
-          (!payload.customerId || payload.customerId === activeCustomerId)
-        ) {
-          loadWorkspace(activeCustomerId, { preserveUi: true });
-        }
+        const targetCustomerId =
+          payload && typeof payload.customerId === "string" && payload.customerId.trim()
+            ? payload.customerId.trim()
+            : null;
+        void runRealtimeRefresh(targetCustomerId);
       }, 250);
     };
+    const handleConnectionStateChange = (stateChange: Ably.ConnectionStateChange) => {
+      if (
+        stateChange.current === "connected" &&
+        ["disconnected", "suspended", "connecting"].includes(stateChange.previous || "")
+      ) {
+        void runRealtimeRefresh(selectedCustomerIdRef.current || null);
+      }
+    };
     channel.subscribe("refresh", handleRefresh);
+    client.connection.on(handleConnectionStateChange);
     return () => {
       if (realtimeRefreshTimerRef.current) {
         window.clearTimeout(realtimeRefreshTimerRef.current);
       }
       channel.unsubscribe("refresh", handleRefresh);
+      client.connection.off(handleConnectionStateChange);
       client.close();
       ablyClientRef.current = null;
     };
-  }, [loadCustomers, loadWorkspace]);
+  }, [runRealtimeRefresh]);
   const displayedCustomers = useMemo(() => {
     return sortCustomerList(
       customers.map((customer) => {
@@ -1403,7 +1511,32 @@ function HomePageContent() {
   useEffect(() => {
     setCustomReply(null);
     setAiNotice("");
+    setIsPostGenerateSyncing(false);
+    setPostGenerateSyncMessage("");
   }, [selectedCustomerId, workspace?.latestReplyDraftSet?.id, workspace?.latestCustomerMessageId]);
+  const runPostGenerateRefresh = useCallback((customerId: string) => {
+    setIsPostGenerateSyncing(true);
+    setPostGenerateSyncMessage("");
+    void (async () => {
+      const [workspaceResult, customersResult] = await Promise.allSettled([
+        loadWorkspace(customerId, { preserveUi: true }),
+        loadCustomers({ preserveUi: true }),
+      ]);
+      const failures = [workspaceResult, customersResult].filter((result) => result.status === "rejected");
+      if (failures.length > 0) {
+        const hasNonAbortFailure = failures.some((result) => {
+          const reason = (result as PromiseRejectedResult).reason;
+          return !isAbortError(reason);
+        });
+        if (hasNonAbortFailure) {
+          setPostGenerateSyncMessage("建议已可用，后台同步失败；稍后会自动重试。");
+        }
+      } else {
+        setPostGenerateSyncMessage("");
+      }
+      setIsPostGenerateSyncing(false);
+    })();
+  }, [loadCustomers, loadWorkspace]);
   async function handleRewrite() {
     if (!workspace) {
       window.alert("当前没有选中的顾客");
@@ -1414,6 +1547,7 @@ function HomePageContent() {
       setApiError("");
       setAiNotice("");
       setCustomReply(null);
+      setPostGenerateSyncMessage("");
       const response = await fetch("/api/generate-replies", {
         method: "POST",
         headers: {
@@ -1440,8 +1574,7 @@ function HomePageContent() {
         setAiNotice(data?.reason || "当前局面不建议生成建议回复，已刷新判断结果");
       }
       setRewriteInput("");
-      await loadWorkspace(workspace.customer.id);
-      await loadCustomers({ preserveUi: true });
+      runPostGenerateRefresh(workspace.customer.id);
     } catch (error) {
       console.error(error);
       setApiError(String(error));
@@ -1601,29 +1734,38 @@ function HomePageContent() {
     setIsSchedulePanelOpen(false);
     imageInputRef.current?.click();
   }
-  async function uploadImageFile(file: File) {
-    if (!file.type.startsWith("image/")) {
+  async function uploadImageFiles(files: File[]) {
+    const validFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (!validFiles.length) {
       window.alert("只能上传图片文件");
       return;
     }
+    if (validFiles.length !== files.length) {
+      window.alert("已自动忽略非图片文件");
+    }
+
     try {
       setIsUploadingImage(true);
-      const formData = new FormData();
-      formData.append("file", file);
-      const response = await fetch("/api/uploads/images", {
-        method: "POST",
-        body: formData,
-      });
-      const data = await response.json();
-      if (!response.ok || !data.ok || !data.image?.url) {
-        throw new Error(data?.error || "上传图片失败");
+      const uploaded: PendingUploadImage[] = [];
+      for (const file of validFiles) {
+        const formData = new FormData();
+        formData.append("file", file);
+        const response = await fetch("/api/uploads/images", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok || !data.image?.url) {
+          throw new Error(data?.error || `上传图片失败：${file.name}`);
+        }
+        uploaded.push({
+          url: data.image.url,
+          originalName: data.image.originalName || file.name,
+          size: Number(data.image.size || file.size || 0),
+          contentType: typeof data.image.contentType === "string" ? data.image.contentType : file.type,
+        });
       }
-      setPendingImage({
-        url: data.image.url,
-        originalName: data.image.originalName || file.name,
-        size: Number(data.image.size || file.size || 0),
-        contentType: typeof data.image.contentType === "string" ? data.image.contentType : file.type,
-      });
+      setPendingImages((current) => [...current, ...uploaded]);
       setIsComposerMenuOpen(false);
     } catch (error) {
       console.error(error);
@@ -1633,13 +1775,16 @@ function HomePageContent() {
     }
   }
   function handleImageInputChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    void uploadImageFile(file);
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
+    void uploadImageFiles(files);
     event.target.value = "";
   }
-  function clearPendingImage() {
-    setPendingImage(null);
+  function removePendingImage(targetUrl: string) {
+    setPendingImages((current) => current.filter((item) => item.url !== targetUrl));
+  }
+  function clearPendingImages() {
+    setPendingImages([]);
   }
   function handleComposerDragOver(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -1652,9 +1797,9 @@ function HomePageContent() {
   function handleComposerDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsComposerDragOver(false);
-    const file = event.dataTransfer.files?.[0];
-    if (!file) return;
-    void uploadImageFile(file);
+    const files = Array.from(event.dataTransfer.files || []);
+    if (!files.length) return;
+    void uploadImageFiles(files);
   }
   function handleManualReplyKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== "Enter") return;
@@ -1662,7 +1807,7 @@ function HomePageContent() {
     if (event.nativeEvent.isComposing) return;
     event.preventDefault();
     if (isUploadingImage || !workspace) return;
-    if (!manualReply.trim() && !pendingImage) return;
+    if (!manualReply.trim() && pendingImages.length === 0) return;
     void handleManualSend();
   }
   async function handleManualSend() {
@@ -1670,30 +1815,102 @@ function HomePageContent() {
       window.alert("当前没有选中的顾客");
       return;
     }
-    if (!manualReply.trim() && !pendingImage) {
+    if (!manualReply.trim() && pendingImages.length === 0) {
       window.alert("请先输入文本或选择图片");
       return;
     }
-    const japaneseText = manualReply.replace(/\r\n/g, "\n");
-    const sendingType = pendingImage ? "IMAGE" : "TEXT";
-    const nextImage = pendingImage;
+    const japaneseText = manualReply.replace(/\r\n/g, "\n").trim();
+    const nextImages = [...pendingImages];
     setManualReply("");
-    setPendingImage(null);
+    setPendingImages([]);
+
+    if (nextImages.length > 0) {
+      for (let index = 0; index < nextImages.length; index += 1) {
+        const imageItem = nextImages[index];
+        const imageResult = await submitOutboundMessage({
+          customerId: workspace.customer.id,
+          japaneseText: "",
+          imageUrl: imageItem.url,
+          source: "MANUAL",
+          type: "IMAGE",
+        });
+        if (!imageResult.ok) {
+          const remainingImages = nextImages.slice(index);
+          if (japaneseText) {
+            setManualReply(japaneseText);
+          }
+          setPendingImages(remainingImages);
+          window.alert(remainingImages.length > 1 ? "部分图片发送失败，剩余图片已保留，请重试" : "图片发送失败，请重试");
+          return;
+        }
+      }
+
+      if (japaneseText) {
+        const textResult = await submitOutboundMessage({
+          customerId: workspace.customer.id,
+          japaneseText,
+          source: "MANUAL",
+          type: "TEXT",
+        });
+        if (!textResult.ok) {
+          setManualReply(japaneseText);
+          window.alert("图片已排队发送，但补充文字发送失败，请重试文字消息");
+        }
+      }
+      return;
+    }
+
     void submitOutboundMessage({
       customerId: workspace.customer.id,
       japaneseText,
-      imageUrl: nextImage?.url || "",
       source: "MANUAL",
-      type: sendingType,
+      type: "TEXT",
     });
+  }
+  async function handleSendSticker() {
+    if (!workspace) {
+      window.alert("当前没有选中的顾客");
+      return;
+    }
+
+    const packageIdInput = window.prompt("请输入 LINE 贴图 packageId", "11537");
+    if (packageIdInput === null) return;
+    const stickerIdInput = window.prompt("请输入 LINE 贴图 stickerId", "52002734");
+    if (stickerIdInput === null) return;
+
+    const stickerPackageId = packageIdInput.trim();
+    const stickerId = stickerIdInput.trim();
+
+    if (!stickerPackageId || !stickerId) {
+      window.alert("packageId 和 stickerId 都不能为空");
+      return;
+    }
+
+    setIsComposerMenuOpen(false);
+    const result = await submitOutboundMessage({
+      customerId: workspace.customer.id,
+      japaneseText: "[贴图]",
+      source: "MANUAL",
+      type: "STICKER",
+      stickerPackageId,
+      stickerId,
+    });
+
+    if (!result.ok) {
+      window.alert("贴图发送失败，请重试");
+    }
   }
   async function handleScheduleManualSend() {
     if (!workspace) {
       window.alert("当前没有选中的顾客");
       return;
     }
-    if (!manualReply.trim() && !pendingImage) {
-      window.alert("请先输入文本或选择图片");
+    if (pendingImages.length > 0) {
+      window.alert("定时发送当前只支持文字。图片请直接发送，不要加入定时发送。");
+      return;
+    }
+    if (!manualReply.trim()) {
+      window.alert("请先输入要定时发送的文字内容");
       return;
     }
     if (!scheduleAtInput) {
@@ -1710,7 +1927,6 @@ function HomePageContent() {
       return;
     }
     const japaneseText = manualReply.replace(/\r\n/g, "\n");
-    const sendingType = pendingImage ? "IMAGE" : "TEXT";
     try {
       setIsSchedulingManual(true);
       const response = await fetch(`/api/customers/${workspace.customer.id}/scheduled-messages`, {
@@ -1720,9 +1936,9 @@ function HomePageContent() {
         },
         body: JSON.stringify({
           japaneseText,
-          imageUrl: pendingImage?.url || "",
+          imageUrl: "",
           source: "MANUAL",
-          type: sendingType,
+          type: "TEXT",
           scheduledFor: scheduledFor.toISOString(),
         }),
       });
@@ -1731,7 +1947,7 @@ function HomePageContent() {
         throw new Error(data?.error || "创建定时发送失败");
       }
       setManualReply("");
-      setPendingImage(null);
+      setPendingImages([]);
       setIsSchedulePanelOpen(false);
       setScheduleAtInput(buildDefaultScheduledInputValue());
       await loadWorkspace(workspace.customer.id, { preserveUi: true });
@@ -1774,6 +1990,8 @@ function HomePageContent() {
           japaneseText: optimisticMessage.japaneseText,
           chineseText: optimisticMessage.chineseText,
           imageUrl: optimisticMessage.imageUrl,
+          stickerPackageId: optimisticMessage.stickerPackageId,
+          stickerId: optimisticMessage.stickerId,
           source: optimisticMessage.source,
           type: optimisticMessage.type,
           replyDraftSetId: optimisticMessage.replyDraftSetId,
@@ -1866,6 +2084,20 @@ function HomePageContent() {
       window.alert("备注名更新失败");
     }
   }
+  async function handleLogout() {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+      router.push("/login");
+      router.refresh();
+    } catch (error) {
+      console.error(error);
+      window.alert("Logout failed, please retry.");
+    } finally {
+      setLoggingOut(false);
+    }
+  }
   function handleChatScroll() {
     const container = chatScrollRef.current;
     if (!container) return;
@@ -1875,8 +2107,8 @@ function HomePageContent() {
   }
   const contextMenuCustomer = customerContextMenu?.customer || null;
   const overdueFollowupCount = customerStats.overdueFollowupCount;
-  const canManualSend = !!workspace && !isUploadingImage && (!!pendingImage || !!manualReply.trim());
-  const canScheduleManual = !!workspace && !isSchedulingManual && !isUploadingImage && (!!pendingImage || !!manualReply.trim());
+  const canManualSend = !!workspace && !isUploadingImage && (pendingImages.length > 0 || !!manualReply.trim());
+  const canScheduleManual = !!workspace && !isSchedulingManual && !isUploadingImage && pendingImages.length === 0 && !!manualReply.trim();
   return (
     <div className="h-screen bg-gray-100 flex">
       <div ref={customerListScrollRef} className="w-[24%] bg-gray-50 border-r border-gray-200 p-4 overflow-y-auto">
@@ -1990,24 +2222,24 @@ function HomePageContent() {
         )}
       </div>
       <div className="w-[46%] flex flex-col bg-gray-50">
-        <div className="p-4 border-b bg-white space-y-2">
+        <div className="border-b bg-white px-4 py-3 flex flex-wrap items-center gap-2">
           <div className="font-bold">{selectedCustomerId ? getDisplayName(workspace?.customer || null) : "未打开顾客会话"}</div>
           {workspace?.customer && getSecondaryName(workspace.customer) ? (
-            <div className="text-xs text-gray-500 mt-1">
+            <div className="order-3 w-full text-xs text-gray-500">
               {getSecondaryName(workspace.customer)}
             </div>
           ) : null}
           {workspace?.customer?.lineRelationshipStatus === "UNFOLLOWED" ? (
-            <div className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[12px] font-medium text-rose-700">
+            <div className="order-2 inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-[11px] font-medium text-rose-700">
               顾客已取消关注
             </div>
           ) : workspace?.customer && shouldShowRefollowNotice(workspace.customer.lineRefollowedAt, workspace.customer.lineRelationshipStatus) ? (
-            <div className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[12px] font-medium text-emerald-700">
+            <div className="order-2 inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[11px] font-medium text-emerald-700">
               顾客重新加为好友
             </div>
           ) : null}
           {workspace?.customer?.followup ? (
-            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-[12px] text-gray-600">
+            <div className="order-4 w-full flex flex-wrap items-center gap-2 border-t border-gray-100 pt-1.5 text-[12px] text-gray-600">
               <span className={`rounded-full px-2 py-0.5 font-medium ${workspace.customer.followup.bucket === "VIP" ? "bg-amber-50 text-amber-700 border border-amber-200" : "bg-sky-50 text-sky-700 border border-sky-200"}`}>
                 {getFollowupBucketLabel(workspace.customer.followup.bucket)}
               </span>
@@ -2020,7 +2252,7 @@ function HomePageContent() {
               <span className="truncate">原因：{workspace.customer.followup.reason}</span>
               <Link
                 href={`/followups?customerId=${workspace.customer.id}`}
-                className="ml-auto rounded-full border border-gray-200 bg-white px-2.5 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50"
+                className="rounded-full border border-gray-200 bg-white px-2.5 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50 sm:ml-auto"
               >
                 编辑跟进
               </Link>
@@ -2083,7 +2315,7 @@ function HomePageContent() {
                               {msg.chineseText || ""}
                             </div>
                           </>
-                        ) : (
+                        ) : msg.type === "IMAGE" ? (
                           <>
                             {msg.imageUrl ? (
                               <a href={msg.imageUrl} target="_blank" rel="noreferrer" className="block">
@@ -2111,6 +2343,17 @@ function HomePageContent() {
                               >
                                 {msg.chineseText}
                               </div>
+                            ) : null}
+                          </>
+                        ) : (
+                          <>
+                            <div className={`rounded-xl border px-3 py-2 ${msg.role === "CUSTOMER" ? "border-gray-200 bg-gray-50 text-gray-700" : "border-white/20 bg-white/15 text-white"}`}>
+                              <div className="text-xs font-semibold tracking-wide">LINE贴图</div>
+                              <div className="mt-1 text-xs opacity-80">packageId: {msg.stickerPackageId || "-"}</div>
+                              <div className="text-xs opacity-80">stickerId: {msg.stickerId || "-"}</div>
+                            </div>
+                            {msg.japaneseText && msg.japaneseText !== "[贴图]" ? (
+                              <div className="mt-2 whitespace-pre-wrap">{msg.japaneseText}</div>
                             ) : null}
                           </>
                         )}
@@ -2154,6 +2397,7 @@ function HomePageContent() {
             ref={imageInputRef}
             type="file"
             accept="image/*"
+            multiple
             className="hidden"
             onChange={handleImageInputChange}
           />
@@ -2165,26 +2409,37 @@ function HomePageContent() {
               isComposerDragOver ? "bg-green-50 ring-2 ring-green-300" : ""
             }`}
           >
-            {pendingImage ? (
+            {pendingImages.length > 0 ? (
               <div className="mb-3 rounded-2xl border border-gray-200 bg-gray-50 p-3">
-                <div className="flex items-start gap-3">
-                  <img
-                    src={pendingImage.url}
-                    alt={pendingImage.originalName}
-                    className="h-20 w-20 rounded-xl object-cover border border-gray-200 bg-white"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-gray-900 truncate">{pendingImage.originalName}</div>
-                    <div className="mt-1 text-xs text-gray-500">
-                      已上传，可直接发送给顾客
-                    </div>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium text-gray-900">已上传 {pendingImages.length} 张图片</div>
+                    <div className="mt-1 text-xs text-gray-500">发送时会按顺序逐张发送；你也可以补充一条文字，系统会拆成“多张图片 + 文字”消息。</div>
                   </div>
                   <button
-                    onClick={clearPendingImage}
+                    onClick={clearPendingImages}
                     className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 hover:bg-gray-50"
                   >
-                    移除
+                    清空
                   </button>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                  {pendingImages.map((image) => (
+                    <div key={image.url} className="rounded-xl border border-gray-200 bg-white p-2">
+                      <img
+                        src={image.url}
+                        alt={image.originalName}
+                        className="h-24 w-full rounded-lg object-cover border border-gray-200 bg-gray-50"
+                      />
+                      <div className="mt-2 truncate text-xs text-gray-700">{image.originalName}</div>
+                      <button
+                        onClick={() => removePendingImage(image.url)}
+                        className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
+                      >
+                        移除
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </div>
             ) : null}
@@ -2207,6 +2462,13 @@ function HomePageContent() {
                       <div className="text-[11px] text-gray-400 mt-1">支持点击选择，也支持把图片拖到输入区</div>
                     </button>
                     <button
+                      onClick={handleSendSticker}
+                      className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50 border-t border-gray-100"
+                    >
+                      发送贴图
+                      <div className="text-[11px] text-gray-400 mt-1">输入 packageId 和 stickerId 后立即发送</div>
+                    </button>
+                    <button
                       onClick={openPresetPanel}
                       className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50 border-t border-gray-100"
                     >
@@ -2222,7 +2484,7 @@ function HomePageContent() {
                 onChange={(e) => setManualReply(e.target.value)}
                 onKeyDown={handleManualReplyKeyDown}
                 rows={1}
-                placeholder={pendingImage ? "可选填写图片说明或补充文字…" : "输入要发送给顾客的日语内容…"}
+                placeholder={pendingImages.length > 0 ? "可选填写补充文字；发送时会拆成“多张图片 + 文字”多条消息…" : "输入要发送给顾客的日语内容…"}
                 className="min-h-[44px] max-h-44 flex-1 rounded-xl border border-gray-300 bg-white px-4 py-[10px] leading-6 resize-none whitespace-pre-wrap break-words outline-none focus:border-green-300 focus:ring-2 focus:ring-green-100"
               />
               <div className="relative" ref={schedulePanelRef}>
@@ -2240,7 +2502,7 @@ function HomePageContent() {
                 {isSchedulePanelOpen ? (
                   <div className="absolute bottom-14 right-0 z-20 w-[320px] rounded-2xl border border-gray-200 bg-white p-4 shadow-2xl">
                     <div className="text-sm font-semibold text-gray-900">定时发送</div>
-                    <div className="mt-1 text-xs text-gray-500">至少比当前时间晚 30 分钟。到点后系统会自动发送，就算你关掉页面也照样会发。</div>
+                    <div className="mt-1 text-xs text-gray-500">至少比当前时间晚 30 分钟。到点后系统会自动发送，就算你关掉页面也照样会发。当前定时发送只支持文字。</div>
                     <input
                       type="datetime-local"
                       step={1800}
@@ -2274,7 +2536,7 @@ function HomePageContent() {
                 disabled={!canManualSend}
                 className="bg-green-600 text-white px-4 py-2.5 rounded-xl disabled:opacity-60"
               >
-                {isUploadingImage ? "上传中..." : pendingImage ? "发送图片" : "发送"}
+                {isUploadingImage ? "上传中..." : pendingImages.length > 0 ? `发送${pendingImages.length}张图片` : "发送"}
               </button>
             </div>
             {workspace?.scheduledMessages?.length ? (
@@ -2421,6 +2683,7 @@ function HomePageContent() {
           ) : null}
         </div>
       </div>
+      <div className="flex h-full min-h-0 min-w-0 w-[30%] flex-col border-l border-gray-200 bg-white">
       <AiAssistantPanel
         workspace={workspace}
         latestDraft={latestDraft}
@@ -2453,7 +2716,12 @@ function HomePageContent() {
         helperError={helperError}
         apiError={apiError}
         aiNotice={aiNotice}
+        onLogout={handleLogout}
+        loggingOut={loggingOut}
+        isPostGenerateSyncing={isPostGenerateSyncing}
+        postGenerateSyncMessage={postGenerateSyncMessage}
       />
+      </div>
       {customerContextMenu && contextMenuCustomer ? (
         <div
           className="fixed z-50 min-w-40 rounded-xl border border-gray-200 bg-white shadow-xl py-2"

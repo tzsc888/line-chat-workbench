@@ -1,10 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateAnalysisResult, validateGenerationResult, validateAiReviewResult } from '../../lib/ai/protocol-validator.ts';
+import { validateAnalysisResult, validateGenerationResult, validateAiReviewResult } from '../../lib/ai/protocol-validator';
 
 test('validateAnalysisResult fills safe defaults', () => {
   const parsed = validateAnalysisResult({});
-  assert.equal(parsed.routing_decision.should_generate_reply, false);
   assert.equal(parsed.generation_brief.push_level, 'NO_PUSH');
   assert.equal(parsed.review_flags.confidence, 'LOW');
   assert.equal(parsed.scene_assessment.industry_stage, 'POST_FREE_READING_CONVERSION');
@@ -17,6 +16,15 @@ test('validateGenerationResult enforces structural defaults', () => {
   const parsed = validateGenerationResult({ reply_a: {}, reply_b: {} });
   assert.equal(parsed.reply_a.positioning, 'SAFER');
   assert.equal(parsed.reply_b.positioning, 'MORE_FORWARD_HALF_STEP');
+});
+
+test('validateGenerationResult accepts chinese_explanation as compatibility alias', () => {
+  const parsed = validateGenerationResult({
+    reply_a: { japanese: "A", chinese_explanation: "A译" },
+    reply_b: { japanese: "B", chinese_explanation: "B译" },
+  });
+  assert.equal(parsed.reply_a.chinese_meaning, "A译");
+  assert.equal(parsed.reply_b.chinese_meaning, "B译");
 });
 
 test('validateAiReviewResult normalizes invalid values', () => {

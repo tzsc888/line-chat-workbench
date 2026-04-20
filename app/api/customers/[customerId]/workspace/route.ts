@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { publishRealtimeRefresh } from "@/lib/ably";
 import { prisma } from "@/lib/prisma";
 import { resolveFollowupView } from "@/lib/followup-rules";
+import { failExpiredOutboundTasks } from "@/lib/bridge-outbound";
+import { buildMessagePipelineStatuses } from "@/lib/ai/pipeline-status";
+import { getActiveAiStrategyVersion } from "@/lib/ai/strategy";
 
 type Props = {
   params: Promise<{ customerId: string }>;
@@ -9,6 +12,8 @@ type Props = {
 
 export async function GET(_: Request, { params }: Props) {
   try {
+    await failExpiredOutboundTasks();
+
     const { customerId } = await params;
 
     const customer = await prisma.customer.findUnique({
@@ -53,6 +58,70 @@ export async function GET(_: Request, { params }: Props) {
     const latestCustomerMessage = [...messages]
       .reverse()
       .find((message) => message.role === "CUSTOMER") || null;
+    const customerMessageIds = messages
+      .filter((message) => message.role === "CUSTOMER")
+      .map((message) => message.id);
+
+    const [pipelineJobs, pipelineDrafts] = await Promise.all([
+      customerMessageIds.length
+        ? prisma.automationJob.findMany({
+            where: {
+              customerId,
+              targetMessageId: { in: customerMessageIds },
+              kind: { in: ["INBOUND_TRANSLATION", "INBOUND_WORKFLOW"] },
+            },
+            select: {
+              targetMessageId: true,
+              kind: true,
+              status: true,
+              lastError: true,
+              updatedAt: true,
+              finishedAt: true,
+            },
+          })
+        : Promise.resolve([]),
+      customerMessageIds.length
+        ? prisma.replyDraftSet.findMany({
+            where: {
+              customerId,
+              targetCustomerMessageId: { in: customerMessageIds },
+            },
+            orderBy: { createdAt: "desc" },
+            select: {
+              id: true,
+              targetCustomerMessageId: true,
+              createdAt: true,
+              updatedAt: true,
+              finalGateJson: true,
+              aiReviewJson: true,
+              programChecksJson: true,
+            },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const pipelineByMessageId = buildMessagePipelineStatuses({
+      messages: messages.map((message) => ({
+        id: message.id,
+        role: message.role,
+        type: message.type,
+        chineseText: message.chineseText,
+        createdAt: message.createdAt,
+        updatedAt: message.updatedAt,
+      })),
+      jobs: pipelineJobs,
+      drafts: pipelineDrafts,
+    });
+
+    const messagesWithPipeline = messages.map((message) => ({
+      ...message,
+      sentAt: message.sentAt.toISOString(),
+      createdAt: message.createdAt.toISOString(),
+      updatedAt: message.updatedAt.toISOString(),
+      lastAttemptAt: message.lastAttemptAt?.toISOString() || null,
+      failedAt: message.failedAt?.toISOString() || null,
+      aiPipeline: pipelineByMessageId.get(message.id) || null,
+    }));
 
     const followup = resolveFollowupView({
       isVip: customer.isVip,
@@ -75,9 +144,13 @@ export async function GET(_: Request, { params }: Props) {
     return NextResponse.json({
       ok: true,
       workspace: {
+        aiStrategy: {
+          version: getActiveAiStrategyVersion(),
+        },
         customer: {
           id: customer.id,
           lineUserId: customer.lineUserId,
+          bridgeThreadId: customer.bridgeThreadId,
           remarkName: customer.remarkName,
           originalName: customer.originalName,
           avatarUrl: customer.avatarUrl,
@@ -106,7 +179,7 @@ export async function GET(_: Request, { params }: Props) {
           name: item.tag.name,
           color: item.tag.color,
         })),
-        messages,
+        messages: messagesWithPipeline,
         scheduledMessages: customer.scheduledMessages.map((item) => ({
           id: item.id,
           type: item.type,

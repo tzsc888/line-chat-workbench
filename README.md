@@ -1,36 +1,59 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# LINE Chat Workbench
 
-## Getting Started
+Next.js 16 / React 19 / Prisma / PostgreSQL based chat workbench.
 
-First, run the development server:
+## Core Runtime Rules
+
+1. Inbound messages are ingested first, then automation jobs are queued.
+2. Auto reply generation runs only for `first inbound text` per customer.
+3. For all other messages, reply generation runs only when operator clicks Generate.
+4. Analysis is not a generation gate anymore; it provides understanding + brief.
+5. Review/gate no longer blocks draft visibility. Human operator is final reviewer.
+
+## Workflow Shape
+
+- Trigger decides: auto-first-inbound or manual-generate.
+- Translation (when needed)
+- Analysis
+- Generation (two suggestions)
+- Draft save + UI display
+
+No runtime path should silently produce "analysis succeeded but no draft" as a policy skip.
+
+## Ingress Paths
+
+The following paths share the same first-inbound decision policy:
+
+- `app/api/bridge/inbound/route.ts`
+- `app/api/line/webhook/route.ts`
+- `app/api/ingest-customer-message/route.ts`
+
+Shared policy modules:
+
+- `lib/inbound/first-inbound.ts`
+- `lib/inbound/trigger-policy.ts`
+
+## Jobs
+
+- `/api/cron/automation-jobs`: inbound automation + outbox processing
+- `/api/cron/scheduled-messages`: scheduled message sending
+- `/api/cron/maintenance`: retention cleanup
+
+## Setup
+
+1. `npm install`
+2. `npm run prisma:generate`
+3. `npm run prisma:migrate:deploy`
+4. `npm run dev`
+
+## Tests
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm test
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Type gate:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+npx tsc --noEmit
+```

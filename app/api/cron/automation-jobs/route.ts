@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { dispatchPendingRealtimeRefreshOutbox } from "@/lib/ably";
 import { processDueInboundAutomationJobs } from "@/lib/inbound-automation";
 import { constantTimeEqual } from "@/lib/security/secret";
 
@@ -17,8 +18,9 @@ export async function GET(request: NextRequest) {
     if (!isAuthorized(request)) {
       return NextResponse.json({ ok: false, error: "未授权" }, { status: 401 });
     }
-    const result = await processDueInboundAutomationJobs();
-    return NextResponse.json({ ok: true, ...result });
+    const jobs = await processDueInboundAutomationJobs();
+    const realtimeRefresh = await dispatchPendingRealtimeRefreshOutbox();
+    return NextResponse.json({ ok: true, jobs, realtimeRefresh });
   } catch (error) {
     return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }

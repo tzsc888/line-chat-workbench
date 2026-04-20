@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { shouldReuseExistingDraft, shouldRunAiReview } from "../../lib/ai/workflow-policy.ts";
-import { buildReviewPipelineResult } from "../../lib/ai/protocol-validator.ts";
+import { shouldReuseExistingDraft, shouldRunAiReview } from "../../lib/ai/workflow-policy";
+import { buildReviewPipelineResult } from "../../lib/ai/protocol-validator";
 
 test("shouldReuseExistingDraft only reuses when auto mode hits same fresh unselected draft", () => {
   assert.equal(

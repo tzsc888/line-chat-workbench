@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { resolveFollowupView } from "@/lib/followup-rules";
+import { failExpiredOutboundTasks } from "@/lib/bridge-outbound";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
@@ -13,16 +14,22 @@ function parsePositiveInt(value: string | null, fallback: number) {
 
 function getLatestPreview(message: {
   role: "CUSTOMER" | "OPERATOR";
-  type: "TEXT" | "IMAGE";
+  type: "TEXT" | "IMAGE" | "STICKER";
   japaneseText: string;
 }) {
-  const baseText = message.type === "IMAGE" ? "[图片]" : message.japaneseText.trim() || "[空消息]";
+  const baseText =
+    message.type === "IMAGE"
+      ? "[图片]"
+      : message.type === "STICKER"
+        ? "[贴图]"
+        : message.japaneseText.trim() || "[空消息]";
   return `${message.role === "OPERATOR" ? "我：" : ""}${baseText}`;
 }
 
 const customerSelect = {
   id: true,
   lineUserId: true,
+  bridgeThreadId: true,
   remarkName: true,
   originalName: true,
   avatarUrl: true,
@@ -97,6 +104,7 @@ function mapCustomer(customer: any, now: number) {
   return {
     id: customer.id,
     lineUserId: customer.lineUserId,
+    bridgeThreadId: customer.bridgeThreadId,
     remarkName: customer.remarkName,
     originalName: customer.originalName,
     avatarUrl: customer.avatarUrl,
@@ -177,6 +185,8 @@ function buildSearchWhere(keyword: string) {
 
 export async function GET(req: NextRequest) {
   try {
+    await failExpiredOutboundTasks();
+
     const page = parsePositiveInt(req.nextUrl.searchParams.get("page"), 1);
     const limit = Math.min(parsePositiveInt(req.nextUrl.searchParams.get("limit"), DEFAULT_LIMIT), MAX_LIMIT);
     const keyword = req.nextUrl.searchParams.get("q")?.trim() || "";
@@ -219,10 +229,10 @@ export async function GET(req: NextRequest) {
                 },
               },
               orderBy: [
-          { pinnedAt: "desc" },
-          { lastMessageAt: { sort: "desc", nulls: "last" } },
-          { id: "desc" },
-        ],
+                { pinnedAt: "desc" },
+                { lastMessageAt: { sort: "desc", nulls: "last" } },
+                { id: "desc" },
+              ],
               select: customerSelect,
             })
           : [];

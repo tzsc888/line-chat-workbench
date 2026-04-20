@@ -99,6 +99,10 @@ type AiAssistantPanelProps = {
   helperError: string;
   apiError: string;
   aiNotice: string;
+  onLogout: () => void;
+  loggingOut: boolean;
+  isPostGenerateSyncing?: boolean;
+  postGenerateSyncMessage?: string;
 };
 
 function getFollowupBucketLabel(bucket?: FollowupSummary["bucket"] | null) {
@@ -169,8 +173,18 @@ export function AiAssistantPanel(props: AiAssistantPanelProps) {
   const followup = props.workspace?.customer.followup || null;
 
   return (
-    <div className="w-[30%] overflow-y-auto border-l border-gray-200 bg-white p-4">
-      <h2 className="mb-4 text-lg font-bold">AI 助理</h2>
+    <div className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-white p-4">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <h2 className="text-lg font-bold">AI 助理</h2>
+        <button
+          type="button"
+          onClick={props.onLogout}
+          disabled={props.loggingOut}
+          className="shrink-0 rounded-lg border border-slate-300 px-3 py-1 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+        >
+          {props.loggingOut ? "退出中..." : "退出登录"}
+        </button>
+      </div>
       <div className="space-y-5">
         <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
           <div className="mb-2 flex items-center justify-between">
@@ -304,6 +318,11 @@ export function AiAssistantPanel(props: AiAssistantPanelProps) {
               </button>
             </div>
           </div>
+          {props.isPostGenerateSyncing ? (
+            <div className="text-[11px] text-slate-500">建议已更新，正在后台同步列表与会话...</div>
+          ) : props.postGenerateSyncMessage ? (
+            <div className="text-[11px] text-amber-600">{props.postGenerateSyncMessage}</div>
+          ) : null}
           {props.latestDraftReviewSummary ? <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{props.latestDraftReviewSummary}</div> : null}
         </div>
 

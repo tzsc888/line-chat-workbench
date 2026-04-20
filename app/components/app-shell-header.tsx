@@ -8,7 +8,7 @@ export function AppShellHeader() {
   const pathname = usePathname();
   const [loggingOut, setLoggingOut] = useState(false);
 
-  if (pathname === "/login") return null;
+  if (pathname === "/login" || pathname === "/") return null;
 
   async function handleLogout() {
     setLoggingOut(true);

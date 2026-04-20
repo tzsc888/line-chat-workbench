@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildDeliveryContextFromMessages, deriveIndustryStage, getIndustryRulePack } from "../../lib/industry/core.ts";
+import { buildDeliveryContextFromMessages, deriveIndustryStage, getIndustryRulePack } from "../../lib/industry/core";
 
 const customerMessage = {
   id: "m2",

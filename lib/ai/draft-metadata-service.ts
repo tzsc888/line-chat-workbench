@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import type { AnalysisResult, GenerationResult, ReviewPipelineResult } from "./ai-types";
+import { buildDraftStrategyMetadata } from "./draft-strategy-metadata";
 
 export async function staleOpenDraftsForCustomer(params: {
   customerId: string;
@@ -29,9 +30,10 @@ export async function saveDraftBundle(params: {
   analysisPromptVersion?: string | null;
   generationPromptVersion?: string | null;
   reviewPromptVersion?: string | null;
+  strategyVersion?: string | null;
   analysis: AnalysisResult;
   generation: GenerationResult;
-  review: ReviewPipelineResult;
+  review?: ReviewPipelineResult | null;
 }) {
   const {
     customerId,
@@ -42,20 +44,37 @@ export async function saveDraftBundle(params: {
     analysisPromptVersion,
     generationPromptVersion,
     reviewPromptVersion,
+    strategyVersion,
     analysis,
     generation,
     review,
   } = params;
-  const recommendedVariant = review.final_gate.can_recommend_direct_use
-    ? analysis.generation_brief.push_level === "HALF_STEP_PUSH" || analysis.generation_brief.push_level === "STEADY_PUSH"
+  const recommendedVariant =
+    analysis.generation_brief.push_level === "HALF_STEP_PUSH" || analysis.generation_brief.push_level === "STEADY_PUSH"
       ? "ADVANCING"
-      : "STABLE"
-    : null;
+      : "STABLE";
 
   await staleOpenDraftsForCustomer({
     customerId,
     reason: "new-analysis-generated",
   });
+
+  const strategyMeta = buildDraftStrategyMetadata({
+    analysis,
+    review: review || null,
+    strategyVersion: String(strategyVersion || "").trim() || "unknown",
+  });
+
+  const programChecksPayload = review?.program_checks || {
+    passed: true,
+    issues: [],
+    needs_ai_review: false,
+  };
+  const finalGatePayload = review?.final_gate || {
+    can_show_to_human: true,
+    can_recommend_direct_use: true,
+    should_highlight_warning: false,
+  };
 
   return prisma.replyDraftSet.create({
     data: {
@@ -75,11 +94,11 @@ export async function saveDraftBundle(params: {
       routeType: analysis.routing_decision.route_type,
       replyGoal: analysis.routing_decision.reply_goal,
       pushLevel: analysis.generation_brief.push_level,
-      generationBriefJson: JSON.stringify(analysis.generation_brief),
-      reviewFlagsJson: JSON.stringify(analysis.review_flags),
-      programChecksJson: JSON.stringify(review.program_checks),
-      aiReviewJson: JSON.stringify(review.ai_review),
-      finalGateJson: JSON.stringify(review.final_gate),
+      generationBriefJson: strategyMeta.generationBriefJson,
+      reviewFlagsJson: strategyMeta.reviewFlagsJson,
+      programChecksJson: JSON.stringify(programChecksPayload),
+      aiReviewJson: strategyMeta.aiReviewJson,
+      finalGateJson: JSON.stringify(finalGatePayload),
       differenceNote: generation.difference_note,
       selfCheckJson: JSON.stringify(generation.self_check),
       recommendedVariant,

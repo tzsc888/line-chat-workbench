@@ -1,3 +1,5 @@
+import { resolveWorkflowPolicyStrategy } from "@/lib/ai/strategy";
+
 export type ReviewPolicyInput = {
   vip: boolean;
   analysisNeedsReview: boolean;
@@ -7,10 +9,12 @@ export type ReviewPolicyInput = {
 };
 
 export function shouldRunAiReview(params: ReviewPolicyInput) {
-  if (params.vip) return true;
-  if (params.analysisNeedsReview || params.programNeedsReview) return true;
-  if (params.confidence === "LOW") return true;
-  return ["CLEAR_OBJECTION", "BUDGET_HESITATION", "POST_PURCHASE_FOLLOWUP"].includes(params.sceneType);
+  const strategy = resolveWorkflowPolicyStrategy().reviewPolicy;
+  if (strategy.vipAlways && params.vip) return true;
+  if (strategy.analysisNeedsReview && params.analysisNeedsReview) return true;
+  if (strategy.programNeedsReview && params.programNeedsReview) return true;
+  if (strategy.confidenceLevels.includes(params.confidence)) return true;
+  return strategy.sceneTypes.includes(params.sceneType);
 }
 
 export type ExistingDraftPolicyInput = {
@@ -23,11 +27,12 @@ export type ExistingDraftPolicyInput = {
 };
 
 export function shouldReuseExistingDraft(params: ExistingDraftPolicyInput) {
-  if (!params.autoMode) return false;
-  if (params.rewriteInput.trim()) return false;
+  const strategy = resolveWorkflowPolicyStrategy().reuseDraft;
+  if (strategy.onlyAutoMode && !params.autoMode) return false;
+  if (strategy.requireEmptyRewriteInput && params.rewriteInput.trim()) return false;
   if (!params.hasExistingDraft) return false;
-  if (!params.sameTargetMessage) return false;
-  if (params.alreadySelected) return false;
-  if (params.isStale) return false;
+  if (strategy.requireSameTargetMessage && !params.sameTargetMessage) return false;
+  if (strategy.requireUnselectedDraft && params.alreadySelected) return false;
+  if (strategy.requireFreshDraft && params.isStale) return false;
   return true;
 }

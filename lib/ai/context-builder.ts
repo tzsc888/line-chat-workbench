@@ -7,13 +7,14 @@ import type {
   TranslationResult,
 } from "./ai-types";
 import { buildDeliveryContextFromMessages, deriveIndustryStage, getIndustryRulePack, getIndustryStageSummary } from "../industry/core";
+import { resolveAnalysisStrategy, resolveGenerationStrategy, resolveReviewStrategy } from "./strategy";
 
 function shorten(text: string, max = 280) {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (normalized.length <= max) return normalized;
   const head = Math.max(120, Math.floor(max * 0.7));
   const tail = Math.max(40, max - head - 12);
-  return `${normalized.slice(0, head)} …… ${normalized.slice(-tail)}`;
+  return `${normalized.slice(0, head)} ... ${normalized.slice(-tail)}`;
 }
 
 function mapRecentContext(messages: ContextMessage[], max = 6) {
@@ -57,6 +58,7 @@ export function buildAnalysisContext(input: {
   });
   const stageSummary = getIndustryStageSummary(industryStage);
   const industryRulePack = getIndustryRulePack(industryStage);
+  const strategy = resolveAnalysisStrategy();
 
   return {
     customer_profile: {
@@ -94,16 +96,9 @@ export function buildAnalysisContext(input: {
     },
     recent_context: mapRecentContext(input.recentMessages, 6),
     system_rules_summary: {
-      core_style_rules: [
-        "像日本成年人LINE私聊，不像客服模板",
-        "默认短、自然、克制",
-        "避免太油、太冷、太长、太像翻译软件",
-        ...stageSummary.styleNotes,
-      ],
+      core_style_rules: [...strategy.coreStyleRules, ...stageSummary.styleNotes],
       core_sales_rules: [
-        "先判断当前局面，再决定是否推进",
-        "不确定时默认更保守",
-        "不是每条消息都值得生成销售建议",
+        ...strategy.coreSalesRules,
         stageSummary.goal,
         ...stageSummary.allowedActions.map((item) => `允许动作：${item}`),
       ],
@@ -141,6 +136,7 @@ export function buildGenerationContext(input: {
     input.analysis.scene_assessment.industry_stage,
     input.analysis.scene_assessment.buyer_language,
   );
+  const strategy = resolveGenerationStrategy();
 
   return {
     industry_stage: input.analysis.scene_assessment.industry_stage,
@@ -184,17 +180,13 @@ export function buildGenerationContext(input: {
       has_purchased: input.customer.hasPurchased,
     },
     global_rules: {
-      style_rules: [
-        "像真人LINE短聊",
-        "默认短句，不要小作文",
-        "不要像客服模板",
-      ],
+      style_rules: [...strategy.styleRules],
       sales_rules: [
         "必须服从上游路线",
         "不能自行新增承诺、价格、卖点",
         "A更稳，B更主动半步",
         "首轮接待只做接住与控场，不做深度判断",
-        "免费鉴定文后的承接遵守：接住主题→机制命中→建立免费不够的边界→自然引向个别深度鉴定",
+        "免费鉴定文后的承接遵守：接住主题 -> 机制命中 -> 建立免费不够的边界 -> 自然引向个别深度鉴定",
       ],
       risk_rules: [
         "不要推进过头",
@@ -226,6 +218,7 @@ export function buildReviewContext(input: {
     input.analysis.scene_assessment.industry_stage,
     input.analysis.scene_assessment.buyer_language,
   );
+  const strategy = resolveReviewStrategy();
 
   return {
     industry_stage: input.analysis.scene_assessment.industry_stage,
@@ -262,24 +255,9 @@ export function buildReviewContext(input: {
     },
     generation_result: input.generation,
     global_review_rules: {
-      critical_rules: [
-        "不能跳阶段",
-        "不能推进过头",
-        "不能免费讲太深",
-        "首轮接待不能写成深度承接",
-        "免费文后承接不能写成第二篇免费鉴定文",
-      ],
-      style_rules: [
-        "不能像客服模板",
-        "日语要自然",
-        "中文解释必须忠实于日语",
-        "必须像真人LINE即时聊天",
-      ],
-      risk_rules: [
-        "两版差异要真实有效",
-        "高风险时应提醒人工",
-        "必须承接前面的交付内容，而不是当成全新话题",
-      ],
+      critical_rules: [...strategy.criticalRules],
+      style_rules: [...strategy.styleRules],
+      risk_rules: [...strategy.riskRules],
     },
   };
 }

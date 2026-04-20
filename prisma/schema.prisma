@@ -26,6 +26,7 @@ enum MessageRole {
 enum MessageType {
   TEXT
   IMAGE
+  STICKER
 }
 
 enum MessageSource {
@@ -40,6 +41,14 @@ enum MessageSendStatus {
   PENDING
   SENT
   FAILED
+}
+
+enum OutboundTaskStatus {
+  PENDING
+  CLAIMED
+  SENT
+  FAILED
+  CANCELED
 }
 
 enum ScheduledMessageStatus {
@@ -57,6 +66,13 @@ enum SuggestionVariant {
 
 enum AutomationJobKind {
   INBOUND_WORKFLOW
+  INBOUND_TRANSLATION
+}
+
+enum UiRefreshOutboxStatus {
+  PENDING
+  DELIVERED
+  FAILED
 }
 
 enum AutomationJobStatus {
@@ -103,6 +119,7 @@ enum LineRelationshipStatus {
 model Customer {
   id                     String        @id @default(cuid())
   lineUserId             String?       @unique
+  bridgeThreadId         String?       @unique
   remarkName             String?
   originalName           String
   avatarUrl              String?
@@ -137,15 +154,18 @@ model Customer {
 
   tags                   CustomerTag[]
   messages               Message[]
+  outboundTasks          OutboundTask[]
   scheduledMessages      ScheduledMessage[]
   replyDraftSets         ReplyDraftSet[]
   automationJobs         AutomationJob[]
+  uiRefreshOutboxEntries UiRefreshOutbox[]
 
   @@index([stage])
   @@index([isVip])
   @@index([lastMessageAt(sort: Desc)])
   @@index([originalName])
   @@index([remarkName])
+  @@index([bridgeThreadId])
   @@index([pinnedAt(sort: Desc)])
   @@index([lineRelationshipStatus])
   @@index([followupBucket, followupTier])
@@ -185,10 +205,13 @@ model Message {
   type            MessageType   @default(TEXT)
   source          MessageSource
   lineMessageId   String?       @unique
+  fingerprint     String?       @unique
 
   japaneseText    String
   chineseText     String?
   imageUrl        String?
+  stickerPackageId String?
+  stickerId       String?
 
   deliveryStatus  MessageSendStatus?
   sendError       String?
@@ -201,11 +224,35 @@ model Message {
   updatedAt       DateTime      @updatedAt
 
   customer        Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  outboundTask    OutboundTask?
 
   @@index([customerId, sentAt(sort: Asc)])
   @@index([customerId, role, sentAt(sort: Desc)])
 }
 
+
+model OutboundTask {
+  id             String             @id @default(cuid())
+  customerId     String
+  messageId      String             @unique
+  bridgeThreadId String
+  status         OutboundTaskStatus @default(PENDING)
+  claimedAt      DateTime?
+  completedAt    DateTime?
+  failedAt       DateTime?
+  lastError      String?
+  attemptCount   Int                @default(0)
+  nextRetryAt    DateTime?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  customer       Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  message        Message            @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt(sort: Asc)])
+  @@index([bridgeThreadId, status])
+  @@index([nextRetryAt])
+}
 
 model ScheduledMessage {
   id                String                 @id @default(cuid())
@@ -303,6 +350,27 @@ model AutomationJob {
   @@index([customerId, updatedAt(sort: Desc)])
 }
 
+
+
+model UiRefreshOutbox {
+  id           String              @id @default(cuid())
+  customerId   String?
+  reason       String
+  scopes       String[]            @default([])
+  payload      Json?
+  status       UiRefreshOutboxStatus @default(PENDING)
+  attemptCount Int                 @default(0)
+  lastError    String?
+  nextRetryAt  DateTime?
+  deliveredAt  DateTime?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  customer     Customer?           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextRetryAt, createdAt(sort: Asc)])
+  @@index([customerId, createdAt(sort: Desc)])
+}
 
 model LineWebhookEventReceipt {
   webhookEventId String   @id

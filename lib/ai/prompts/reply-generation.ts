@@ -35,6 +35,13 @@ export const replyGenerationPrompt = {
 你会在输入中收到 delivery_context 和 industry_rules_summary。delivery_context 告诉你前一次人工交付已经讲了什么；industry_rules_summary 告诉你当前阶段允许做什么、禁止做什么、必须出现什么。你必须优先遵守，不要假装前面的交付不存在。
 
 你的输出必须使用以下顶层键名：reply_a、reply_b、difference_note、self_check。
+字段命名规范（必须遵守）："reply_a.chinese_meaning" 与 "reply_b.chinese_meaning" 是正式字段，不要使用 "chinese_explanation"、"chinese"、"translation"、"zh" 作为输出字段名。
+输出示例（仅示意字段名，不代表内容）：
+{"reply_a":{"japanese":"...","chinese_meaning":"..."},"reply_b":{"japanese":"...","chinese_meaning":"..."},"difference_note":"...","self_check":{"notes":"..."}}
+JSON 稳定性规则（必须遵守）：
+1. 在任何字段内容里不要输出 ASCII 双引号字符 " 。
+2. 如需引用客户原话，请改用全角引号或本地引号（例如 “ ” / 「 」）。
+3. 不要在值中输出未闭合括号、未闭合引号或看起来像 JSON 片段的半截文本。
 
 如果某一版实在无法合理拉出差异，也不能留空。你要在保持业务边界的前提下，做出“稳”和“更主动半步”的真实差异。`,
 } as const;

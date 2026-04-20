@@ -28,6 +28,18 @@ function asString(value: unknown, fallback = "") {
   return typeof value === "string" ? value.trim() : fallback;
 }
 
+function asChineseMeaning(value: Record<string, any>) {
+  return (
+    asString(value.chinese_meaning) ||
+    asString(value.chinese_explanation) ||
+    asString(value.chineseMeaning) ||
+    asString(value.chineseExplanation) ||
+    asString(value.chinese) ||
+    asString(value.translation) ||
+    asString(value.zh)
+  );
+}
+
 function asStringArray(value: unknown) {
   return Array.isArray(value)
     ? value
@@ -218,7 +230,6 @@ export function validateAnalysisResult(raw: unknown): AnalysisResult {
       reasoning: asString(scene.reasoning),
     },
     routing_decision: {
-      should_generate_reply: asBoolean(routing.should_generate_reply),
       route_type: asRouteType(routing.route_type),
       reply_goal: asString(routing.reply_goal),
       route_reason: asString(routing.route_reason),
@@ -266,12 +277,12 @@ export function validateGenerationResult(raw: unknown): GenerationResult {
   return {
     reply_a: {
       japanese: asString(replyA.japanese),
-      chinese_meaning: asString(replyA.chinese_meaning),
+      chinese_meaning: asChineseMeaning(replyA),
       positioning: "SAFER",
     },
     reply_b: {
       japanese: asString(replyB.japanese),
-      chinese_meaning: asString(replyB.chinese_meaning),
+      chinese_meaning: asChineseMeaning(replyB),
       positioning: "MORE_FORWARD_HALF_STEP",
     },
     difference_note: asString(value.difference_note),

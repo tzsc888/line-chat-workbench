@@ -1,3 +1,5 @@
+import { resolveFollowupStrategy } from "@/lib/ai/strategy";
+
 export type EffectiveBucket = "UNCONVERTED" | "VIP";
 export type EffectiveTier = "A" | "B" | "C";
 export type EffectiveState = "ACTIVE" | "OBSERVING" | "WAITING_WINDOW" | "POST_PURCHASE_CARE" | "DONE" | "PAUSED";
@@ -47,6 +49,7 @@ export function deriveDefaultTier(customer: FollowupRuleCustomer): EffectiveTier
     return customer.followupTier;
   }
 
+  const strategy = resolveFollowupStrategy();
   const bucket = deriveEffectiveBucket(customer);
   const stage = String(customer.stage || "");
   const unread = Number(customer.unreadCount || 0);
@@ -61,49 +64,47 @@ export function deriveDefaultTier(customer: FollowupRuleCustomer): EffectiveTier
   }
 
   if (unread > 0) return "A";
-  if (["WAITING_PAYMENT", "NEGOTIATING", "INTERESTED"].includes(stage)) return "A";
-  if (["FOLLOWING_UP", "FIRST_CONTACT", "NEW"].includes(stage)) return "B";
+  if (strategy.defaultTierByStage.aStages.includes(stage)) return "A";
+  if (strategy.defaultTierByStage.bStages.includes(stage)) return "B";
   return "C";
 }
 
 export function deriveDefaultTimingKey(customer: FollowupRuleCustomer): FollowupTimingKey {
   if (customer.nextFollowupBucket) return customer.nextFollowupBucket;
 
+  const strategy = resolveFollowupStrategy();
   const bucket = deriveEffectiveBucket(customer);
   const tier = deriveDefaultTier(customer);
 
   if (bucket === "VIP") {
-    if (tier === "A") return "TODAY";
-    if (tier === "B") return "IN_3_DAYS";
-    return "IN_7_DAYS";
+    return strategy.vipTimingByTier[tier];
   }
 
-  if (tier === "A") return "TODAY";
-  if (tier === "B") return "IN_1_DAY";
-  return "IN_7_DAYS";
+  return strategy.unconvertedTimingByTier[tier];
 }
 
 export function timingKeyToNextFollowupAt(key: FollowupTimingKey, baseDate?: Date | null) {
   if (!key || key === "NO_SET") return null;
 
+  const strategy = resolveFollowupStrategy();
   const base = baseDate ? new Date(baseDate) : new Date();
   const next = new Date(base);
 
   if (key === "IMMEDIATE") return next;
   if (key === "TODAY") {
-    next.setHours(next.getHours() + 2);
+    next.setHours(next.getHours() + strategy.timingHours.todayOffsetHours);
     return next;
   }
   if (key === "IN_1_DAY") {
-    next.setDate(next.getDate() + 1);
+    next.setDate(next.getDate() + strategy.timingDays.in1Day);
     return next;
   }
   if (key === "IN_3_DAYS") {
-    next.setDate(next.getDate() + 3);
+    next.setDate(next.getDate() + strategy.timingDays.in3Days);
     return next;
   }
   if (key === "IN_7_DAYS") {
-    next.setDate(next.getDate() + 7);
+    next.setDate(next.getDate() + strategy.timingDays.in7Days);
     return next;
   }
 
@@ -113,17 +114,18 @@ export function timingKeyToNextFollowupAt(key: FollowupTimingKey, baseDate?: Dat
 export function deriveDefaultReason(customer: FollowupRuleCustomer) {
   if (customer.followupReason?.trim()) return customer.followupReason.trim();
 
+  const strategy = resolveFollowupStrategy();
   const bucket = deriveEffectiveBucket(customer);
   const stage = String(customer.stage || "");
   const unread = Number(customer.unreadCount || 0);
   const relationship = String(customer.lineRelationshipStatus || "ACTIVE");
 
-  if (relationship === "UNFOLLOWED") return "顾客已取消关注，暂不主动跟进";
-  if (unread > 0) return "有新消息，建议优先处理";
-  if (bucket === "VIP") return "已成交顾客，建议持续经营";
-  if (["WAITING_PAYMENT", "NEGOTIATING"].includes(stage)) return "接近成交，建议重点跟进";
-  if (stage === "INTERESTED") return "顾客兴趣较高，建议保持跟进";
-  return "常规跟进";
+  if (relationship === "UNFOLLOWED") return strategy.reasonTemplates.unfollowed;
+  if (unread > 0) return strategy.reasonTemplates.unreadFirst;
+  if (bucket === "VIP") return strategy.reasonTemplates.vipDefault;
+  if (["WAITING_PAYMENT", "NEGOTIATING"].includes(stage)) return strategy.reasonTemplates.waitingPaymentOrNegotiating;
+  if (stage === "INTERESTED") return strategy.reasonTemplates.interested;
+  return strategy.reasonTemplates.fallback;
 }
 
 export function deriveEffectiveState(customer: FollowupRuleCustomer): EffectiveState {
