@@ -1,4 +1,4 @@
-﻿-- Create generation task queue model for async reply generation.
+-- Create generation task queue model for async reply generation.
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'GenerationTaskStatus') THEN
     CREATE TYPE "GenerationTaskStatus" AS ENUM ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED');

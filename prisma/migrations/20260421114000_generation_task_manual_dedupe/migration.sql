@@ -1,4 +1,4 @@
-﻿ALTER TABLE "GenerationTask"
+ALTER TABLE "GenerationTask"
   ADD COLUMN IF NOT EXISTS "dedupeKey" TEXT;
 
 CREATE INDEX IF NOT EXISTS "GenerationTask_dedupeKey_idx"
