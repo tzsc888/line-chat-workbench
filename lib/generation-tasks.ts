@@ -398,9 +398,7 @@ export async function processSpecificGenerationTask(taskId: string) {
       ok: true,
       skipped: false as const,
       taskStatus: GenerationTaskStatus.SUCCEEDED,
-      workflow: {
-        reusedExistingDraft: Boolean((result as { reusedExistingDraft?: boolean } | null)?.reusedExistingDraft),
-      },
+      workflowResult: result,
     };
   } catch (error) {
     const normalized = normalizeTaskError(error);

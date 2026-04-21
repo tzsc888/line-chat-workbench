@@ -1672,6 +1672,22 @@ function HomePageContent() {
       }
       const taskId = String(data?.taskId || "").trim();
       if (!taskId) throw new Error("missing taskId");
+      const immediateSucceeded = String(data?.status || "").toUpperCase() === "SUCCEEDED";
+      if (immediateSucceeded) {
+        if (selectedCustomerIdRef.current !== workspace.customer.id) return;
+        setCustomReply({
+          suggestion1Ja: String(data?.suggestion1Ja || ""),
+          suggestion1Zh: String(data?.suggestion1Zh || ""),
+          suggestion2Ja: String(data?.suggestion2Ja || ""),
+          suggestion2Zh: String(data?.suggestion2Zh || ""),
+        });
+        setIsGenerating(false);
+        setApiError("");
+        setAiNotice("Suggestions are ready.");
+        setRewriteInput("");
+        void runPostGenerateRefresh(workspace.customer.id);
+        return;
+      }
       setAiNotice("Generating reply suggestions...");
       startGenerationPolling(taskId, workspace.customer.id);
     } catch (error) {

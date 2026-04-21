@@ -89,11 +89,11 @@ async function executeInboundWorkflowJob(job: {
 
   await publishRealtimeRefresh({
     customerId: job.customerId,
-    reason: execution.workflow?.reusedExistingDraft ? "analysis-updated" : "automation-updated",
+    reason: execution.workflowResult?.reusedExistingDraft ? "analysis-updated" : "automation-updated",
     scopes: ["workspace", "list", "analysis"],
   });
 
-  if (execution.workflow?.reusedExistingDraft) {
+  if (execution.workflowResult?.reusedExistingDraft) {
     await finishJob(job.id, AutomationJobStatus.SKIPPED, PIPELINE_REASON_CODES.REUSED_EXISTING_DRAFT);
     return { ok: true, reusedExistingDraft: true } as const;
   }

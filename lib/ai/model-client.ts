@@ -61,9 +61,21 @@ const DEFAULT_MAX_STRUCTURED_ATTEMPTS = 4;
 
 const STAGE_LIMITS = {
   generation: {
-    totalBudgetMs: 75_000,
-    attemptTimeoutMs: 30_000,
-    maxAttempts: 3,
+    totalBudgetMs: parsePositiveIntEnv(
+      "AI_GENERATION_STRUCTURED_TOTAL_BUDGET_MS",
+      240_000,
+      { min: 30_000, max: 280_000 },
+    ),
+    attemptTimeoutMs: parsePositiveIntEnv(
+      "AI_GENERATION_STRUCTURED_ATTEMPT_TIMEOUT_MS",
+      120_000,
+      { min: 15_000, max: 240_000 },
+    ),
+    maxAttempts: parsePositiveIntEnv(
+      "AI_GENERATION_STRUCTURED_MAX_ATTEMPTS",
+      2,
+      { min: 1, max: 4 },
+    ),
   },
 } as const;
 
