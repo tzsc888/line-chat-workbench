@@ -508,6 +508,11 @@ export async function requestStructuredJsonWithContract<T>(
             details: error.details,
           });
           if (error.code === "MODEL_TIMEOUT") {
+            if (mode === "json_schema") {
+              // Schema mode timeout should degrade to json_object instead of failing the whole request.
+              unsupportedJsonSchemaBaseUrls.add(baseUrl);
+              continue;
+            }
             stopAfterCurrentBaseUrl = true;
             break;
           }

@@ -153,6 +153,14 @@ type RewriteResult = {
   suggestion2Ja: string;
   suggestion2Zh: string;
 };
+type GenerationTaskView = {
+  id: string;
+  customerId: string;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  stage: string;
+  errorCode: string | null;
+  errorMessage: string | null;
+};
 type CustomerContextMenuState = {
   customer: CustomerListItem;
   x: number;
@@ -560,6 +568,9 @@ function HomePageContent() {
   const audioEnabledRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastIncomingSoundAtRef = useRef(0);
+  const generationPollTimerRef = useRef<number | null>(null);
+  const generationPollAbortRef = useRef<AbortController | null>(null);
+  const activeGenerationTaskRef = useRef<{ taskId: string; customerId: string } | null>(null);
   useEffect(() => {
     return () => {
       customerListAbortControllerRef.current?.abort();
@@ -1537,9 +1548,105 @@ function HomePageContent() {
       setIsPostGenerateSyncing(false);
     })();
   }, [loadCustomers, loadWorkspace]);
+  const stopGenerationPolling = useCallback(() => {
+    if (generationPollTimerRef.current != null) {
+      window.clearTimeout(generationPollTimerRef.current);
+      generationPollTimerRef.current = null;
+    }
+    if (generationPollAbortRef.current) {
+      generationPollAbortRef.current.abort();
+      generationPollAbortRef.current = null;
+    }
+    activeGenerationTaskRef.current = null;
+  }, []);
+  const formatGenerationTaskError = useCallback((task: GenerationTaskView) => {
+    const code = String(task.errorCode || "").trim();
+    const message = String(task.errorMessage || "").trim();
+    if (code === "MODEL_TIMEOUT") return "Generation failed: model timeout.";
+    if (code === "MODEL_JSON_PARSE_ERROR") return "Generation failed: malformed JSON output.";
+    if (code === "MODEL_SCHEMA_INVALID") return "Generation failed: schema validation failed.";
+    if (code === "generation_missing_japanese_reply") return "Generation failed: missing Japanese reply.";
+    if (code === "generation_missing_chinese_meaning") return "Generation failed: missing Chinese meaning.";
+    if (code === "TASK_STALE_TIMEOUT") return "Generation failed: task timed out and reached retry limit.";
+    if (message) return message;
+    return code ? `Generation failed: ${code}` : "Generation failed: unknown error.";
+  }, []);
+  const startGenerationPolling = useCallback((taskId: string, customerId: string) => {
+    stopGenerationPolling();
+    activeGenerationTaskRef.current = { taskId, customerId };
+
+    const poll = async () => {
+      const active = activeGenerationTaskRef.current;
+      if (!active || active.taskId !== taskId || active.customerId !== customerId) return;
+
+      const controller = new AbortController();
+      generationPollAbortRef.current = controller;
+
+      try {
+        const response = await fetch(
+          `/api/generate-replies/tasks/${encodeURIComponent(taskId)}?customerId=${encodeURIComponent(customerId)}`,
+          { method: "GET", signal: controller.signal },
+        );
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload?.ok || !payload?.task) {
+          throw new Error(payload?.error || `task_status_http_${response.status}`);
+        }
+
+        const task = payload.task as GenerationTaskView;
+        if (task.status === "SUCCEEDED") {
+          stopGenerationPolling();
+          if (selectedCustomerIdRef.current !== customerId) return;
+          setIsGenerating(false);
+          setApiError("");
+          setAiNotice("Suggestions are ready.");
+          setRewriteInput("");
+          runPostGenerateRefresh(customerId);
+          return;
+        }
+
+        if (task.status === "FAILED") {
+          stopGenerationPolling();
+          if (selectedCustomerIdRef.current !== customerId) return;
+          setIsGenerating(false);
+          const errorText = formatGenerationTaskError(task);
+          setApiError(errorText);
+          setAiNotice("");
+          window.alert(errorText);
+          return;
+        }
+
+        if (selectedCustomerIdRef.current === customerId) {
+          setAiNotice("Generating reply suggestions...");
+        }
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        stopGenerationPolling();
+        if (selectedCustomerIdRef.current === customerId) {
+          setIsGenerating(false);
+          setApiError(String(error instanceof Error ? error.message : error));
+        }
+        return;
+      } finally {
+        generationPollAbortRef.current = null;
+      }
+
+      generationPollTimerRef.current = window.setTimeout(poll, 1200);
+    };
+
+    void poll();
+  }, [formatGenerationTaskError, runPostGenerateRefresh, stopGenerationPolling]);
+  useEffect(() => {
+    stopGenerationPolling();
+    setIsGenerating(false);
+  }, [selectedCustomerId, stopGenerationPolling]);
+  useEffect(() => {
+    return () => {
+      stopGenerationPolling();
+    };
+  }, [stopGenerationPolling]);
   async function handleRewrite() {
     if (!workspace) {
-      window.alert("当前没有选中的顾客");
+      window.alert("No customer selected.");
       return;
     }
     try {
@@ -1548,6 +1655,7 @@ function HomePageContent() {
       setAiNotice("");
       setCustomReply(null);
       setPostGenerateSyncMessage("");
+      stopGenerationPolling();
       const response = await fetch("/api/generate-replies", {
         method: "POST",
         headers: {
@@ -1560,27 +1668,18 @@ function HomePageContent() {
       });
       const data = await response.json();
       if (!response.ok || !data.ok) {
-        throw new Error(data?.error || "生成失败");
+        throw new Error(data?.error || "generate_failed");
       }
-      if (!data?.skipped) {
-        setCustomReply({
-          suggestion1Ja: data.suggestion1Ja || "",
-          suggestion1Zh: data.suggestion1Zh || "",
-          suggestion2Ja: data.suggestion2Ja || "",
-          suggestion2Zh: data.suggestion2Zh || "",
-        });
-        setAiNotice("");
-      } else {
-        setAiNotice(data?.reason || "当前局面不建议生成建议回复，已刷新判断结果");
-      }
-      setRewriteInput("");
-      runPostGenerateRefresh(workspace.customer.id);
+      const taskId = String(data?.taskId || "").trim();
+      if (!taskId) throw new Error("missing taskId");
+      setAiNotice("Generating reply suggestions...");
+      startGenerationPolling(taskId, workspace.customer.id);
     } catch (error) {
       console.error(error);
-      setApiError(String(error));
-      window.alert("生成失败，请看右侧错误提示或终端报错");
-    } finally {
+      stopGenerationPolling();
       setIsGenerating(false);
+      setApiError(String(error));
+      window.alert("Generate failed. Please check the error panel.");
     }
   }
   async function handleAnalyzeCustomer() {

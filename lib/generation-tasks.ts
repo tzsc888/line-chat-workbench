@@ -1,0 +1,512 @@
+﻿import {
+  Prisma,
+  GenerationTaskStatus,
+  GenerationTaskTriggerSource,
+  type GenerationTask,
+} from "@prisma/client";
+import { isAiStructuredOutputError } from "@/lib/ai/model-client";
+import { prisma } from "@/lib/prisma";
+import { generateRepliesWorkflow } from "@/lib/services/generate-replies-workflow";
+
+const localKickoffInFlight = new Set<string>();
+const DEFAULT_TASK_LEASE_MS = 90_000;
+const MIN_TASK_LEASE_MS = 15_000;
+const MAX_TASK_LEASE_MS = 15 * 60_000;
+const HEARTBEAT_INTERVAL_MS = 20_000;
+
+type CreateGenerationTaskInput = {
+  customerId: string;
+  rewriteInput?: string;
+  targetMessageId?: string | null;
+  autoMode?: boolean;
+  triggerSource: GenerationTaskTriggerSource;
+};
+
+type SerializableTask = {
+  id: string;
+  customerId: string;
+  targetMessageId: string | null;
+  rewriteInput: string | null;
+  autoMode: boolean;
+  triggerSource: GenerationTaskTriggerSource;
+  status: GenerationTaskStatus;
+  stage: string;
+  errorCode: string | null;
+  errorMessage: string | null;
+  errorDetailsJson: string | null;
+  resultDraftSetId: string | null;
+  attemptCount: number;
+  maxAttempts: number;
+  nextRetryAt: string | null;
+  leaseExpiresAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function compactErrorMessage(input: unknown, max = 500) {
+  const raw = input instanceof Error ? input.message : String(input || "");
+  return raw.slice(0, max);
+}
+
+function compactDetails(details: string[], max = 10, itemMax = 300) {
+  return details.slice(0, max).map((item) => String(item || "").slice(0, itemMax));
+}
+
+function toSerializableTask(task: GenerationTask): SerializableTask {
+  return {
+    id: task.id,
+    customerId: task.customerId,
+    targetMessageId: task.targetMessageId,
+    rewriteInput: task.rewriteInput,
+    autoMode: task.autoMode,
+    triggerSource: task.triggerSource,
+    status: task.status,
+    stage: task.stage,
+    errorCode: task.errorCode,
+    errorMessage: task.errorMessage,
+    errorDetailsJson: task.errorDetailsJson,
+    resultDraftSetId: task.resultDraftSetId,
+    attemptCount: task.attemptCount,
+    maxAttempts: task.maxAttempts,
+    nextRetryAt: task.nextRetryAt?.toISOString() || null,
+    leaseExpiresAt: task.leaseExpiresAt?.toISOString() || null,
+    startedAt: task.startedAt?.toISOString() || null,
+    finishedAt: task.finishedAt?.toISOString() || null,
+    createdAt: task.createdAt.toISOString(),
+    updatedAt: task.updatedAt.toISOString(),
+  };
+}
+
+function buildRetryAt(attemptCount: number) {
+  const backoffSeconds = Math.min(60, Math.max(5, attemptCount * 10));
+  return new Date(Date.now() + backoffSeconds * 1000);
+}
+
+function buildManualDedupeKey(input: {
+  customerId: string;
+  targetMessageId: string | null;
+  rewriteInput: string | null;
+}) {
+  return `manual:${input.customerId}:${input.targetMessageId || "_"}:${input.rewriteInput || "_"}`;
+}
+
+function parseDetailsJson(value: string | null) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return { raw: value };
+  }
+}
+
+function parseLeaseMs() {
+  const raw = Number(process.env.GENERATION_TASK_LEASE_MS || "");
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_TASK_LEASE_MS;
+  return Math.max(MIN_TASK_LEASE_MS, Math.min(MAX_TASK_LEASE_MS, Math.floor(raw)));
+}
+
+function buildLeaseExpiresAt() {
+  return new Date(Date.now() + parseLeaseMs());
+}
+
+function staleCutoffDate() {
+  return new Date(Date.now() - parseLeaseMs());
+}
+
+function isStaleRunningTask(task: { startedAt: Date | null; updatedAt: Date; leaseExpiresAt: Date | null }) {
+  if (task.leaseExpiresAt instanceof Date) {
+    return task.leaseExpiresAt.getTime() <= Date.now();
+  }
+  const cutoff = staleCutoffDate().getTime();
+  const startedAtMs = task.startedAt?.getTime() || 0;
+  if (startedAtMs > 0) return startedAtMs <= cutoff;
+  return task.updatedAt.getTime() <= cutoff;
+}
+
+async function recoverSingleStaleRunningTask(taskId: string) {
+  const running = await prisma.generationTask.findUnique({
+    where: { id: taskId },
+    select: {
+      id: true,
+      status: true,
+      stage: true,
+      startedAt: true,
+      updatedAt: true,
+      leaseExpiresAt: true,
+      attemptCount: true,
+      maxAttempts: true,
+    },
+  });
+  if (!running || running.status !== GenerationTaskStatus.RUNNING) return false;
+  if (!isStaleRunningTask(running)) return false;
+
+  const exhausted = running.attemptCount >= running.maxAttempts;
+  const nextStatus = exhausted ? GenerationTaskStatus.FAILED : GenerationTaskStatus.PENDING;
+  const nextStage = exhausted ? "failed" : "retry-scheduled";
+
+  const recovered = await prisma.generationTask.updateMany({
+    where: {
+      id: running.id,
+      status: GenerationTaskStatus.RUNNING,
+    },
+    data: {
+      status: nextStatus,
+      stage: nextStage,
+      errorCode: exhausted ? "TASK_STALE_TIMEOUT" : "TASK_STALE_REQUEUED",
+      errorMessage: exhausted ? "generation_task_stale_timeout" : "generation_task_stale_requeued",
+      errorDetailsJson: JSON.stringify({
+        stale: true,
+        previousStage: running.stage,
+        leaseMs: parseLeaseMs(),
+      }),
+      nextRetryAt: exhausted ? null : new Date(),
+      leaseExpiresAt: null,
+      finishedAt: exhausted ? new Date() : null,
+    },
+  });
+
+  return recovered.count > 0;
+}
+
+async function recoverStaleRunningTasks(limit = 20) {
+  const cutoff = staleCutoffDate();
+  const staleTasks = await prisma.generationTask.findMany({
+    where: {
+      status: GenerationTaskStatus.RUNNING,
+      OR: [
+        { leaseExpiresAt: { lte: new Date() } },
+        { leaseExpiresAt: null, startedAt: { lte: cutoff } },
+        { leaseExpiresAt: null, startedAt: null, updatedAt: { lte: cutoff } },
+      ],
+    },
+    orderBy: [{ updatedAt: "asc" }],
+    take: Math.max(1, Math.min(limit, 100)),
+    select: { id: true },
+  });
+
+  let recovered = 0;
+  for (const staleTask of staleTasks) {
+    if (await recoverSingleStaleRunningTask(staleTask.id)) {
+      recovered += 1;
+    }
+  }
+  return recovered;
+}
+
+function normalizeTaskError(error: unknown) {
+  if (isAiStructuredOutputError(error)) {
+    return {
+      code: error.code,
+      message: compactErrorMessage(error),
+      stage: error.stage || "generation",
+      details: {
+        mode: error.mode,
+        status: error.status,
+        details: compactDetails(error.details || []),
+      },
+      retryable: error.code === "MODEL_TIMEOUT" || error.code === "MODEL_HTTP_ERROR",
+    };
+  }
+
+  const message = compactErrorMessage(error);
+  const generationStageError =
+    message === "generation_missing_japanese_reply" ||
+    message === "generation_missing_chinese_meaning";
+
+  return {
+    code: generationStageError ? message : "WORKFLOW_ERROR",
+    message,
+    stage: generationStageError ? "generation" : "workflow",
+    details: null,
+    retryable: !generationStageError,
+  };
+}
+
+async function claimTask(taskId: string) {
+  await recoverSingleStaleRunningTask(taskId);
+
+  const claim = await prisma.generationTask.updateMany({
+    where: {
+      id: taskId,
+      status: GenerationTaskStatus.PENDING,
+      OR: [{ nextRetryAt: null }, { nextRetryAt: { lte: new Date() } }],
+    },
+    data: {
+      status: GenerationTaskStatus.RUNNING,
+      stage: "running",
+      startedAt: new Date(),
+      finishedAt: null,
+      errorCode: null,
+      errorMessage: null,
+      errorDetailsJson: null,
+      leaseExpiresAt: buildLeaseExpiresAt(),
+      attemptCount: { increment: 1 },
+    },
+  });
+
+  return claim.count > 0;
+}
+
+function startTaskHeartbeat(taskId: string) {
+  const timer = setInterval(() => {
+    void prisma.generationTask
+      .updateMany({
+        where: {
+          id: taskId,
+          status: GenerationTaskStatus.RUNNING,
+        },
+        data: {
+          leaseExpiresAt: buildLeaseExpiresAt(),
+        },
+      })
+      .catch((error) => {
+        console.error("generation task heartbeat error:", error);
+      });
+  }, HEARTBEAT_INTERVAL_MS);
+
+  return () => {
+    clearInterval(timer);
+  };
+}
+
+export async function createGenerationTask(input: CreateGenerationTaskInput) {
+  const customerId = String(input.customerId || "").trim();
+  if (!customerId) {
+    throw new Error("missing customerId");
+  }
+
+  const normalizedTargetMessageId = String(input.targetMessageId || "").trim() || null;
+  const normalizedRewriteInput = String(input.rewriteInput || "").trim() || null;
+  const autoMode = input.autoMode === true;
+  const manualDedupeKey =
+    input.triggerSource === GenerationTaskTriggerSource.MANUAL_GENERATE
+      ? buildManualDedupeKey({
+          customerId,
+          targetMessageId: normalizedTargetMessageId,
+          rewriteInput: normalizedRewriteInput,
+        })
+      : null;
+
+  if (manualDedupeKey) {
+    const existing = await prisma.generationTask.findFirst({
+      where: {
+        dedupeKey: manualDedupeKey,
+        triggerSource: GenerationTaskTriggerSource.MANUAL_GENERATE,
+        status: { in: [GenerationTaskStatus.PENDING, GenerationTaskStatus.RUNNING] },
+      },
+      orderBy: [{ createdAt: "desc" }],
+    });
+
+    if (existing) {
+      return toSerializableTask(existing);
+    }
+  }
+
+  const task = await prisma.generationTask
+    .create({
+      data: {
+        customerId,
+        targetMessageId: normalizedTargetMessageId,
+        dedupeKey: manualDedupeKey,
+        rewriteInput: normalizedRewriteInput,
+        autoMode,
+        triggerSource: input.triggerSource,
+        status: GenerationTaskStatus.PENDING,
+        stage: "queued",
+        nextRetryAt: null,
+        leaseExpiresAt: null,
+      },
+    })
+    .catch(async (error) => {
+      if (
+        manualDedupeKey &&
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        const existing = await prisma.generationTask.findFirst({
+          where: {
+            dedupeKey: manualDedupeKey,
+            triggerSource: GenerationTaskTriggerSource.MANUAL_GENERATE,
+            status: { in: [GenerationTaskStatus.PENDING, GenerationTaskStatus.RUNNING] },
+          },
+          orderBy: [{ createdAt: "desc" }],
+        });
+        if (existing) return existing;
+      }
+      throw error;
+    });
+
+  return toSerializableTask(task);
+}
+
+export async function getGenerationTaskByScope(input: { taskId: string; customerId: string }) {
+  const taskId = String(input.taskId || "").trim();
+  const customerId = String(input.customerId || "").trim();
+  if (!taskId || !customerId) return null;
+
+  const task = await prisma.generationTask.findFirst({
+    where: {
+      id: taskId,
+      customerId,
+    },
+  });
+
+  if (!task) return null;
+  return toSerializableTask(task);
+}
+
+export async function processSpecificGenerationTask(taskId: string) {
+  const claimed = await claimTask(taskId);
+  if (!claimed) return { ok: false, skipped: true as const, reason: "task-not-claimable" };
+
+  const task = await prisma.generationTask.findUnique({ where: { id: taskId } });
+  if (!task) return { ok: false, skipped: true as const, reason: "task-not-found" };
+
+  const stopHeartbeat = startTaskHeartbeat(task.id);
+  try {
+    await prisma.generationTask.update({
+      where: { id: task.id },
+      data: {
+        stage: "workflow",
+      },
+    });
+
+    const result = await generateRepliesWorkflow({
+      customerId: task.customerId,
+      rewriteInput: task.rewriteInput || "",
+      targetCustomerMessageId: task.targetMessageId || null,
+      autoMode: task.autoMode,
+      publishRefresh: true,
+      triggerSource: task.triggerSource,
+    });
+
+    await prisma.generationTask.update({
+      where: { id: task.id },
+      data: {
+        status: GenerationTaskStatus.SUCCEEDED,
+        stage: "completed",
+        resultDraftSetId: String((result as { draftSetId?: string } | null)?.draftSetId || "").trim() || null,
+        nextRetryAt: null,
+        leaseExpiresAt: null,
+        finishedAt: new Date(),
+      },
+    });
+
+    return {
+      ok: true,
+      skipped: false as const,
+      taskStatus: GenerationTaskStatus.SUCCEEDED,
+      workflow: {
+        reusedExistingDraft: Boolean((result as { reusedExistingDraft?: boolean } | null)?.reusedExistingDraft),
+      },
+    };
+  } catch (error) {
+    const normalized = normalizeTaskError(error);
+    const canRetry = task.attemptCount < task.maxAttempts && normalized.retryable;
+
+    await prisma.generationTask.update({
+      where: { id: task.id },
+      data: {
+        status: canRetry ? GenerationTaskStatus.PENDING : GenerationTaskStatus.FAILED,
+        stage: canRetry ? "retry-scheduled" : "failed",
+        errorCode: normalized.code,
+        errorMessage: normalized.message,
+        errorDetailsJson: normalized.details ? JSON.stringify(normalized.details) : null,
+        nextRetryAt: canRetry ? buildRetryAt(task.attemptCount) : null,
+        leaseExpiresAt: null,
+        finishedAt: canRetry ? null : new Date(),
+      },
+    });
+
+    if (!canRetry) {
+      return {
+        ok: false,
+        skipped: false as const,
+        taskStatus: GenerationTaskStatus.FAILED,
+        reason: "failed",
+        error: {
+          code: normalized.code,
+          message: normalized.message,
+          stage: normalized.stage,
+          details: normalized.details,
+        },
+      };
+    }
+
+    return {
+      ok: false,
+      skipped: false as const,
+      taskStatus: GenerationTaskStatus.PENDING,
+      reason: "retry-scheduled",
+      error: {
+        code: normalized.code,
+        message: normalized.message,
+        stage: normalized.stage,
+      },
+    };
+  } finally {
+    stopHeartbeat();
+  }
+}
+
+export function kickoffGenerationTask(taskId: string) {
+  const id = String(taskId || "").trim();
+  if (!id || localKickoffInFlight.has(id)) return;
+  localKickoffInFlight.add(id);
+
+  queueMicrotask(() => {
+    void processSpecificGenerationTask(id)
+      .catch((error) => {
+        console.error("kickoffGenerationTask error:", error);
+      })
+      .finally(() => {
+        localKickoffInFlight.delete(id);
+      });
+  });
+}
+
+export async function processDueGenerationTasks(limit = 10) {
+  const recoveredStaleRunning = await recoverStaleRunningTasks();
+  const size = Math.max(1, Math.min(limit, 50));
+  const dueTasks = await prisma.generationTask.findMany({
+    where: {
+      status: GenerationTaskStatus.PENDING,
+      OR: [{ nextRetryAt: null }, { nextRetryAt: { lte: new Date() } }],
+    },
+    orderBy: [{ createdAt: "asc" }],
+    take: size,
+    select: { id: true },
+  });
+
+  const results: Array<{ taskId: string; status: string; errorCode: string | null; errorMessage: string | null; errorDetails: unknown }> = [];
+
+  for (const dueTask of dueTasks) {
+    try {
+      await processSpecificGenerationTask(dueTask.id);
+      const task = await prisma.generationTask.findUnique({ where: { id: dueTask.id } });
+      results.push({
+        taskId: dueTask.id,
+        status: task?.status || "UNKNOWN",
+        errorCode: task?.errorCode || null,
+        errorMessage: task?.errorMessage || null,
+        errorDetails: parseDetailsJson(task?.errorDetailsJson || null),
+      });
+    } catch (error) {
+      results.push({
+        taskId: dueTask.id,
+        status: "FAILED",
+        errorCode: "WORKER_ERROR",
+        errorMessage: compactErrorMessage(error),
+        errorDetails: null,
+      });
+    }
+  }
+
+  return {
+    recoveredStaleRunning,
+    scanned: dueTasks.length,
+    results,
+  };
+}

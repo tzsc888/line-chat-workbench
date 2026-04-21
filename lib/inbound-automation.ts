@@ -1,10 +1,10 @@
-import { AutomationJobKind, AutomationJobStatus, MessageType } from "@prisma/client";
+import { AutomationJobKind, AutomationJobStatus, GenerationTaskTriggerSource, MessageType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
 import { PIPELINE_REASON_CODES, parsePipelineReasonCode } from "@/lib/ai/pipeline-reason";
+import { createGenerationTask, processSpecificGenerationTask } from "@/lib/generation-tasks";
 import { translateCustomerJapaneseMessage } from "@/lib/ai/translation-service";
 import { planPartialInboundJobReconcile } from "@/lib/inbound/reconcile-plan";
-import { generateRepliesWorkflow } from "@/lib/services/generate-replies-workflow";
 
 const OPERATOR_PRESENCE_ID = "default";
 const ACTIVE_WINDOW_MS = 60_000;
@@ -70,36 +70,41 @@ async function executeInboundWorkflowJob(job: {
     },
   });
 
-  const json = await generateRepliesWorkflow({
+  const task = await createGenerationTask({
     customerId: job.customerId,
     rewriteInput: "",
-    targetCustomerMessageId: job.targetMessageId,
+    targetMessageId: job.targetMessageId,
     autoMode: true,
-    publishRefresh: false,
-    triggerSource: "AUTO_FIRST_INBOUND",
+    triggerSource: GenerationTaskTriggerSource.AUTO_FIRST_INBOUND,
   });
+  const execution = await processSpecificGenerationTask(task.id);
 
-  if (!json?.ok) {
-    throw new Error((json as { error?: string } | undefined)?.error || "generate_replies_failed");
+  if (!execution.ok && execution.reason !== "retry-scheduled") {
+    const errorMessage =
+      "error" in execution && execution.error?.code
+        ? execution.error.code
+        : "generate_replies_failed";
+    throw new Error(errorMessage);
   }
 
   await publishRealtimeRefresh({
     customerId: job.customerId,
-    reason: (json as { skipped?: boolean } | undefined)?.skipped ? "analysis-updated" : "automation-updated",
+    reason: execution.workflow?.reusedExistingDraft ? "analysis-updated" : "automation-updated",
     scopes: ["workspace", "list", "analysis"],
   });
 
-  const workflowResult = json as {
-    reusedExistingDraft?: boolean;
-  };
-
-  if (workflowResult.reusedExistingDraft) {
+  if (execution.workflow?.reusedExistingDraft) {
     await finishJob(job.id, AutomationJobStatus.SKIPPED, PIPELINE_REASON_CODES.REUSED_EXISTING_DRAFT);
-    return json;
+    return { ok: true, reusedExistingDraft: true } as const;
+  }
+
+  if (!execution.ok && execution.reason === "retry-scheduled") {
+    await finishJob(job.id, AutomationJobStatus.FAILED, PIPELINE_REASON_CODES.JOB_EXECUTION_ERROR);
+    return { ok: false, retryScheduled: true } as const;
   }
 
   await finishJob(job.id, AutomationJobStatus.DONE, null);
-  return json;
+  return { ok: true, reusedExistingDraft: false } as const;
 }
 
 async function executeInboundTranslationJob(job: {

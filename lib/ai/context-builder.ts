@@ -25,6 +25,14 @@ function mapRecentContext(messages: ContextMessage[], max = 6) {
   }));
 }
 
+function mapGenerationRecentContext(messages: ContextMessage[], max = 3) {
+  return messages.slice(-max).map((message) => ({
+    role: "customer_or_staff" as const,
+    japanese_text: shorten(message.japaneseText, 160),
+    chinese_translation: shorten(message.chineseText || "", 100),
+  }));
+}
+
 export function buildAnalysisContext(input: {
   customer: {
     id: string;
@@ -168,14 +176,14 @@ export function buildGenerationContext(input: {
       boundary_to_establish: input.analysis.generation_brief.boundary_to_establish,
     },
     latest_message: {
-      japanese_text: shorten(input.latestMessage.japaneseText, 300),
-      chinese_translation: input.translation?.translation || input.latestMessage.chineseText || "",
-      tone_notes: input.translation?.tone_notes || "",
+      japanese_text: shorten(input.latestMessage.japaneseText, 220),
+      chinese_translation: shorten(input.translation?.translation || input.latestMessage.chineseText || "", 180),
+      tone_notes: shorten(input.translation?.tone_notes || "", 120),
     },
-    recent_context: mapRecentContext(input.recentMessages, 4),
+    recent_context: mapGenerationRecentContext(input.recentMessages, 3),
     current_status_card: {
       current_stage: input.customer.stage,
-      current_strategy_summary: input.customer.aiCurrentStrategy || "",
+      current_strategy_summary: shorten(input.customer.aiCurrentStrategy || "", 220),
       risk_tags: input.customer.riskTags || [],
       has_purchased: input.customer.hasPurchased,
     },

@@ -82,6 +82,18 @@ enum AutomationJobStatus {
   SKIPPED
   FAILED
 }
+
+enum GenerationTaskStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum GenerationTaskTriggerSource {
+  MANUAL_GENERATE
+  AUTO_FIRST_INBOUND
+}
 enum FollowupBucket {
   UNCONVERTED
   VIP
@@ -158,6 +170,7 @@ model Customer {
   scheduledMessages      ScheduledMessage[]
   replyDraftSets         ReplyDraftSet[]
   automationJobs         AutomationJob[]
+  generationTasks        GenerationTask[]
   uiRefreshOutboxEntries UiRefreshOutbox[]
 
   @@index([stage])
@@ -225,6 +238,7 @@ model Message {
 
   customer        Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
   outboundTask    OutboundTask?
+  generationTasks GenerationTask[]
 
   @@index([customerId, sentAt(sort: Asc)])
   @@index([customerId, role, sentAt(sort: Desc)])
@@ -323,10 +337,45 @@ model ReplyDraftSet {
   updatedAt               DateTime          @updatedAt
 
   customer                Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  generationTasks         GenerationTask[]
 
   @@index([customerId, createdAt(sort: Desc)])
   @@index([customerId, targetCustomerMessageId])
   @@index([customerId, isStale, createdAt(sort: Desc)])
+}
+
+model GenerationTask {
+  id                      String                      @id @default(cuid())
+  customerId              String
+  targetMessageId         String?
+  dedupeKey               String?
+  rewriteInput            String?
+  autoMode                Boolean                     @default(false)
+  triggerSource           GenerationTaskTriggerSource
+  status                  GenerationTaskStatus        @default(PENDING)
+  stage                   String                      @default("queued")
+  errorCode               String?
+  errorMessage            String?
+  errorDetailsJson        String?
+  resultDraftSetId        String?
+  attemptCount            Int                         @default(0)
+  maxAttempts             Int                         @default(2)
+  nextRetryAt             DateTime?
+  leaseExpiresAt          DateTime?
+  startedAt               DateTime?
+  finishedAt              DateTime?
+  createdAt               DateTime                    @default(now())
+  updatedAt               DateTime                    @updatedAt
+
+  customer                Customer                    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  targetMessage           Message?                    @relation(fields: [targetMessageId], references: [id], onDelete: SetNull)
+  resultDraftSet          ReplyDraftSet?              @relation(fields: [resultDraftSetId], references: [id], onDelete: SetNull)
+
+  @@index([status, nextRetryAt, createdAt(sort: Asc)])
+  @@index([customerId, createdAt(sort: Desc)])
+  @@index([targetMessageId])
+  @@index([resultDraftSetId])
+  @@index([dedupeKey])
 }
 
 model AutomationJob {
