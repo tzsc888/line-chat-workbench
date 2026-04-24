@@ -1,4 +1,4 @@
-import type { MessagePipeline, MessagePipelineStep } from "@/app/workbench/workspace/types";
+﻿import type { MessagePipeline, MessagePipelineStep } from "@/app/workbench/workspace/types";
 
 type Props = {
   pipeline: MessagePipeline | null | undefined;
@@ -6,8 +6,7 @@ type Props = {
 
 const STEP_LABEL: Record<MessagePipelineStep["step"], string> = {
   translation: "翻译",
-  analysis: "分析",
-  suggestions: "建议",
+  generation: "生成",
 };
 
 function getStatusMeta(step: MessagePipelineStep) {
@@ -31,12 +30,12 @@ function getStatusMeta(step: MessagePipelineStep) {
   }
   if (step.status === "pending") {
     return {
-      label: "待处理",
+      label: "处理中",
       className: "border-slate-200 bg-slate-50 text-slate-600",
     };
   }
   return {
-    label: "未运行",
+    label: "跳过",
     className: "border-gray-200 bg-gray-50 text-gray-600",
   };
 }
@@ -61,3 +60,4 @@ export function MessageAiPipelineMini({ pipeline }: Props) {
     </div>
   );
 }
+

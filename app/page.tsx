@@ -4,7 +4,6 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from "react";
 import { MessageSource } from "@prisma/client";
-import { deriveDraftPresentation } from "@/lib/ai/draft-presentation";
 import { AiAssistantPanel } from "@/app/components/ai-assistant-panel";
 type FollowupSummary = {
   bucket: "UNCONVERTED" | "VIP";
@@ -26,11 +25,7 @@ type CustomerListItem = {
   unreadCount: number;
   lineRelationshipStatus: "ACTIVE" | "UNFOLLOWED";
   lineRefollowedAt: string | null;
-  aiCustomerInfo: string | null;
-  aiCurrentStrategy: string | null;
-  aiLastAnalyzedAt: string | null;
   lastMessageAt: string | null;
-  riskTags?: string[];
   followup: FollowupSummary | null;
   tags: {
     id: string;
@@ -80,21 +75,7 @@ type ReplyDraftSet = {
   advancingChinese: string;
   modelName: string;
   translationPromptVersion: string | null;
-  analysisPromptVersion: string | null;
   generationPromptVersion: string | null;
-  reviewPromptVersion: string | null;
-  sceneType: string | null;
-  routeType: string | null;
-  replyGoal: string | null;
-  pushLevel: string | null;
-  differenceNote: string | null;
-  generationBriefJson: string | null;
-  reviewFlagsJson: string | null;
-  programChecksJson: string | null;
-  aiReviewJson: string | null;
-  finalGateJson: string | null;
-  selfCheckJson: string | null;
-  recommendedVariant: "STABLE" | "ADVANCING" | null;
   isStale: boolean;
   staleReason: string | null;
   staleAt: string | null;
@@ -130,11 +111,7 @@ type WorkspaceData = {
     unreadCount: number;
     lineRelationshipStatus: "ACTIVE" | "UNFOLLOWED";
     lineRefollowedAt: string | null;
-    aiCustomerInfo: string | null;
-    aiCurrentStrategy: string | null;
-    aiLastAnalyzedAt: string | null;
     lastMessageAt: string | null;
-    riskTags?: string[];
     followup: FollowupSummary | null;
   };
   tags: {
@@ -152,6 +129,8 @@ type RewriteResult = {
   suggestion1Zh: string;
   suggestion2Ja: string;
   suggestion2Zh: string;
+  translationStatus?: "succeeded" | "failed";
+  translationErrorCode?: string;
 };
 type GenerationTaskView = {
   id: string;
@@ -355,30 +334,34 @@ function mergeWorkspaceMessages(
 function isOptimisticMessageId(messageId: string) {
   return messageId.startsWith(OPTIMISTIC_ID_PREFIX);
 }
-function normalizeWorkspaceMessagePayload(payload: any): WorkspaceMessage | null {
-  if (!payload || typeof payload !== "object" || typeof payload.id !== "string") {
+function normalizeWorkspaceMessagePayload(payload: unknown): WorkspaceMessage | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const value = payload as Record<string, unknown>;
+  if (typeof value.id !== "string") {
     return null;
   }
   return {
-    id: payload.id,
-    customerId: payload.customerId,
-    role: payload.role,
-    type: payload.type,
-    source: payload.source,
-    lineMessageId: payload.lineMessageId ?? null,
-    japaneseText: payload.japaneseText ?? "",
-    chineseText: payload.chineseText ?? null,
-    imageUrl: payload.imageUrl ?? null,
-    stickerPackageId: payload.stickerPackageId ?? null,
-    stickerId: payload.stickerId ?? null,
-    deliveryStatus: payload.deliveryStatus ?? null,
-    sendError: payload.sendError ?? null,
-    lastAttemptAt: payload.lastAttemptAt ?? null,
-    failedAt: payload.failedAt ?? null,
-    retryCount: Number(payload.retryCount ?? 0),
-    sentAt: payload.sentAt,
-    createdAt: payload.createdAt ?? payload.sentAt,
-    updatedAt: payload.updatedAt ?? payload.sentAt,
+    id: String(value.id),
+    customerId: String(value.customerId || ""),
+    role: value.role as WorkspaceMessage["role"],
+    type: value.type as WorkspaceMessage["type"],
+    source: value.source as WorkspaceMessage["source"],
+    lineMessageId: typeof value.lineMessageId === "string" ? value.lineMessageId : null,
+    japaneseText: typeof value.japaneseText === "string" ? value.japaneseText : "",
+    chineseText: typeof value.chineseText === "string" ? value.chineseText : null,
+    imageUrl: typeof value.imageUrl === "string" ? value.imageUrl : null,
+    stickerPackageId: typeof value.stickerPackageId === "string" ? value.stickerPackageId : null,
+    stickerId: typeof value.stickerId === "string" ? value.stickerId : null,
+    deliveryStatus: (value.deliveryStatus as WorkspaceMessage["deliveryStatus"]) ?? null,
+    sendError: typeof value.sendError === "string" ? value.sendError : null,
+    lastAttemptAt: typeof value.lastAttemptAt === "string" ? value.lastAttemptAt : null,
+    failedAt: typeof value.failedAt === "string" ? value.failedAt : null,
+    retryCount: Number(value.retryCount ?? 0),
+    sentAt: String(value.sentAt || ""),
+    createdAt: typeof value.createdAt === "string" ? value.createdAt : String(value.sentAt || ""),
+    updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : String(value.sentAt || ""),
   };
 }
 function formatDateTimeForInput(date: Date) {
@@ -478,7 +461,6 @@ function HomePageContent() {
   const [isListLoading, setIsListLoading] = useState(true);
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSchedulingManual, setIsSchedulingManual] = useState(false);
   const [isSchedulePanelOpen, setIsSchedulePanelOpen] = useState(false);
   const [scheduleAtInput, setScheduleAtInput] = useState(() => buildDefaultScheduledInputValue());
@@ -488,7 +470,6 @@ function HomePageContent() {
   const [postGenerateSyncMessage, setPostGenerateSyncMessage] = useState("");
   const [pageError, setPageError] = useState("");
   const [apiError, setApiError] = useState("");
-  const [helperError, setHelperError] = useState("");
   const [aiNotice, setAiNotice] = useState("");
   const clearCustomerQuery = useCallback(() => {
     if (!requestedCustomerId) return;
@@ -780,7 +761,6 @@ function HomePageContent() {
           setManualReply("");
           setPendingImages([]);
           setApiError("");
-          setHelperError("");
           setAiNotice("");
         }
         const response = await fetch(`/api/customers/${customerId}/workspace`, {
@@ -1101,7 +1081,8 @@ function HomePageContent() {
           upsertWorkspaceMessage(params.customerId, serverMessage);
           updateCustomerLatestMessage(params.customerId, serverMessage);
           removeOptimisticMessage(params.customerId, optimisticId);
-          if (params.type === "TEXT") {
+          const hasProvidedChinese = typeof params.chineseText === "string" && !!params.chineseText.trim();
+          if (params.type === "TEXT" && !hasProvidedChinese) {
             void attachAsyncTranslation(serverMessage.id, params.japaneseText);
           }
         }
@@ -1394,13 +1375,15 @@ function HomePageContent() {
     });
     ablyClientRef.current = client;
     const channel = client.channels.get("line-chat-workbench");
-    const handleRefresh = (message: any) => {
+    const handleRefresh = (message: unknown) => {
       if (realtimeRefreshTimerRef.current) {
         window.clearTimeout(realtimeRefreshTimerRef.current);
       }
       realtimeRefreshTimerRef.current = window.setTimeout(() => {
         const payload =
-          message && typeof message === "object" ? message.data || {} : {};
+          message && typeof message === "object"
+            ? ((message as { data?: Record<string, unknown> }).data || {})
+            : {};
         const targetCustomerId =
           payload && typeof payload.customerId === "string" && payload.customerId.trim()
             ? payload.customerId.trim()
@@ -1502,23 +1485,29 @@ function HomePageContent() {
     workspace?.latestReplyDraftSet?.advancingChinese ||
     "";
   const latestDraft = workspace?.latestReplyDraftSet || null;
-  const draftPresentation = useMemo(
-    () => deriveDraftPresentation(latestDraft, workspace?.latestCustomerMessageId || null),
-    [latestDraft, workspace?.latestCustomerMessageId]
-  );
-  const latestDraftGenerationBrief = draftPresentation.generationBrief;
-  const latestDraftReviewFlags = draftPresentation.reviewFlags;
-  const latestDraftAiReview = draftPresentation.aiReview;
-  const latestDraftSelfCheck = draftPresentation.selfCheck;
-  const isLatestDraftUsed = draftPresentation.isUsed;
-  const isLatestDraftStale = draftPresentation.isStale;
-  const isLatestDraftBlocked = draftPresentation.isBlocked;
-  const shouldDimDraft = draftPresentation.shouldDimDraft;
-  const latestDraftIssues = draftPresentation.issues;
-  const latestDraftStatusNote = draftPresentation.statusNote;
-  const latestDraftReviewSummary = draftPresentation.reviewSummary;
-  const latestDraftPrimaryActionLabel = draftPresentation.primaryActionLabel;
-  const latestDraftPrimaryActionHint = draftPresentation.primaryActionHint;
+  const hasLatestDraftTranslationFailure =
+    !!latestDraft &&
+    (!!latestDraft.stableJapanese.trim() || !!latestDraft.advancingJapanese.trim()) &&
+    (!latestDraft.stableChinese.trim() || !latestDraft.advancingChinese.trim());
+  const effectiveAiNotice =
+    aiNotice ||
+    (hasLatestDraftTranslationFailure
+      ? "Japanese suggestions are ready. Chinese meaning is temporarily unavailable."
+      : "");
+  const isLatestDraftUsed = !!latestDraft?.selectedVariant;
+  const isLatestDraftStale =
+    !!latestDraft?.isStale ||
+    (!!latestDraft &&
+      !!workspace?.latestCustomerMessageId &&
+      !!latestDraft.targetCustomerMessageId &&
+      latestDraft.targetCustomerMessageId !== workspace.latestCustomerMessageId);
+  const shouldDimDraft = isLatestDraftUsed || isLatestDraftStale;
+  const latestDraftPrimaryActionLabel = !latestDraft ? "Generate replies" : isLatestDraftStale ? "Regenerate on latest messages" : "Regenerate";
+  const latestDraftPrimaryActionHint = !latestDraft
+    ? "No draft exists yet. Generate two reply options."
+    : isLatestDraftStale
+      ? "Current draft is outdated. Generate again with latest conversation."
+      : "Regenerate to adjust tone, push strength, or constraints.";
   useEffect(() => {
     setCustomReply(null);
     setAiNotice("");
@@ -1562,11 +1551,15 @@ function HomePageContent() {
   const formatGenerationTaskError = useCallback((task: GenerationTaskView) => {
     const code = String(task.errorCode || "").trim();
     const message = String(task.errorMessage || "").trim();
+    if (code === "generation_structured_timeout") return "Generation failed: Japanese A/B generation timed out.";
+    if (code === "translation_structured_timeout") return "Generation failed: Chinese meaning translation timed out.";
+    if (code === "generation_structured_failed") return "Generation failed: Japanese A/B structured output failed.";
+    if (code === "translation_structured_failed") return "Generation failed: Chinese meaning structured output failed.";
     if (code === "MODEL_TIMEOUT") return "Generation failed: model timeout.";
     if (code === "MODEL_JSON_PARSE_ERROR") return "Generation failed: malformed JSON output.";
     if (code === "MODEL_SCHEMA_INVALID") return "Generation failed: schema validation failed.";
     if (code === "generation_missing_japanese_reply") return "Generation failed: missing Japanese reply.";
-    if (code === "generation_missing_chinese_meaning") return "Generation failed: missing Chinese meaning.";
+    if (code === "translation_missing_reply_meaning") return "Generation failed: missing Chinese meaning.";
     if (code === "TASK_STALE_TIMEOUT") return "Generation failed: task timed out and reached retry limit.";
     if (message) return message;
     return code ? `Generation failed: ${code}` : "Generation failed: unknown error.";
@@ -1596,9 +1589,17 @@ function HomePageContent() {
         if (task.status === "SUCCEEDED") {
           stopGenerationPolling();
           if (selectedCustomerIdRef.current !== customerId) return;
+          const taskErrorCode = String(task.errorCode || "").trim();
+          const translationFailed =
+            String(task.stage || "").includes("translation-failure") ||
+            taskErrorCode.startsWith("translation_");
           setIsGenerating(false);
           setApiError("");
-          setAiNotice("Suggestions are ready.");
+          setAiNotice(
+            translationFailed
+              ? "Japanese suggestions are ready. Chinese meaning is temporarily unavailable."
+              : "Suggestions are ready.",
+          );
           setRewriteInput("");
           runPostGenerateRefresh(customerId);
           return;
@@ -1680,10 +1681,17 @@ function HomePageContent() {
           suggestion1Zh: String(data?.suggestion1Zh || ""),
           suggestion2Ja: String(data?.suggestion2Ja || ""),
           suggestion2Zh: String(data?.suggestion2Zh || ""),
+          translationStatus:
+            String(data?.translationStatus || "").trim() === "failed" ? "failed" : "succeeded",
+          translationErrorCode: String(data?.translationErrorCode || "").trim(),
         });
         setIsGenerating(false);
         setApiError("");
-        setAiNotice("Suggestions are ready.");
+        setAiNotice(
+          String(data?.translationStatus || "").trim() === "failed"
+            ? "Japanese suggestions are ready. Chinese meaning is temporarily unavailable."
+            : "Suggestions are ready.",
+        );
         setRewriteInput("");
         void runPostGenerateRefresh(workspace.customer.id);
         return;
@@ -1696,44 +1704,6 @@ function HomePageContent() {
       setIsGenerating(false);
       setApiError(String(error));
       window.alert("Generate failed. Please check the error panel.");
-    }
-  }
-  async function handleAnalyzeCustomer() {
-    if (!workspace) {
-      window.alert("当前没有选中的顾客");
-      return;
-    }
-    try {
-      setIsAnalyzing(true);
-      setHelperError("");
-      setAiNotice("");
-      setCustomReply(null);
-      const response = await fetch("/api/analyze-customer", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          customerId: workspace.customer.id,
-        }),
-      });
-      const data = await response.json();
-      if (!response.ok || !data.ok) {
-        throw new Error(data?.error || "分析失败");
-      }
-      if (data?.analysis?.routing_decision?.should_generate_reply === false) {
-        setAiNotice(data?.analysis?.routing_decision?.route_reason || "当前局面不建议自动生成建议回复，已刷新判断结果");
-      } else {
-        setAiNotice("已刷新当前判断与跟进状态");
-      }
-      await loadWorkspace(workspace.customer.id);
-      await loadCustomers({ preserveUi: true });
-    } catch (error) {
-      console.error(error);
-      setHelperError(String(error));
-      window.alert("分析刷新失败，请看右侧错误提示或终端报错");
-    } finally {
-      setIsAnalyzing(false);
     }
   }
   async function addAiReplyToChat(
@@ -2800,20 +2770,11 @@ function HomePageContent() {
       </div>
       <div className="flex h-full min-h-0 min-w-0 w-[30%] flex-col border-l border-gray-200 bg-white">
       <AiAssistantPanel
-        workspace={workspace}
-        latestDraft={latestDraft}
-        latestDraftGenerationBrief={latestDraftGenerationBrief}
-        latestDraftReviewFlags={latestDraftReviewFlags}
-        latestDraftAiReview={latestDraftAiReview}
-        latestDraftSelfCheck={latestDraftSelfCheck}
-        latestDraftIssues={latestDraftIssues}
-        latestDraftStatusNote={latestDraftStatusNote}
-        latestDraftReviewSummary={latestDraftReviewSummary}
+        hasDraft={!!latestDraft}
         latestDraftPrimaryActionLabel={latestDraftPrimaryActionLabel}
         latestDraftPrimaryActionHint={latestDraftPrimaryActionHint}
         isLatestDraftUsed={isLatestDraftUsed}
         isLatestDraftStale={isLatestDraftStale}
-        isLatestDraftBlocked={isLatestDraftBlocked}
         shouldDimDraft={shouldDimDraft}
         displayedSuggestion1Ja={displayedSuggestion1Ja}
         displayedSuggestion1Zh={displayedSuggestion1Zh}
@@ -2821,16 +2782,13 @@ function HomePageContent() {
         displayedSuggestion2Zh={displayedSuggestion2Zh}
         rewriteInput={rewriteInput}
         onRewriteInputChange={setRewriteInput}
-        onAnalyzeCustomer={handleAnalyzeCustomer}
         onRewrite={handleRewrite}
         onSendStable={() => addAiReplyToChat(displayedSuggestion1Ja, displayedSuggestion1Zh, "stable")}
         onSendAdvancing={() => addAiReplyToChat(displayedSuggestion2Ja, displayedSuggestion2Zh, "advancing")}
-        isAnalyzing={isAnalyzing}
         isGenerating={isGenerating}
         isSendingAi={isSendingAi}
-        helperError={helperError}
         apiError={apiError}
-        aiNotice={aiNotice}
+        aiNotice={effectiveAiNotice}
         onLogout={handleLogout}
         loggingOut={loggingOut}
         isPostGenerateSyncing={isPostGenerateSyncing}

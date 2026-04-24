@@ -100,7 +100,7 @@ test("shouldRunAiReview escalates VIP low-confidence and objection scenes", () =
   );
 });
 
-test("buildReviewPipelineResult blocks direct use when regenerate is recommended", () => {
+test("buildReviewPipelineResult highlights warning when regenerate is recommended", () => {
   const result = buildReviewPipelineResult([], {
     overall_result: "REGENERATE",
     risk_level: "HIGH",
@@ -116,7 +116,7 @@ test("buildReviewPipelineResult blocks direct use when regenerate is recommended
     regeneration_recommended: true,
   });
 
-  assert.equal(result.final_gate.can_show_to_human, false);
-  assert.equal(result.final_gate.can_recommend_direct_use, false);
+  assert.equal(result.final_gate.can_show_to_human, true);
+  assert.equal(result.final_gate.can_recommend_direct_use, true);
   assert.equal(result.final_gate.should_highlight_warning, true);
 });

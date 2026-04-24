@@ -1,4 +1,5 @@
 import type { ContextMessage } from "@/lib/ai/ai-types";
+import { isAiStructuredOutputError } from "@/lib/ai/model-client";
 import type { GenerateRepliesTriggerSource } from "@/lib/services/generate-replies-workflow";
 
 export type GenerateRepliesWorkflowInput = {
@@ -15,16 +16,7 @@ export type GenerateRepliesWorkflowDeps = {
     id: string;
     remarkName: string | null;
     originalName: string;
-    isVip: boolean;
     stage: string;
-    aiCustomerInfo: string | null;
-    aiCurrentStrategy: string | null;
-    followupTier: string | null;
-    followupState: string | null;
-    followupBucket: string | null;
-    lineRelationshipStatus: string;
-    riskTags: string[];
-    tags: Array<unknown>;
     messages: ContextMessage[];
     replyDraftSets: Array<{
       id: string;
@@ -40,28 +32,16 @@ export type GenerateRepliesWorkflowDeps = {
   } | null>;
   updateMessageChineseText: (messageId: string, chineseText: string) => Promise<void>;
   publishRealtimeRefresh: (params: { customerId: string; reason: string }) => Promise<unknown>;
-  buildAnalysisContext: (input: Record<string, unknown>) => {
-    delivery_context: Record<string, unknown>;
-  } & Record<string, unknown>;
-  buildGenerationContext: (input: Record<string, unknown>) => Record<string, unknown>;
-  runAnalysisRouter: (context: Record<string, unknown>) => Promise<{
-    line: string;
-    model: string;
-    parsed: Record<string, any>;
-    promptVersion: string;
-  }>;
+  buildMainBrainGenerationContext: (input: Record<string, unknown>) => Record<string, unknown>;
   runReplyGeneration: (context: Record<string, unknown>) => Promise<{
     line: string;
     model: string;
     parsed: {
-      reply_a: { japanese: string; chinese_meaning: string };
-      reply_b: { japanese: string; chinese_meaning: string };
-      difference_note: string;
-      self_check: Record<string, unknown>;
+      reply_a_ja: string;
+      reply_b_ja: string;
     };
     promptVersion: string;
   }>;
-  applyAnalysisStateToCustomer: (input: Record<string, unknown>) => Promise<unknown>;
   translateCustomerJapaneseMessage: (input: {
     japaneseText: string;
     previousJapanese?: string;
@@ -71,9 +51,18 @@ export type GenerateRepliesWorkflowDeps = {
     model: string;
     parsed: {
       translation: string;
-      tone_notes: string;
-      ambiguity_notes: string;
-      attention_points: string[];
+    };
+    promptVersion: string;
+  }>;
+  translateGeneratedReplies: (input: {
+    replyAJa: string;
+    replyBJa: string;
+  }) => Promise<{
+    line: string;
+    model: string;
+    parsed: {
+      reply_a_zh: string;
+      reply_b_zh: string;
     };
     promptVersion: string;
   }>;
@@ -86,24 +75,155 @@ export type GenerateRepliesWorkflowDeps = {
     alreadySelected: boolean;
     isStale: boolean;
   }) => boolean;
-  getActiveAiStrategyVersion: () => string;
 };
+
+type ReplyStage = "generation" | "translation";
+
+function elapsedMs(startedAt: number) {
+  return Math.max(0, Date.now() - startedAt);
+}
+
+function safeSnippet(value: unknown, max = 700) {
+  return String(value || "").replace(/\s+/g, " ").slice(0, max);
+}
+
+function buildFailureSummary(details: Record<string, unknown> | null) {
+  if (!details) return "";
+  const parts = [
+    `code=${String(details.structured_error_code || details.failed_code || "")}`,
+    `causeCode=${String(details.structured_error_code || "")}`,
+    `failureReason=${String(details.failure_reason || "")}`,
+    `parsePhase=${String(details.parse_phase || "")}`,
+    `elapsedMs=${String(details.elapsed_ms || details.total_elapsed_ms || "")}`,
+    `providerElapsedMs=${String(details.provider_elapsed_ms || "")}`,
+    `retryable=${String(details.retryable || "")}`,
+    `providerRole=${String(details.provider_role || "")}`,
+    `providerAttempt=${String(details.provider_attempt || "")}`,
+    `providerMaxAttempts=${String(details.provider_max_attempts || "")}`,
+    `httpStatus=${String(details.structured_status || "")}`,
+    `contentType=${String(details.content_type || "")}`,
+    `finalUrlHostAndPath=${String(details.final_url_host_and_path || "")}`,
+    `responseFormatSent=${String(details.response_format_sent || "")}`,
+    `streamSent=${String(details.stream_sent || "")}`,
+    `fetchErrorName=${String(details.fetch_error_name || "")}`,
+    `fetchErrorMessage=${safeSnippet(details.fetch_error_message || "", 240)}`,
+    `fetchCauseName=${String(details.fetch_cause_name || "")}`,
+    `fetchCauseCode=${String(details.fetch_cause_code || "")}`,
+    `fetchCauseMessage=${safeSnippet(details.fetch_cause_message || "", 240)}`,
+    `bodySnippet=${safeSnippet(details.upstream_body_snippet || "", 700)}`,
+    `modelContentSnippet=${safeSnippet(details.model_content_snippet || "", 700)}`,
+  ];
+  return parts.join(" ");
+}
+
+export class GenerateRepliesStageError extends Error {
+  stage: ReplyStage;
+  code: string;
+  elapsedMs: number;
+  retryable: boolean;
+  details: Record<string, unknown> | null;
+
+  constructor(input: {
+    stage: ReplyStage;
+    code: string;
+    message: string;
+    elapsedMs: number;
+    retryable: boolean;
+    details?: Record<string, unknown> | null;
+  }) {
+    super(input.message);
+    this.name = "GenerateRepliesStageError";
+    this.stage = input.stage;
+    this.code = input.code;
+    this.elapsedMs = input.elapsedMs;
+    this.retryable = input.retryable;
+    this.details = input.details || null;
+  }
+}
+
+function buildStageError(stage: ReplyStage, error: unknown, startedAt: number) {
+  const elapsed = elapsedMs(startedAt);
+  if (isAiStructuredOutputError(error)) {
+    const isTimeout = error.code === "MODEL_TIMEOUT";
+    return new GenerateRepliesStageError({
+      stage,
+      code: isTimeout ? `${stage}_structured_timeout` : `${stage}_structured_failed`,
+      message: `${stage} structured failure: ${error.code}`,
+      elapsedMs: elapsed,
+      retryable: isTimeout || error.code === "MODEL_HTTP_ERROR",
+      details: {
+        elapsed_ms: elapsed,
+        structured_error_code: error.code,
+        structured_stage: error.stage,
+        structured_mode: error.mode,
+        structured_status: error.status,
+        failure_reason: error.failureReason,
+        parse_phase: error.parsePhase,
+        provider_elapsed_ms: error.providerElapsedMs,
+        timeout_ms: error.timeoutMs,
+        retryable: error.retryable,
+        provider_role: error.providerRole,
+        provider_attempt: error.attempt,
+        provider_max_attempts: error.maxAttempts,
+        content_type: error.contentType,
+        final_url_host_and_path: error.finalUrlHostAndPath,
+        response_format_sent: error.responseFormatSent,
+        stream_sent: error.streamSent,
+        fetch_error_name: error.fetchErrorName,
+        fetch_error_message: error.fetchErrorMessage,
+        fetch_cause_name: error.fetchCauseName,
+        fetch_cause_code: error.fetchCauseCode,
+        fetch_cause_message: error.fetchCauseMessage,
+        upstream_body_snippet: safeSnippet(error.upstreamBodySnippet || error.snippet || "", 700),
+        model_content_snippet: safeSnippet(error.modelContentSnippet || "", 700),
+        top_level_keys: error.topLevelKeys,
+        choices_length: error.choicesLength,
+        sse_event_count: error.sseEventCount,
+        assembled_content_length: error.assembledContentLength,
+        structured_details: [...(error.details || [])],
+      },
+    });
+  }
+
+  const errorWithCode =
+    error && typeof error === "object" ? (error as { code?: unknown; details?: unknown; message?: unknown }) : null;
+  const explicitCode = typeof errorWithCode?.code === "string" ? errorWithCode.code : "";
+  const message = error instanceof Error ? error.message : String(error || "");
+  const normalizedCode =
+    explicitCode ||
+    (stage === "translation" && message.startsWith("translation_") ? message : `${stage}_failed`);
+
+  return new GenerateRepliesStageError({
+    stage,
+    code: normalizedCode,
+    message: `${stage} failed: ${message || "unknown_error"}`,
+    elapsedMs: elapsed,
+    retryable: true,
+    details: {
+      elapsed_ms: elapsed,
+      ...(errorWithCode && typeof errorWithCode.details === "object" && errorWithCode.details
+        ? (errorWithCode.details as Record<string, unknown>)
+        : {}),
+    },
+  });
+}
 
 export async function executeGenerateRepliesWorkflow(
   input: GenerateRepliesWorkflowInput,
   deps: GenerateRepliesWorkflowDeps,
 ) {
+  const workflowStartedAt = Date.now();
   const customerId = String(input.customerId || "").trim();
   const rewriteInput = String(input.rewriteInput || "").trim();
   const requestedTargetMessageId = String(input.targetCustomerMessageId || "").trim() || null;
   const autoMode = input.autoMode === true;
   const shouldPublish = input.publishRefresh !== false;
-  const strategyVersion = deps.getActiveAiStrategyVersion();
   const triggerSource: GenerateRepliesTriggerSource = input.triggerSource || "MANUAL_GENERATE";
 
   if (!customerId) {
     throw new Error("missing customerId");
   }
+  console.info(`[generate-replies] started customer=${customerId}`);
 
   const customer = await deps.findCustomerById(customerId);
   if (!customer) {
@@ -120,14 +240,16 @@ export async function executeGenerateRepliesWorkflow(
   }
 
   const existingDraft = customer.replyDraftSets[0] ?? null;
-  if (deps.shouldReuseExistingDraft({
-    autoMode,
-    rewriteInput,
-    hasExistingDraft: !!existingDraft,
-    sameTargetMessage: existingDraft?.targetCustomerMessageId === latestCustomerMessage.id,
-    alreadySelected: !!existingDraft?.selectedVariant,
-    isStale: !!existingDraft?.isStale,
-  })) {
+  if (
+    deps.shouldReuseExistingDraft({
+      autoMode,
+      rewriteInput,
+      hasExistingDraft: !!existingDraft,
+      sameTargetMessage: existingDraft?.targetCustomerMessageId === latestCustomerMessage.id,
+      alreadySelected: !!existingDraft?.selectedVariant,
+      isStale: !!existingDraft?.isStale,
+    })
+  ) {
     return {
       ok: true,
       reusedExistingDraft: true,
@@ -144,15 +266,12 @@ export async function executeGenerateRepliesWorkflow(
 
   const previousMessage = [...messages].reverse().find((message) => message.id !== latestCustomerMessage.id);
   const translation = latestCustomerMessage.chineseText?.trim()
-    ? {
+      ? {
         line: "reuse-existing-translation",
         parsed: {
           translation: latestCustomerMessage.chineseText,
-          tone_notes: "",
-          ambiguity_notes: "",
-          attention_points: [],
         },
-        model: process.env.HELPER_MODEL || "",
+        model: process.env.DEEPLX_CHAT_MODEL_SHORT || process.env.DEEPLX_REPLY_MODEL || "",
         promptVersion: "reuse-existing-translation-v1",
       }
     : await deps.translateCustomerJapaneseMessage({
@@ -166,57 +285,99 @@ export async function executeGenerateRepliesWorkflow(
     latestCustomerMessage.chineseText = translation.parsed.translation;
   }
 
-  const analysisContext = deps.buildAnalysisContext({
+  const generationContext = deps.buildMainBrainGenerationContext({
     customer: {
       id: customer.id,
-      remarkName: customer.remarkName,
-      originalName: customer.originalName,
-      isVip: customer.isVip,
+      display_name: String(customer.remarkName || customer.originalName || "").trim(),
       stage: String(customer.stage),
-      aiCustomerInfo: customer.aiCustomerInfo,
-      aiCurrentStrategy: customer.aiCurrentStrategy,
-      followupTier: customer.followupTier,
-      followupState: customer.followupState,
-      followupBucket: customer.followupBucket,
-      lineRelationshipStatus: customer.lineRelationshipStatus,
-      riskTags: customer.riskTags || [],
     },
     latestMessage: latestCustomerMessage,
     translation: translation.parsed,
     recentMessages: messages,
+    rewriteInput,
+    timelineWindowSize: 12,
   });
 
-  const analysis = await deps.runAnalysisRouter(analysisContext);
-
-  await deps.applyAnalysisStateToCustomer({
-    customerId: customer.id,
-    previousCustomerInfo: customer.aiCustomerInfo,
-    previousStrategy: customer.aiCurrentStrategy,
-    previousRiskTags: customer.riskTags,
-    isVip: customer.isVip,
-    analysis: analysis.parsed,
-  });
-
-  const generationContext = deps.buildGenerationContext({
-    deliveryContext: analysisContext.delivery_context,
-    analysis: analysis.parsed,
-    latestMessage: latestCustomerMessage,
-    translation: translation.parsed,
-    recentMessages: messages,
-    customer: {
-      stage: String(customer.stage),
-      aiCurrentStrategy: customer.aiCurrentStrategy,
-      riskTags: customer.riskTags || [],
-      hasPurchased: customer.stage === "PAID" || customer.stage === "AFTER_SALES",
-    },
-  });
-
-  const generation = await deps.runReplyGeneration(generationContext);
-  if (!generation.parsed.reply_a.japanese.trim() || !generation.parsed.reply_b.japanese.trim()) {
+  const generationStartedAt = Date.now();
+  console.info(`[generate-replies] generation started customer=${customerId}`);
+  const generation = await deps
+    .runReplyGeneration(generationContext)
+    .then((result) => {
+      console.info(
+        `[generate-replies] generation finished customer=${customerId} elapsed_ms=${elapsedMs(generationStartedAt)}`,
+      );
+      return result;
+    })
+    .catch((error) => {
+      const stageError = buildStageError("generation", error, generationStartedAt);
+      console.error(
+        `[generate-replies] generation failed customer=${customerId} code=${stageError.code} elapsed_ms=${stageError.elapsedMs}`,
+      );
+      if (stageError.details) {
+        console.error(`[ai-generation-failure-summary] ${buildFailureSummary(stageError.details)}`);
+      }
+      throw stageError;
+    });
+  if (!generation.parsed.reply_a_ja.trim() || !generation.parsed.reply_b_ja.trim()) {
     throw new Error("generation_missing_japanese_reply");
   }
-  if (!generation.parsed.reply_a.chinese_meaning.trim() || !generation.parsed.reply_b.chinese_meaning.trim()) {
-    throw new Error("generation_missing_chinese_meaning");
+
+  const translationStartedAt = Date.now();
+  console.info(`[generate-replies] translation started customer=${customerId}`);
+  let translationStatus: "succeeded" | "failed" = "succeeded";
+  let translationErrorCode = "";
+  let translationErrorMessage = "";
+  let replyTranslation: {
+    parsed: {
+      reply_a_zh: string;
+      reply_b_zh: string;
+    };
+  } = {
+    parsed: {
+      reply_a_zh: "",
+      reply_b_zh: "",
+    },
+  };
+  try {
+    const translated = await deps.translateGeneratedReplies({
+      replyAJa: generation.parsed.reply_a_ja,
+      replyBJa: generation.parsed.reply_b_ja,
+    });
+    replyTranslation = translated;
+    const hasReplyAZh = !!translated.parsed.reply_a_zh.trim();
+    const hasReplyBZh = !!translated.parsed.reply_b_zh.trim();
+    if (!hasReplyAZh || !hasReplyBZh) {
+      translationStatus = "failed";
+      translationErrorCode = "translation_missing_reply_meaning";
+      translationErrorMessage = "translation returned empty reply meaning";
+      replyTranslation = {
+        parsed: {
+          reply_a_zh: "",
+          reply_b_zh: "",
+        },
+      };
+      console.warn(
+        `[generate-replies] translation degraded customer=${customerId} code=${translationErrorCode} elapsed_ms=${elapsedMs(translationStartedAt)}`,
+      );
+    } else {
+      console.info(
+        `[generate-replies] translation finished customer=${customerId} elapsed_ms=${elapsedMs(translationStartedAt)}`,
+      );
+    }
+  } catch (error) {
+    const stageError = buildStageError("translation", error, translationStartedAt);
+    translationStatus = "failed";
+    translationErrorCode = stageError.code;
+    translationErrorMessage = stageError.message;
+    replyTranslation = {
+      parsed: {
+        reply_a_zh: "",
+        reply_b_zh: "",
+      },
+    };
+    console.error(
+      `[generate-replies] translation failed customer=${customerId} code=${stageError.code} elapsed_ms=${stageError.elapsedMs}`,
+    );
   }
 
   const draftSet = await deps.saveDraftBundle({
@@ -225,12 +386,12 @@ export async function executeGenerateRepliesWorkflow(
     extraRequirement: rewriteInput || null,
     modelName: generation.model,
     translationPromptVersion: translation.promptVersion,
-    analysisPromptVersion: analysis.promptVersion,
     generationPromptVersion: generation.promptVersion,
-    reviewPromptVersion: null,
-    strategyVersion,
-    analysis: analysis.parsed,
-    generation: generation.parsed,
+    generation: {
+      reply_a_ja: generation.parsed.reply_a_ja,
+      reply_b_ja: generation.parsed.reply_b_ja,
+    },
+    replyTranslation: replyTranslation.parsed,
   });
 
   if (shouldPublish) {
@@ -241,23 +402,27 @@ export async function executeGenerateRepliesWorkflow(
     }
   }
 
+  console.info(
+    `[generate-replies] workflow completed customer=${customerId} total_elapsed_ms=${elapsedMs(workflowStartedAt)}`,
+  );
+
   return {
     ok: true,
     line: generation.line,
     model: generation.model,
-    suggestion1Ja: generation.parsed.reply_a.japanese,
-    suggestion1Zh: generation.parsed.reply_a.chinese_meaning,
-    suggestion2Ja: generation.parsed.reply_b.japanese,
-    suggestion2Zh: generation.parsed.reply_b.chinese_meaning,
+    suggestion1Ja: generation.parsed.reply_a_ja,
+    suggestion1Zh: replyTranslation.parsed.reply_a_zh,
+    suggestion2Ja: generation.parsed.reply_b_ja,
+    suggestion2Zh: replyTranslation.parsed.reply_b_zh,
+    translationStatus,
+    translationErrorCode,
+    translationErrorMessage,
     draftSetId: draftSet.id,
-    analysis: analysis.parsed,
     promptVersions: {
       translation: translation.promptVersion,
-      analysis: analysis.promptVersion,
       generation: generation.promptVersion,
-      review: null,
     },
-    strategyVersion,
     triggerSource,
   };
 }
+

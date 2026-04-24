@@ -7,8 +7,5 @@ export async function translateJapaneseToChinese(japanese: string) {
     line: result.line,
     model: result.model,
     chinese: result.parsed.translation,
-    toneNotes: result.parsed.tone_notes,
-    ambiguityNotes: result.parsed.ambiguity_notes,
-    attentionPoints: result.parsed.attention_points,
   };
 }

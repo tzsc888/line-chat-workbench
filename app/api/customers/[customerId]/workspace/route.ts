@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { publishRealtimeRefresh } from "@/lib/ably";
 import { prisma } from "@/lib/prisma";
-import { resolveFollowupView } from "@/lib/followup-rules";
 import { failExpiredOutboundTasks } from "@/lib/bridge-outbound";
 import { buildMessagePipelineStatuses } from "@/lib/ai/pipeline-status";
 import { getActiveAiStrategyVersion } from "@/lib/ai/strategy";
+import { resolveFollowupView } from "@/lib/followup-rules";
 
 type Props = {
   params: Promise<{ customerId: string }>;
@@ -51,16 +51,12 @@ export async function GET(_: Request, { params }: Props) {
     });
 
     if (!customer) {
-      return NextResponse.json({ ok: false, error: "客户不存在" }, { status: 404 });
+      return NextResponse.json({ ok: false, error: "customer_not_found" }, { status: 404 });
     }
 
     const messages = [...customer.messages].reverse();
-    const latestCustomerMessage = [...messages]
-      .reverse()
-      .find((message) => message.role === "CUSTOMER") || null;
-    const customerMessageIds = messages
-      .filter((message) => message.role === "CUSTOMER")
-      .map((message) => message.id);
+    const latestCustomerMessage = [...messages].reverse().find((message) => message.role === "CUSTOMER") || null;
+    const customerMessageIds = messages.filter((message) => message.role === "CUSTOMER").map((message) => message.id);
 
     const [pipelineJobs, pipelineDrafts] = await Promise.all([
       customerMessageIds.length
@@ -92,9 +88,6 @@ export async function GET(_: Request, { params }: Props) {
               targetCustomerMessageId: true,
               createdAt: true,
               updatedAt: true,
-              finalGateJson: true,
-              aiReviewJson: true,
-              programChecksJson: true,
             },
           })
         : Promise.resolve([]),
@@ -160,11 +153,7 @@ export async function GET(_: Request, { params }: Props) {
           unreadCount: customer.unreadCount,
           lineRelationshipStatus: customer.lineRelationshipStatus,
           lineRefollowedAt: customer.lineRefollowedAt,
-          aiCustomerInfo: customer.aiCustomerInfo,
-          aiCurrentStrategy: customer.aiCurrentStrategy,
-          aiLastAnalyzedAt: customer.aiLastAnalyzedAt,
           lastMessageAt: customer.lastMessageAt,
-          riskTags: customer.riskTags,
           followup: {
             bucket: followup.bucket,
             tier: followup.tier,
@@ -207,21 +196,7 @@ export async function GET(_: Request, { params }: Props) {
               advancingChinese: customer.replyDraftSets[0].advancingChinese,
               modelName: customer.replyDraftSets[0].modelName,
               translationPromptVersion: customer.replyDraftSets[0].translationPromptVersion,
-              analysisPromptVersion: customer.replyDraftSets[0].analysisPromptVersion,
               generationPromptVersion: customer.replyDraftSets[0].generationPromptVersion,
-              reviewPromptVersion: customer.replyDraftSets[0].reviewPromptVersion,
-              sceneType: customer.replyDraftSets[0].sceneType,
-              routeType: customer.replyDraftSets[0].routeType,
-              replyGoal: customer.replyDraftSets[0].replyGoal,
-              pushLevel: customer.replyDraftSets[0].pushLevel,
-              differenceNote: customer.replyDraftSets[0].differenceNote,
-              generationBriefJson: customer.replyDraftSets[0].generationBriefJson,
-              reviewFlagsJson: customer.replyDraftSets[0].reviewFlagsJson,
-              programChecksJson: customer.replyDraftSets[0].programChecksJson,
-              aiReviewJson: customer.replyDraftSets[0].aiReviewJson,
-              finalGateJson: customer.replyDraftSets[0].finalGateJson,
-              selfCheckJson: customer.replyDraftSets[0].selfCheckJson,
-              recommendedVariant: customer.replyDraftSets[0].recommendedVariant,
               isStale: customer.replyDraftSets[0].isStale,
               staleReason: customer.replyDraftSets[0].staleReason,
               staleAt: customer.replyDraftSets[0].staleAt?.toISOString() || null,
@@ -235,7 +210,7 @@ export async function GET(_: Request, { params }: Props) {
     });
   } catch (error) {
     console.error("GET /api/customers/[customerId]/workspace error:", error);
-    return NextResponse.json({ ok: false, error: "读取顾客工作台失败" }, { status: 500 });
+    return NextResponse.json({ ok: false, error: "failed_to_load_workspace" }, { status: 500 });
   }
 }
 
@@ -269,7 +244,7 @@ export async function PATCH(req: NextRequest, { params }: Props) {
     }
 
     if (Object.keys(data).length === 0) {
-      return NextResponse.json({ ok: false, error: "缺少可更新字段" }, { status: 400 });
+      return NextResponse.json({ ok: false, error: "no_updatable_fields" }, { status: 400 });
     }
 
     const updatedCustomer = await prisma.customer.update({
@@ -296,6 +271,7 @@ export async function PATCH(req: NextRequest, { params }: Props) {
     });
   } catch (error) {
     console.error("PATCH /api/customers/[customerId]/workspace error:", error);
-    return NextResponse.json({ ok: false, error: "更新顾客信息失败" }, { status: 500 });
+    return NextResponse.json({ ok: false, error: "failed_to_update_customer" }, { status: 500 });
   }
 }
+

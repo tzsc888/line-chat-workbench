@@ -46,6 +46,26 @@ Shared policy modules:
 3. `npm run prisma:migrate:deploy`
 4. `npm run dev`
 
+## AI Provider Endpoint Notes
+
+- Preferred explicit endpoint:
+  - `AI_CHAT_COMPLETIONS_URL=https://<provider-domain>/v1/chat/completions`
+- Or set base URL:
+  - `EKAN8_BASE_URL=https://<provider-domain>`
+  - `EKAN8_BASE_URL=https://<provider-domain>/v1`
+  - Runtime auto-resolves to `/v1/chat/completions`.
+- Do not use documentation URLs as API endpoints (for example `https://docs.newapi.pro/zh/docs...`).
+- Calls use `Authorization: Bearer <token>`.
+- Runtime sends `stream: false` explicitly.
+- `response_format` is off by default; enable only when channel supports it:
+  - `AI_USE_RESPONSE_FORMAT=1`
+
+Provider diagnostic command:
+
+```bash
+npm run check:ai
+```
+
 ## Tests
 
 ```bash

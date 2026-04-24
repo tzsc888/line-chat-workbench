@@ -1,5 +1,5 @@
-export type MessagePipelineStep = {
-  step: "translation" | "analysis" | "suggestions";
+﻿export type MessagePipelineStep = {
+  step: "translation" | "generation";
   status: "pending" | "succeeded" | "skipped" | "failed" | "reused";
   reason_code: string | null;
   reason_label: string;
@@ -28,3 +28,4 @@ export type WorkspaceRenderableMessage = {
   isOptimistic?: boolean;
   aiPipeline?: MessagePipeline | null;
 };
+

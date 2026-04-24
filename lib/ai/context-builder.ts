@@ -1,271 +1,337 @@
-import type {
-  AnalysisContextPack,
-  AnalysisResult,
-  ContextMessage,
-  GenerationContextPack,
-  ReviewContextPack,
-  TranslationResult,
-} from "./ai-types";
-import { buildDeliveryContextFromMessages, deriveIndustryStage, getIndustryRulePack, getIndustryStageSummary } from "../industry/core";
-import { resolveAnalysisStrategy, resolveGenerationStrategy, resolveReviewStrategy } from "./strategy";
+import type { ContextMessage, TranslationResult } from "./ai-types";
+import { deriveObjectiveSalesFacts } from "../industry/core";
+import { salesBrainPlaybook } from "./sales-brain-playbook";
 
-function shorten(text: string, max = 280) {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (normalized.length <= max) return normalized;
-  const head = Math.max(120, Math.floor(max * 0.7));
-  const tail = Math.max(40, max - head - 12);
-  return `${normalized.slice(0, head)} ... ${normalized.slice(-tail)}`;
+type TimelineMessage = {
+  message_id: string;
+  role: "CUSTOMER" | "OPERATOR";
+  type: "TEXT" | "IMAGE" | "STICKER";
+  source: "LINE" | "MANUAL" | "AI_SUGGESTION" | "UNKNOWN";
+  sent_at_iso: string;
+  minutes_since_previous: number | null;
+  minutes_since_key_operator_long_message: number | null;
+  japanese_text: string;
+};
+
+type CurrentCustomerTurnMessage = {
+  id: string;
+  text: string;
+  sent_at_iso: string;
+};
+
+function toMs(value: Date | string | undefined) {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
 }
 
-function mapRecentContext(messages: ContextMessage[], max = 6) {
-  return messages.slice(-max).map((message) => ({
-    role: "customer_or_staff" as const,
-    japanese_text: shorten(message.japaneseText, 220),
-    chinese_translation: shorten(message.chineseText || "", 140),
-  }));
+function toIso(value: Date | string | undefined) {
+  const ms = toMs(value);
+  return new Date(ms || Date.now()).toISOString();
 }
 
-function mapGenerationRecentContext(messages: ContextMessage[], max = 3) {
-  return messages.slice(-max).map((message) => ({
-    role: "customer_or_staff" as const,
-    japanese_text: shorten(message.japaneseText, 160),
-    chinese_translation: shorten(message.chineseText || "", 100),
-  }));
+function getGenerationClock(timezone: string) {
+  const now = new Date();
+  const jstFormatter = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const hourFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hour: "2-digit",
+    hour12: false,
+  });
+  const nowJstText = jstFormatter.format(now);
+  const hourJst = Number(hourFormatter.format(now));
+  return {
+    timezone,
+    now_utc_iso: now.toISOString(),
+    now_jst_text: nowJstText,
+    hour_jst: Number.isFinite(hourJst) ? hourJst : null,
+  };
 }
 
-export function buildAnalysisContext(input: {
+function normalizeSource(source: ContextMessage["source"]) {
+  if (source === "LINE" || source === "MANUAL" || source === "AI_SUGGESTION") return source;
+  return "UNKNOWN";
+}
+
+function sortMessagesBySentAtAsc(messages: ContextMessage[]) {
+  return messages
+    .map((message, index) => ({ message, index, ms: toMs(message.sentAt) || 0 }))
+    .sort((a, b) => {
+      if (a.ms !== b.ms) return a.ms - b.ms;
+      return a.index - b.index;
+    })
+    .map((item) => item.message);
+}
+
+function dedupeMessagesById(messages: ContextMessage[]) {
+  const unique = new Map<string, ContextMessage>();
+  for (const message of messages) {
+    if (!message?.id) continue;
+    unique.set(message.id, message);
+  }
+  return [...unique.values()];
+}
+
+function isVisibleOperatorBoundary(message: ContextMessage) {
+  if (message.role !== "OPERATOR") return false;
+  if (message.type === "TEXT") return !!String(message.japaneseText || "").trim();
+  return message.type === "IMAGE";
+}
+
+function buildCurrentCustomerTurn(input: {
+  orderedMessages: ContextMessage[];
+  targetMessageId: string;
+}) {
+  const targetIndex = input.orderedMessages.findIndex((item) => item.id === input.targetMessageId);
+  const cappedIndex = targetIndex >= 0 ? targetIndex : input.orderedMessages.length - 1;
+  const bounded = input.orderedMessages.slice(0, Math.max(0, cappedIndex) + 1);
+
+  let boundaryIndex = -1;
+  for (let i = bounded.length - 1; i >= 0; i -= 1) {
+    const candidate = bounded[i];
+    if (candidate.id === input.targetMessageId) continue;
+    if (isVisibleOperatorBoundary(candidate)) {
+      boundaryIndex = i;
+      break;
+    }
+  }
+
+  const turnCustomerMessages = bounded
+    .slice(boundaryIndex + 1)
+    .filter((item) => item.role === "CUSTOMER")
+    .map((item) => ({
+      id: item.id,
+      text: item.japaneseText || "",
+      sent_at_iso: toIso(item.sentAt),
+    } satisfies CurrentCustomerTurnMessage));
+
+  const joinedText = turnCustomerMessages
+    .map((item) => item.text.trim())
+    .filter(Boolean)
+    .join("\n");
+
+  const latestSentAt =
+    turnCustomerMessages.length > 0
+      ? turnCustomerMessages[turnCustomerMessages.length - 1].sent_at_iso
+      : toIso(undefined);
+
+  return {
+    messages: turnCustomerMessages,
+    joined_text: joinedText,
+    message_count: turnCustomerMessages.length,
+    latest_sent_at: latestSentAt,
+  };
+}
+
+function buildTimelineMessages(input: {
+  messages: ContextMessage[];
+  keyOperatorLongMessageMs: number | null;
+}) {
+  const ordered = sortMessagesBySentAtAsc(input.messages.filter((item) => !!toMs(item.sentAt)));
+
+  let previousMs: number | null = null;
+  return ordered.map((message) => {
+    const currentMs = toMs(message.sentAt) || Date.now();
+    const minutesSincePrevious =
+      previousMs == null ? null : Math.max(0, Math.round((currentMs - previousMs) / 60000));
+    const minutesSinceKey =
+      input.keyOperatorLongMessageMs == null
+        ? null
+        : Math.max(0, Math.round((currentMs - input.keyOperatorLongMessageMs) / 60000));
+
+    previousMs = currentMs;
+
+    return {
+      message_id: message.id,
+      role: message.role,
+      type: message.type,
+      source: normalizeSource(message.source),
+      sent_at_iso: new Date(currentMs).toISOString(),
+      minutes_since_previous: minutesSincePrevious,
+      minutes_since_key_operator_long_message: minutesSinceKey,
+      japanese_text: message.japaneseText || "",
+    } satisfies TimelineMessage;
+  });
+}
+
+function toJapaneseOnlyKeyOperatorLongMessage(
+  value: ReturnType<typeof deriveObjectiveSalesFacts>["key_operator_long_message"],
+) {
+  if (!value) return null;
+  return {
+    message_id: value.message_id,
+    role: value.role,
+    type: value.type,
+    source: value.source,
+    sent_at_iso: value.sent_at_iso,
+    japanese_text: value.japanese_text,
+    minutes_since_key_message: value.minutes_since_key_message,
+  };
+}
+
+function buildBusinessPosition(input: {
+  isInitialReceptionPhase: boolean;
+  isReplyToFreeReading: boolean;
+  hasPaidOrder: boolean;
+}) {
+  if (input.hasPaidOrder) {
+    return "Current position: post-payment follow-up; focus on paid-stage continuation, clarification, and trust continuity.";
+  }
+  if (input.isReplyToFreeReading) {
+    return "Current position: post-free-reading follow-up; customer is responding to prior free reading context and is not paid yet.";
+  }
+  if (input.isInitialReceptionPhase) {
+    return "Current position: initial reception; the customer has submitted consultation details and is waiting for the first human-like reception before the free reading.";
+  }
+  return "Current position: active pre-payment chat follow-up; continue natural turn-by-turn conversation and gradual progression.";
+}
+
+function buildSalesDirection(input: {
+  isInitialReceptionPhase: boolean;
+  isReplyToFreeReading: boolean;
+  hitCtaOption: boolean;
+  hasPaidOrder: boolean;
+}) {
+  if (input.hasPaidOrder) {
+    return "Sales direction: stabilize paid-stage experience and answer current concerns; do not restart free-stage selling.";
+  }
+  if (input.isInitialReceptionPhase) {
+    return "Current scene: initial reception after the customer has submitted consultation details. First acknowledge the most painful point and make them feel their message was carefully read. Do not ask for more details unless key information is clearly missing. Do not sell, quote, or write a formal reading. Close naturally by bridging to the free-reading direction, such as saying you will first look at the current flow based on what they shared.";
+  }
+  if (input.isReplyToFreeReading && input.hitCtaOption) {
+    return "Sales direction: customer has entered a live interest window; follow their selected topic and move only half-step to one step.";
+  }
+  if (input.isReplyToFreeReading) {
+    return "Sales direction: post-free-reading continuation; hold natural chat rhythm and progress gently instead of full-step conversion.";
+  }
+  return "Sales direction: follow the current customer turn naturally and move one small step forward when the window is clear.";
+}
+
+export function buildMainBrainGenerationContext(input: {
   customer: {
     id: string;
-    remarkName: string | null;
-    originalName: string;
-    isVip: boolean;
     stage: string;
-    aiCustomerInfo: string | null;
-    aiCurrentStrategy: string | null;
-    followupTier?: string | null;
-    followupState?: string | null;
-    followupBucket?: string | null;
-    nextFollowupBucket?: string | null;
-    lineRelationshipStatus?: string | null;
-    riskTags?: string[];
+    display_name: string;
   };
   latestMessage: ContextMessage;
   translation?: TranslationResult | null;
   recentMessages: ContextMessage[];
-}): AnalysisContextPack {
-  const deliveryContext = buildDeliveryContextFromMessages({
-    latestMessage: input.latestMessage,
-    recentMessages: input.recentMessages,
-    customerStage: input.customer.stage,
+  rewriteInput?: string;
+  timelineWindowSize?: number;
+}) {
+  const timezone = process.env.APP_TIMEZONE || "Asia/Tokyo";
+  const generationClock = getGenerationClock(timezone);
+  const timelineWindowSize = Math.max(10, Math.min(input.timelineWindowSize || 12, 15));
+
+  const allMessages = dedupeMessagesById([...input.recentMessages, input.latestMessage]);
+  const ordered = sortMessagesBySentAtAsc(allMessages.filter((item) => !!toMs(item.sentAt)));
+  const timelineWindow = ordered.slice(-timelineWindowSize);
+  const currentCustomerTurn = buildCurrentCustomerTurn({
+    orderedMessages: ordered,
+    targetMessageId: input.latestMessage.id,
   });
-  const industryStage = deriveIndustryStage({
-    customerStage: input.customer.stage,
+
+  const objectiveFacts = deriveObjectiveSalesFacts({
     latestMessage: input.latestMessage,
-    recentMessages: input.recentMessages,
-    deliveryContext,
+    recentMessages: ordered,
+    customerStage: input.customer.stage,
+    currentCustomerTurn: {
+      joinedText: currentCustomerTurn.joined_text,
+      firstMessageId: currentCustomerTurn.messages[0]?.id || null,
+    },
   });
-  const stageSummary = getIndustryStageSummary(industryStage);
-  const industryRulePack = getIndustryRulePack(industryStage);
-  const strategy = resolveAnalysisStrategy();
+
+  const keyLongMessageMs = objectiveFacts.key_operator_long_message
+    ? new Date(objectiveFacts.key_operator_long_message.sent_at_iso).getTime()
+    : null;
+
+  const timelineMessages = buildTimelineMessages({
+    messages: timelineWindow,
+    keyOperatorLongMessageMs: keyLongMessageMs,
+  });
+
+  const latestMessageMs = toMs(input.latestMessage.sentAt) || Date.now();
+  const previousMessage =
+    [...ordered]
+      .filter((item) => item.id !== input.latestMessage.id)
+      .sort((a, b) => (toMs(b.sentAt) || 0) - (toMs(a.sentAt) || 0))[0] || null;
+  const previousMessageMs = toMs(previousMessage?.sentAt);
 
   return {
-    customer_profile: {
+    objective: "Generate two LINE-ready Japanese reply suggestions (A/B) for operator review, grounded in current_customer_turn.",
+    timezone,
+    assistant_role_sentence:
+      "You are a mature, soft, high-context Japanese LINE chat seller who supports one-on-one relationship-driven conversion.",
+    business_position: buildBusinessPosition({
+      isInitialReceptionPhase: objectiveFacts.is_initial_reception_phase,
+      isReplyToFreeReading: objectiveFacts.is_reply_to_free_reading,
+      hasPaidOrder: objectiveFacts.has_paid_order,
+    }),
+    sales_direction: buildSalesDirection({
+      isInitialReceptionPhase: objectiveFacts.is_initial_reception_phase,
+      isReplyToFreeReading: objectiveFacts.is_reply_to_free_reading,
+      hitCtaOption: objectiveFacts.hit_cta_option,
+      hasPaidOrder: objectiveFacts.has_paid_order,
+    }),
+    chat_turn_rhythm: {
+      priority: "high",
+      rule_order: [
+        "Hard facts, pricing/workflow boundaries, and safety boundaries first.",
+        "Then chat_turn_rhythm.",
+        "Then sales completeness.",
+        "Then stage strategy detail.",
+      ],
+      core_rules: [
+        "Reply to current_customer_turn as one LINE turn, not just the last sentence.",
+        "Do not compress multi-turn sales steps into one message.",
+        "Normally move half-step to one step only.",
+        "If customer turn is short, keep reply short and natural.",
+      ],
+    },
+    customer: {
       customer_id: input.customer.id,
-      display_name: input.customer.remarkName?.trim() || input.customer.originalName,
-      is_vip: input.customer.isVip,
-      has_purchased: input.customer.stage === "PAID" || input.customer.stage === "AFTER_SALES",
-      relationship_status: input.customer.lineRelationshipStatus || "ACTIVE",
-      long_term_summary: input.customer.aiCustomerInfo || "",
-      current_stage: input.customer.stage || "",
-      current_strategy_summary: input.customer.aiCurrentStrategy || "",
-      risk_tags: input.customer.riskTags || [],
-      current_followup_tier: input.customer.followupTier || "",
-      current_followup_state: input.customer.followupState || "",
-      current_followup_bucket: input.customer.nextFollowupBucket || input.customer.followupBucket || "",
+      display_name: input.customer.display_name,
+      stage: input.customer.stage,
+      has_paid_order: objectiveFacts.has_paid_order,
     },
-    industry_stage: industryStage,
-    delivery_context: deliveryContext,
-    industry_rules_summary: {
-      stage_goal: industryRulePack.stageGoal,
-      stage_dos: [...industryRulePack.stageDos],
-      stage_donts: [...industryRulePack.stageDonts],
-      stage_style: [...industryRulePack.stageStyle],
-      step_rules: [...industryRulePack.stepRules],
-      buyer_language_signal: industryRulePack.buyerLanguageSignal,
-      buyer_language_product_direction: industryRulePack.buyerLanguageProductDirection,
-      must_have: [...industryRulePack.mustHave],
-    },
-    latest_message: {
+    generation_clock: generationClock,
+    latest_customer_message: {
+      role: "technical_target_last_message_of_current_turn",
       message_id: input.latestMessage.id,
-      japanese_text: shorten(input.latestMessage.japaneseText, 300),
-      chinese_translation: input.translation?.translation || input.latestMessage.chineseText || "",
-      tone_notes: input.translation?.tone_notes || "",
-      ambiguity_notes: input.translation?.ambiguity_notes || "",
+      sent_at_iso: toIso(input.latestMessage.sentAt),
+      japanese_text: input.latestMessage.japaneseText,
+      chinese_translation: input.translation?.translation || "",
+      minutes_since_previous_message:
+        previousMessageMs == null ? null : Math.max(0, Math.round((latestMessageMs - previousMessageMs) / 60000)),
     },
-    recent_context: mapRecentContext(input.recentMessages, 6),
-    system_rules_summary: {
-      core_style_rules: [...strategy.coreStyleRules, ...stageSummary.styleNotes],
-      core_sales_rules: [
-        ...strategy.coreSalesRules,
-        stageSummary.goal,
-        ...stageSummary.allowedActions.map((item) => `允许动作：${item}`),
-      ],
-      core_risk_rules: [
-        "不能跳阶段",
-        "不能推进过头",
-        "不能免费讲太深",
-        ...stageSummary.forbiddenActions.map((item) => `禁止动作：${item}`),
-      ],
+    current_customer_turn: currentCustomerTurn,
+    key_operator_long_message: toJapaneseOnlyKeyOperatorLongMessage(objectiveFacts.key_operator_long_message),
+    objective_facts: {
+      is_reply_to_free_reading: objectiveFacts.is_reply_to_free_reading,
+      is_first_valid_reply_after_free_reading: objectiveFacts.is_first_valid_reply_after_free_reading,
+      is_first_valid_customer_turn_after_free_reading: objectiveFacts.is_first_valid_customer_turn_after_free_reading,
+      hit_cta_option: objectiveFacts.hit_cta_option,
+      selected_cta_option: objectiveFacts.selected_cta_option,
+      cta_options: objectiveFacts.cta_options,
+      has_paid_order: objectiveFacts.has_paid_order,
+      has_explicit_objection: objectiveFacts.has_explicit_objection,
+      has_explicit_rejection: objectiveFacts.has_explicit_rejection,
+      is_initial_reception_phase: objectiveFacts.is_initial_reception_phase,
     },
-  };
-}
-
-export function buildGenerationContext(input: {
-  analysis: AnalysisResult;
-  latestMessage: ContextMessage;
-  translation?: TranslationResult | null;
-  recentMessages: ContextMessage[];
-  customer: {
-    stage: string;
-    aiCurrentStrategy: string | null;
-    riskTags?: string[];
-    hasPurchased: boolean;
-  };
-  deliveryContext?: AnalysisContextPack["delivery_context"];
-}): GenerationContextPack {
-  const deliveryContext =
-    input.deliveryContext ||
-    buildDeliveryContextFromMessages({
-      latestMessage: input.latestMessage,
-      recentMessages: input.recentMessages,
-      customerStage: input.customer.stage,
-    });
-  const industryRulePack = getIndustryRulePack(
-    input.analysis.scene_assessment.industry_stage,
-    input.analysis.scene_assessment.buyer_language,
-  );
-  const strategy = resolveGenerationStrategy();
-
-  return {
-    industry_stage: input.analysis.scene_assessment.industry_stage,
-    delivery_context: deliveryContext,
-    industry_rules_summary: {
-      stage_goal: industryRulePack.stageGoal,
-      stage_dos: [...industryRulePack.stageDos],
-      stage_donts: [...industryRulePack.stageDonts],
-      stage_style: [...industryRulePack.stageStyle],
-      step_rules: [...industryRulePack.stepRules],
-      buyer_language_signal: industryRulePack.buyerLanguageSignal,
-      buyer_language_product_direction: industryRulePack.buyerLanguageProductDirection,
-      must_have: [...industryRulePack.mustHave],
+    timeline: {
+      message_window_size: timelineMessages.length,
+      messages: timelineMessages,
     },
-    generation_brief: {
-      scene_type: input.analysis.scene_assessment.scene_type,
-      relationship_stage: input.analysis.scene_assessment.relationship_stage,
-      route_type: input.analysis.routing_decision.route_type,
-      reply_goal: input.analysis.routing_decision.reply_goal,
-      buyer_language: input.analysis.scene_assessment.buyer_language,
-      mission: input.analysis.generation_brief.mission,
-      must_cover: input.analysis.generation_brief.must_cover,
-      must_avoid: input.analysis.generation_brief.must_avoid,
-      push_level: input.analysis.generation_brief.push_level,
-      reply_length: input.analysis.generation_brief.reply_length,
-      style_notes: input.analysis.generation_brief.style_notes,
-      delivery_anchor: input.analysis.generation_brief.delivery_anchor,
-      conversion_step: input.analysis.generation_brief.conversion_step,
-      boundary_to_establish: input.analysis.generation_brief.boundary_to_establish,
-    },
-    latest_message: {
-      japanese_text: shorten(input.latestMessage.japaneseText, 220),
-      chinese_translation: shorten(input.translation?.translation || input.latestMessage.chineseText || "", 180),
-      tone_notes: shorten(input.translation?.tone_notes || "", 120),
-    },
-    recent_context: mapGenerationRecentContext(input.recentMessages, 3),
-    current_status_card: {
-      current_stage: input.customer.stage,
-      current_strategy_summary: shorten(input.customer.aiCurrentStrategy || "", 220),
-      risk_tags: input.customer.riskTags || [],
-      has_purchased: input.customer.hasPurchased,
-    },
-    global_rules: {
-      style_rules: [...strategy.styleRules],
-      sales_rules: [
-        "必须服从上游路线",
-        "不能自行新增承诺、价格、卖点",
-        "A更稳，B更主动半步",
-        "首轮接待只做接住与控场，不做深度判断",
-        "免费鉴定文后的承接遵守：接住主题 -> 机制命中 -> 建立免费不够的边界 -> 自然引向个别深度鉴定",
-      ],
-      risk_rules: [
-        "不要推进过头",
-        "不要免费讲太深",
-        "不要写得太油或太硬",
-        "不要把承接写成第二篇正式鉴定文",
-      ],
-    },
-  };
-}
-
-export function buildReviewContext(input: {
-  analysis: AnalysisResult;
-  generation: ReviewContextPack["generation_result"];
-  latestMessage: ContextMessage;
-  translation?: TranslationResult | null;
-  deliveryContext?: AnalysisContextPack["delivery_context"];
-  recentMessages?: ContextMessage[];
-  customerStage?: string;
-}): ReviewContextPack {
-  const deliveryContext =
-    input.deliveryContext ||
-    buildDeliveryContextFromMessages({
-      latestMessage: input.latestMessage,
-      recentMessages: input.recentMessages || [],
-      customerStage: input.customerStage || "",
-    });
-  const industryRulePack = getIndustryRulePack(
-    input.analysis.scene_assessment.industry_stage,
-    input.analysis.scene_assessment.buyer_language,
-  );
-  const strategy = resolveReviewStrategy();
-
-  return {
-    industry_stage: input.analysis.scene_assessment.industry_stage,
-    delivery_context: deliveryContext,
-    industry_rules_summary: {
-      stage_goal: industryRulePack.stageGoal,
-      stage_dos: [...industryRulePack.stageDos],
-      stage_donts: [...industryRulePack.stageDonts],
-      stage_style: [...industryRulePack.stageStyle],
-      step_rules: [...industryRulePack.stepRules],
-      buyer_language_signal: industryRulePack.buyerLanguageSignal,
-      buyer_language_product_direction: industryRulePack.buyerLanguageProductDirection,
-      must_have: [...industryRulePack.mustHave],
-    },
-    analysis_result: {
-      scene_type: input.analysis.scene_assessment.scene_type,
-      route_type: input.analysis.routing_decision.route_type,
-      reply_goal: input.analysis.routing_decision.reply_goal,
-      push_level: input.analysis.generation_brief.push_level,
-      buyer_language: input.analysis.scene_assessment.buyer_language,
-      conversion_window: input.analysis.routing_decision.conversion_window,
-      must_cover: input.analysis.generation_brief.must_cover,
-      must_avoid: input.analysis.generation_brief.must_avoid,
-      style_notes: input.analysis.generation_brief.style_notes,
-      delivery_anchor: input.analysis.generation_brief.delivery_anchor,
-      conversion_step: input.analysis.generation_brief.conversion_step,
-      boundary_to_establish: input.analysis.generation_brief.boundary_to_establish,
-      confidence: input.analysis.review_flags.confidence,
-      needs_human_attention: input.analysis.review_flags.needs_human_attention,
-    },
-    latest_message: {
-      japanese_text: shorten(input.latestMessage.japaneseText, 300),
-      chinese_translation: input.translation?.translation || input.latestMessage.chineseText || "",
-    },
-    generation_result: input.generation,
-    global_review_rules: {
-      critical_rules: [...strategy.criticalRules],
-      style_rules: [...strategy.styleRules],
-      risk_rules: [...strategy.riskRules],
-    },
+    sales_brain_playbook: salesBrainPlaybook,
+    rewrite_requirement: (input.rewriteInput || "").trim(),
   };
 }

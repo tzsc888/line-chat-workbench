@@ -89,8 +89,8 @@ async function executeInboundWorkflowJob(job: {
 
   await publishRealtimeRefresh({
     customerId: job.customerId,
-    reason: execution.workflowResult?.reusedExistingDraft ? "analysis-updated" : "automation-updated",
-    scopes: ["workspace", "list", "analysis"],
+    reason: execution.workflowResult?.reusedExistingDraft ? "generation-reused" : "generation-updated",
+    scopes: ["workspace", "list"],
   });
 
   if (execution.workflowResult?.reusedExistingDraft) {

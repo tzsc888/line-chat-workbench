@@ -33,10 +33,10 @@ test("pipeline status marks reused_existing_draft as reused (not succeeded)", ()
 
   const pipeline = map.get("m1");
   assert.ok(pipeline);
-  const suggestions = pipeline!.steps.find((step) => step.step === "suggestions");
-  assert.ok(suggestions);
-  assert.equal(suggestions!.status, "reused");
-  assert.equal(suggestions!.reason_code, PIPELINE_REASON_CODES.REUSED_EXISTING_DRAFT);
+  const generation = pipeline!.steps.find((step) => step.step === "generation");
+  assert.ok(generation);
+  assert.equal(generation!.status, "reused");
+  assert.equal(generation!.reason_code, PIPELINE_REASON_CODES.REUSED_EXISTING_DRAFT);
   assert.equal(pipeline!.steps.some((step) => String(step.step) === "review"), false);
 });
 

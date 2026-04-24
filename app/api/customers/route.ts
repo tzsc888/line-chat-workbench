@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { resolveFollowupView } from "@/lib/followup-rules";
 import { failExpiredOutboundTasks } from "@/lib/bridge-outbound";
@@ -39,9 +40,6 @@ const customerSelect = {
   unreadCount: true,
   lineRelationshipStatus: true,
   lineRefollowedAt: true,
-  aiCustomerInfo: true,
-  aiCurrentStrategy: true,
-  aiLastAnalyzedAt: true,
   lastMessageAt: true,
   lastInboundMessageAt: true,
   lastOutboundMessageAt: true,
@@ -51,7 +49,6 @@ const customerSelect = {
   nextFollowupBucket: true,
   followupReason: true,
   nextFollowupAt: true,
-  riskTags: true,
   updatedAt: true,
   tags: {
     select: {
@@ -79,9 +76,13 @@ const customerSelect = {
   },
 };
 
-function mapCustomer(customer: any, now: number) {
+type CustomerListRow = Prisma.CustomerGetPayload<{
+  select: typeof customerSelect;
+}>;
+
+function mapCustomer(customer: CustomerListRow, now: number) {
   const latestMessage = customer.messages[0] || null;
-  const tagNames = customer.tags.map((item: any) => item.tag.name);
+  const tagNames = customer.tags.map((item) => item.tag.name);
   const followup = resolveFollowupView({
     isVip: customer.isVip,
     stage: customer.stage,
@@ -114,11 +115,7 @@ function mapCustomer(customer: any, now: number) {
     unreadCount: customer.unreadCount,
     lineRelationshipStatus: customer.lineRelationshipStatus,
     lineRefollowedAt: customer.lineRefollowedAt,
-    aiCustomerInfo: customer.aiCustomerInfo,
-    aiCurrentStrategy: customer.aiCurrentStrategy,
-    aiLastAnalyzedAt: customer.aiLastAnalyzedAt,
     lastMessageAt: customer.lastMessageAt,
-    riskTags: customer.riskTags,
     followup: {
       bucket: followup.bucket,
       tier: followup.tier,
@@ -131,7 +128,7 @@ function mapCustomer(customer: any, now: number) {
         followup.state === "ACTIVE" &&
         followup.nextFollowupAt.getTime() <= now,
     },
-    tags: customer.tags.map((item: any) => ({
+    tags: customer.tags.map((item) => ({
       id: item.tag.id,
       name: item.tag.name,
       color: item.tag.color,
@@ -202,7 +199,7 @@ export async function GET(req: NextRequest) {
       },
     });
 
-    let customers: any[] = [];
+    let customers: CustomerListRow[] = [];
     let hasMore = false;
 
     if (keyword) {

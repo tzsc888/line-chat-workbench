@@ -57,9 +57,6 @@ test("bridge live text message pipeline closed-loop visibility", () => {
         targetCustomerMessageId: "msg-live-1",
         createdAt: now,
         updatedAt: now,
-        finalGateJson: "{\"can_show_to_human\":true}",
-        aiReviewJson: "{\"performed\":false}",
-        programChecksJson: "{\"passed\":true}",
       },
     ],
   }).get("msg-live-1");
@@ -69,12 +66,11 @@ test("bridge live text message pipeline closed-loop visibility", () => {
     pipeline!.steps.map((step) => [step.step, step.status]),
     [
       ["translation", "succeeded"],
-      ["analysis", "succeeded"],
-      ["suggestions", "succeeded"],
+      ["generation", "succeeded"],
     ],
   );
   assert.equal(
-    pipeline!.steps.some((step) => step.reason_code === "analysis_decided_no_reply"),
+    pipeline!.steps.some((step) => step.reason_code === "generation_not_needed"),
     false,
   );
 });

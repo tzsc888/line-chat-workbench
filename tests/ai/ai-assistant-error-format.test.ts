@@ -1,10 +1,10 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
-import { formatGenerateRepliesError } from "../../app/workbench/ai-assistant/hooks/use-ai-assistant";
+import { formatGenerateRepliesError } from "../../lib/ai/format-generate-replies-error";
 
-test("formatGenerateRepliesError should map generation_missing_chinese_meaning clearly", () => {
-  const message = formatGenerateRepliesError(new Error("generation_missing_chinese_meaning"));
-  assert.match(message, /Chinese explanation is missing/i);
+test("formatGenerateRepliesError should map translation_missing_reply_meaning clearly", () => {
+  const message = formatGenerateRepliesError(new Error("translation_missing_reply_meaning"));
+  assert.match(message, /translation is missing/i);
 });
 
 test("formatGenerateRepliesError should preserve explicit generation_empty_reply for fallback UI", () => {
@@ -38,3 +38,4 @@ test("formatGenerateRepliesError should map malformed JSON structured error clea
   });
   assert.match(message, /malformed JSON/i);
 });
+

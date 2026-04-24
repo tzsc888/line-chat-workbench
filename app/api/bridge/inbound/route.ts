@@ -21,6 +21,7 @@ import {
   normalizeBridgeThreadId,
   sanitizeBridgeDisplayName,
 } from "@/lib/bridge/identity";
+import { isLegacyEndpointEnabled, legacyEndpointDisabledResponse } from "@/lib/legacy-endpoint-toggle";
 
 type BridgePreviewCard = {
   url?: string;
@@ -249,6 +250,12 @@ async function upsertBridgeCustomer(params: {
 
 export async function POST(req: NextRequest) {
   try {
+    // Legacy bridge inbound entry: disabled by default to avoid accidental external push costs.
+    // To re-enable, set ENABLE_LEGACY_BRIDGE_INBOUND=true.
+    if (!isLegacyEndpointEnabled("ENABLE_LEGACY_BRIDGE_INBOUND")) {
+      return legacyEndpointDisabledResponse("bridge_inbound");
+    }
+
     if (!parseBridgeAuth(req)) {
       return NextResponse.json({ ok: false, error: "bridge auth failed" }, { status: 401 });
     }

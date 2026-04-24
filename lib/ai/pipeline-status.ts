@@ -1,4 +1,4 @@
-import { AutomationJobKind, AutomationJobStatus, MessageRole, MessageType } from "@prisma/client";
+﻿import { AutomationJobKind, AutomationJobStatus, MessageRole, MessageType } from "@prisma/client";
 import {
   PIPELINE_REASON_CODES,
   getPipelineReasonLabel,
@@ -6,7 +6,7 @@ import {
   type PipelineReasonCode,
 } from "@/lib/ai/pipeline-reason";
 
-export type PipelineStepKey = "translation" | "analysis" | "suggestions";
+export type PipelineStepKey = "translation" | "generation";
 export type PipelineStepStatus = "pending" | "succeeded" | "skipped" | "failed" | "reused";
 
 export type MessagePipelineStep = {
@@ -45,18 +45,11 @@ type PipelineDraft = {
   targetCustomerMessageId: string | null;
   createdAt: Date;
   updatedAt: Date;
-  finalGateJson: string | null;
-  aiReviewJson: string | null;
-  programChecksJson: string | null;
 };
 
 function iso(date: Date | null | undefined) {
   const value = date instanceof Date ? date : new Date();
   return value.toISOString();
-}
-
-function getJobKey(kind: AutomationJobKind) {
-  return kind;
 }
 
 function buildJobIndex(jobs: PipelineJob[]) {
@@ -116,8 +109,7 @@ function buildNonTextPipeline(message: PipelineMessage) {
     message_id: message.id,
     steps: [
       buildStep("translation", "skipped", PIPELINE_REASON_CODES.NON_TEXT_MESSAGE, message.updatedAt),
-      buildStep("analysis", "skipped", PIPELINE_REASON_CODES.NON_TEXT_MESSAGE, message.updatedAt),
-      buildStep("suggestions", "skipped", PIPELINE_REASON_CODES.NON_TEXT_MESSAGE, message.updatedAt),
+      buildStep("generation", "skipped", PIPELINE_REASON_CODES.NON_TEXT_MESSAGE, message.updatedAt),
     ],
   } satisfies MessagePipelineStatus;
 }
@@ -158,49 +150,34 @@ function buildTextPipeline(input: {
     translationStep = buildStep("translation", "succeeded", null, translationJob.updatedAt);
   }
 
-  let analysisStep: MessagePipelineStep;
+  let generationStep: MessagePipelineStep;
   if (!workflowJob) {
-    analysisStep = buildStep("analysis", "pending", PIPELINE_REASON_CODES.JOB_NOT_RUN_YET, message.updatedAt);
+    generationStep = buildStep("generation", "pending", PIPELINE_REASON_CODES.JOB_NOT_RUN_YET, message.updatedAt);
   } else if (workflowJob.status === AutomationJobStatus.PENDING || workflowJob.status === AutomationJobStatus.RUNNING) {
-    analysisStep = buildStep("analysis", "pending", PIPELINE_REASON_CODES.JOB_NOT_RUN_YET, workflowJob.updatedAt);
+    generationStep = buildStep("generation", "pending", PIPELINE_REASON_CODES.JOB_NOT_RUN_YET, workflowJob.updatedAt);
   } else if (workflowJob.status === AutomationJobStatus.FAILED) {
-    analysisStep = buildStep("analysis", "failed", PIPELINE_REASON_CODES.JOB_EXECUTION_ERROR, workflowJob.updatedAt, workflowJob.lastError || "");
+    generationStep = buildStep("generation", "failed", PIPELINE_REASON_CODES.JOB_EXECUTION_ERROR, workflowJob.updatedAt, workflowJob.lastError || "");
   } else if (workflowJob.status === AutomationJobStatus.SKIPPED) {
     if (workflowReasonCode === PIPELINE_REASON_CODES.REUSED_EXISTING_DRAFT) {
-      analysisStep = buildStep("analysis", "reused", workflowReasonCode, workflowJob.updatedAt);
+      generationStep = buildStep("generation", "reused", workflowReasonCode, workflowJob.updatedAt);
     } else {
-      analysisStep = buildStep(
-        "analysis",
+      generationStep = buildStep(
+        "generation",
         "skipped",
-        workflowReasonCode || PIPELINE_REASON_CODES.ANALYSIS_NOT_NEEDED,
+        workflowReasonCode || PIPELINE_REASON_CODES.GENERATION_NOT_NEEDED,
         workflowJob.updatedAt,
         workflowJob.lastError || "",
       );
     }
-  } else {
-    analysisStep = buildStep("analysis", "succeeded", null, workflowJob.updatedAt);
-  }
-
-  let suggestionsStep: MessagePipelineStep;
-  if (analysisStep.status === "pending") {
-    suggestionsStep = buildStep("suggestions", "pending", PIPELINE_REASON_CODES.JOB_NOT_RUN_YET, analysisStep.updated_at ? new Date(analysisStep.updated_at) : message.updatedAt);
-  } else if (analysisStep.status === "failed") {
-    suggestionsStep = buildStep("suggestions", "failed", PIPELINE_REASON_CODES.JOB_EXECUTION_ERROR, workflowJob?.updatedAt || message.updatedAt, workflowJob?.lastError || "");
-  } else if (analysisStep.reason_code === PIPELINE_REASON_CODES.ANALYSIS_DECIDED_NO_REPLY) {
-    suggestionsStep = buildStep("suggestions", "skipped", PIPELINE_REASON_CODES.ANALYSIS_DECIDED_NO_REPLY, workflowJob?.updatedAt || message.updatedAt);
-  } else if (analysisStep.reason_code === PIPELINE_REASON_CODES.REUSED_EXISTING_DRAFT) {
-    suggestionsStep = buildStep("suggestions", "reused", PIPELINE_REASON_CODES.REUSED_EXISTING_DRAFT, workflowJob?.updatedAt || message.updatedAt);
   } else if (draft) {
-    suggestionsStep = buildStep("suggestions", "succeeded", null, draft.updatedAt);
-  } else if (workflowJob?.status === AutomationJobStatus.DONE) {
-    suggestionsStep = buildStep("suggestions", "skipped", PIPELINE_REASON_CODES.ANALYSIS_NOT_NEEDED, workflowJob.updatedAt);
+    generationStep = buildStep("generation", "succeeded", null, draft.updatedAt);
   } else {
-    suggestionsStep = buildStep("suggestions", "pending", PIPELINE_REASON_CODES.JOB_NOT_RUN_YET, workflowJob?.updatedAt || message.updatedAt);
+    generationStep = buildStep("generation", "succeeded", null, workflowJob.updatedAt);
   }
 
   return {
     message_id: message.id,
-    steps: [translationStep, analysisStep, suggestionsStep],
+    steps: [translationStep, generationStep],
   } satisfies MessagePipelineStatus;
 }
 
@@ -221,9 +198,10 @@ export function buildMessagePipelineStatuses(input: {
     }
 
     const byKind = jobIndex.get(message.id) || new Map<AutomationJobKind, PipelineJob>();
-    const translationJob = byKind.get(getJobKey(AutomationJobKind.INBOUND_TRANSLATION)) || null;
-    const workflowJob = byKind.get(getJobKey(AutomationJobKind.INBOUND_WORKFLOW)) || null;
+    const translationJob = byKind.get(AutomationJobKind.INBOUND_TRANSLATION) || null;
+    const workflowJob = byKind.get(AutomationJobKind.INBOUND_WORKFLOW) || null;
     const draft = draftIndex.get(message.id) || null;
+
     pipelines.set(
       message.id,
       buildTextPipeline({
@@ -237,3 +215,4 @@ export function buildMessagePipelineStatuses(input: {
 
   return pipelines;
 }
+

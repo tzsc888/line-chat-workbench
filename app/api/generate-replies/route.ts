@@ -24,13 +24,24 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseErrorDetailsJson(value: string | null) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(req: NextRequest) {
+  const requestStartedAt = Date.now();
   try {
     const body = await req.json();
     const customerId = String(body.customerId || "").trim();
     if (!customerId) {
       return NextResponse.json({ ok: false, error: "missing customerId" }, { status: 400 });
     }
+    console.info(`[generate-replies] api started customer=${customerId}`);
 
     const task = await createGenerationTask({
       customerId,
@@ -55,6 +66,12 @@ export async function POST(req: NextRequest) {
       if (latest.status === "SUCCEEDED") {
         const workflowResult =
           execution && "workflowResult" in execution ? (execution.workflowResult as Record<string, unknown>) : {};
+        console.info(
+          `[generate-replies] api succeeded customer=${customerId} task=${latest.id} total_elapsed_ms=${Math.max(
+            0,
+            Date.now() - requestStartedAt,
+          )}`,
+        );
         return NextResponse.json({
           ok: true,
           taskId: latest.id,
@@ -66,12 +83,22 @@ export async function POST(req: NextRequest) {
           suggestion2Zh: String(workflowResult?.suggestion2Zh || ""),
           draftSetId: String(workflowResult?.draftSetId || ""),
           reusedExistingDraft: Boolean(workflowResult?.reusedExistingDraft),
+          translationStatus: String(workflowResult?.translationStatus || "succeeded"),
+          translationErrorCode: String(workflowResult?.translationErrorCode || ""),
+          translationErrorMessage: String(workflowResult?.translationErrorMessage || ""),
           line: String(workflowResult?.line || ""),
           model: String(workflowResult?.model || ""),
         });
       }
 
       if (latest.status === "FAILED") {
+        const details = parseErrorDetailsJson(latest.errorDetailsJson);
+        console.error(
+          `[generate-replies] api failed customer=${customerId} task=${latest.id} code=${latest.errorCode || ""} stage=${latest.stage} total_elapsed_ms=${Math.max(
+            0,
+            Date.now() - requestStartedAt,
+          )}`,
+        );
         return NextResponse.json(
           {
             ok: false,
@@ -80,6 +107,13 @@ export async function POST(req: NextRequest) {
             stage: latest.stage,
             error: latest.errorMessage || "generation_task_failed",
             errorCode: latest.errorCode || "",
+            failureReason: String(details?.failure_reason || ""),
+            parsePhase: String(details?.parse_phase || ""),
+            retryable: Boolean(details?.retryable),
+            elapsedMs:
+              Number(details?.elapsed_ms || details?.total_elapsed_ms || 0) > 0
+                ? Number(details?.elapsed_ms || details?.total_elapsed_ms || 0)
+                : 0,
           },
           { status: 502 },
         );
@@ -100,6 +134,12 @@ export async function POST(req: NextRequest) {
     }
 
     kickoffGenerationTask(task.id);
+    console.info(
+      `[generate-replies] api switched-to-background customer=${customerId} task=${task.id} total_elapsed_ms=${Math.max(
+        0,
+        Date.now() - requestStartedAt,
+      )}`,
+    );
     return NextResponse.json(
       {
         ok: true,

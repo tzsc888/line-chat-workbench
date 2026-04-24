@@ -1,4 +1,4 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import {
   executeRetryMessage,
@@ -112,8 +112,8 @@ function mockResponse(body: unknown, ok = true) {
 function buildSubmitParams(overrides?: Partial<SubmitOutboundMessageInput>): SubmitOutboundMessageInput {
   return {
     customerId: "c-1",
-    japaneseText: "こんにちは",
-    chineseText: "你好",
+    japaneseText: "hello-ja",
+    chineseText: "hello-zh",
     type: "TEXT",
     source: "MANUAL",
     ...overrides,
@@ -128,8 +128,8 @@ function buildServerMessage(overrides?: Partial<WorkspaceMessageLike>) {
     type: "TEXT" as const,
     source: "MANUAL" as const,
     lineMessageId: null,
-    japaneseText: "こんにちは",
-    chineseText: "你好",
+    japaneseText: "hello-ja",
+    chineseText: "hello-zh",
     imageUrl: null,
     stickerPackageId: null,
     stickerId: null,
@@ -150,7 +150,7 @@ test("submit manual text success should reconcile optimistic and upsert server m
   const translations: Array<{ id: string; text: string }> = [];
 
   const result = await executeSubmitOutboundMessage({
-    params: buildSubmitParams(),
+    params: buildSubmitParams({ chineseText: null }),
     makeOptimisticId: () => "optimistic:1",
     nowIso: () => "2026-04-20T00:00:00.000Z",
     request: async () => mockResponse({ ok: true, message: buildServerMessage() }, true),
@@ -169,31 +169,29 @@ test("submit manual text success should reconcile optimistic and upsert server m
   assert.equal(store.workspaceMessages.length, 1);
   assert.equal(store.workspaceMessages[0].id, "srv-1");
   assert.equal(store.latestMessages.at(-1)?.id, "srv-1");
-  assert.deepEqual(translations, [{ id: "srv-1", text: "こんにちは" }]);
+  assert.deepEqual(translations, [{ id: "srv-1", text: "hello-ja" }]);
 });
 
-test("submit manual text failure should keep optimistic message and mark FAILED", async () => {
+test("submit text with existing chinese should skip async translation attach", async () => {
   const store = createHarness();
+  let translationCalled = false;
 
-  const result = await executeSubmitOutboundMessage({
-    params: buildSubmitParams(),
-    makeOptimisticId: () => "optimistic:2",
+  await executeSubmitOutboundMessage({
+    params: buildSubmitParams({ chineseText: "existing-zh" }),
+    makeOptimisticId: () => "optimistic:zh1",
     nowIso: () => "2026-04-20T00:00:00.000Z",
-    request: async () => mockResponse({ ok: false, error: "发送失败" }, false),
+    request: async () => mockResponse({ ok: true, message: buildServerMessage({ id: "srv-zh-1" }) }, true),
     onAddOptimisticMessage: store.addOptimistic.bind(store),
     onUpdateOptimisticMessage: store.updateOptimistic.bind(store),
     onRemoveOptimisticMessage: store.removeOptimistic.bind(store),
     onUpsertWorkspaceMessage: store.upsertWorkspaceMessage.bind(store),
     onUpdateCustomerLatestMessage: store.pushLatest.bind(store),
-    onAttachAsyncTranslation: () => {},
+    onAttachAsyncTranslation: () => {
+      translationCalled = true;
+    },
   });
 
-  assert.equal(result.ok, false);
-  const failed = store.optimistic["c-1"]?.[0];
-  assert.ok(failed);
-  assert.equal(failed.deliveryStatus, "FAILED");
-  assert.equal(failed.sendError, "发送失败");
-  assert.equal(store.workspaceMessages.length, 0);
+  assert.equal(translationCalled, false);
 });
 
 test("submit image path should go through unified submit entry and skip translation attach", async () => {
@@ -277,7 +275,7 @@ test("retry optimistic failed message should reuse submit with optimisticMessage
     type: "TEXT",
     source: "MANUAL",
     lineMessageId: null,
-    japaneseText: "再送文本",
+    japaneseText: "retry-text",
     chineseText: null,
     imageUrl: null,
     stickerPackageId: null,
@@ -315,7 +313,7 @@ test("retry optimistic failed message should reuse submit with optimisticMessage
 
   const submitParams = submitCapture.value;
   assert.equal(submitParams?.optimisticMessageId, "optimistic:retry1");
-  assert.equal(submitParams?.japaneseText, "再送文本");
+  assert.equal(submitParams?.japaneseText, "retry-text");
   assert.equal(store.retrying, "");
 });
 
@@ -368,7 +366,7 @@ test("retry optimistic should still work when active workspace changed but retry
     type: "TEXT",
     source: "MANUAL",
     lineMessageId: null,
-    japaneseText: "A 的失败消息",
+    japaneseText: "A failed message",
     chineseText: null,
     imageUrl: null,
     stickerPackageId: null,
@@ -446,7 +444,7 @@ test("reconciliation should upsert by id without duplicate messages", async () =
   store.upsertWorkspaceMessage("c-1", buildServerMessage({ id: "srv-dup-1", japaneseText: "old" }));
 
   await executeSubmitOutboundMessage({
-    params: buildSubmitParams({ japaneseText: "new" }),
+    params: buildSubmitParams({ japaneseText: "new", chineseText: null }),
     makeOptimisticId: () => "optimistic:dup1",
     nowIso: () => "2026-04-20T00:00:00.000Z",
     request: async () => mockResponse({

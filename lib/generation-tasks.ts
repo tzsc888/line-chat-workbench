@@ -6,6 +6,7 @@
 } from "@prisma/client";
 import { isAiStructuredOutputError } from "@/lib/ai/model-client";
 import { prisma } from "@/lib/prisma";
+import { GenerateRepliesStageError } from "@/lib/services/generate-replies-workflow-core";
 import { generateRepliesWorkflow } from "@/lib/services/generate-replies-workflow";
 
 const localKickoffInFlight = new Set<string>();
@@ -52,6 +53,10 @@ function compactErrorMessage(input: unknown, max = 500) {
 
 function compactDetails(details: string[], max = 10, itemMax = 300) {
   return details.slice(0, max).map((item) => String(item || "").slice(0, itemMax));
+}
+
+function safeSnippet(value: unknown, max = 700) {
+  return String(value || "").replace(/\s+/g, " ").slice(0, max);
 }
 
 function toSerializableTask(task: GenerationTask): SerializableTask {
@@ -196,14 +201,53 @@ async function recoverStaleRunningTasks(limit = 20) {
 }
 
 function normalizeTaskError(error: unknown) {
-  if (isAiStructuredOutputError(error)) {
+  if (error instanceof GenerateRepliesStageError) {
     return {
       code: error.code,
       message: compactErrorMessage(error),
-      stage: error.stage || "generation",
+      stage: error.stage,
       details: {
+        elapsed_ms: error.elapsedMs,
+        ...(error.details || {}),
+      },
+      retryable: error.retryable,
+    };
+  }
+
+  if (isAiStructuredOutputError(error)) {
+    const stage = error.stage === "reply_translation" ? "translation" : "generation";
+    const isTimeout = error.code === "MODEL_TIMEOUT";
+    return {
+      code: isTimeout ? `${stage}_structured_timeout` : `${stage}_structured_failed`,
+      message: compactErrorMessage(error),
+      stage,
+      details: {
+        structured_error_code: error.code,
         mode: error.mode,
         status: error.status,
+        failure_reason: error.failureReason,
+        parse_phase: error.parsePhase,
+        provider_elapsed_ms: error.providerElapsedMs,
+        timeout_ms: error.timeoutMs,
+        retryable: error.retryable,
+        provider_role: error.providerRole,
+        provider_attempt: error.attempt,
+        provider_max_attempts: error.maxAttempts,
+        content_type: error.contentType,
+        final_url_host_and_path: error.finalUrlHostAndPath,
+        response_format_sent: error.responseFormatSent,
+        stream_sent: error.streamSent,
+        fetch_error_name: error.fetchErrorName,
+        fetch_error_message: error.fetchErrorMessage,
+        fetch_cause_name: error.fetchCauseName,
+        fetch_cause_code: error.fetchCauseCode,
+        fetch_cause_message: error.fetchCauseMessage,
+        upstream_body_snippet: safeSnippet(error.upstreamBodySnippet || error.snippet || "", 700),
+        model_content_snippet: safeSnippet(error.modelContentSnippet || "", 700),
+        top_level_keys: error.topLevelKeys,
+        choices_length: error.choicesLength,
+        sse_event_count: error.sseEventCount,
+        assembled_content_length: error.assembledContentLength,
         details: compactDetails(error.details || []),
       },
       retryable: error.code === "MODEL_TIMEOUT" || error.code === "MODEL_HTTP_ERROR",
@@ -211,16 +255,18 @@ function normalizeTaskError(error: unknown) {
   }
 
   const message = compactErrorMessage(error);
-  const generationStageError =
+  const nonRetryableStageError =
     message === "generation_missing_japanese_reply" ||
-    message === "generation_missing_chinese_meaning";
+    message === "translation_missing_reply_meaning";
+  const nonRetryableStage =
+    message === "translation_missing_reply_meaning" ? "translation" : "generation";
 
   return {
-    code: generationStageError ? message : "WORKFLOW_ERROR",
+    code: nonRetryableStageError ? message : "WORKFLOW_ERROR",
     message,
-    stage: generationStageError ? "generation" : "workflow",
+    stage: nonRetryableStageError ? nonRetryableStage : "workflow",
     details: null,
-    retryable: !generationStageError,
+    retryable: !nonRetryableStageError,
   };
 }
 
@@ -365,6 +411,7 @@ export async function processSpecificGenerationTask(taskId: string) {
   if (!task) return { ok: false, skipped: true as const, reason: "task-not-found" };
 
   const stopHeartbeat = startTaskHeartbeat(task.id);
+  const workflowStartedAt = Date.now();
   try {
     await prisma.generationTask.update({
       where: { id: task.id },
@@ -381,12 +428,26 @@ export async function processSpecificGenerationTask(taskId: string) {
       publishRefresh: true,
       triggerSource: task.triggerSource,
     });
+    const translationStatus = String((result as { translationStatus?: string } | null)?.translationStatus || "").trim();
+    const translationFailed = translationStatus === "failed";
+    const translationErrorCode = String((result as { translationErrorCode?: string } | null)?.translationErrorCode || "").trim() || null;
+    const translationErrorMessage =
+      String((result as { translationErrorMessage?: string } | null)?.translationErrorMessage || "").trim() || null;
 
     await prisma.generationTask.update({
       where: { id: task.id },
       data: {
         status: GenerationTaskStatus.SUCCEEDED,
-        stage: "completed",
+        stage: translationFailed ? "completed-with-translation-failure" : "completed",
+        errorCode: translationFailed ? translationErrorCode : null,
+        errorMessage: translationFailed ? translationErrorMessage : null,
+        errorDetailsJson: translationFailed
+          ? JSON.stringify({
+              translationStatus: "failed",
+              translationErrorCode,
+              translationErrorMessage,
+            })
+          : null,
         resultDraftSetId: String((result as { draftSetId?: string } | null)?.draftSetId || "").trim() || null,
         nextRetryAt: null,
         leaseExpiresAt: null,
@@ -401,8 +462,18 @@ export async function processSpecificGenerationTask(taskId: string) {
       workflowResult: result,
     };
   } catch (error) {
+    const totalElapsedMs = Math.max(0, Date.now() - workflowStartedAt);
     const normalized = normalizeTaskError(error);
     const canRetry = task.attemptCount < task.maxAttempts && normalized.retryable;
+    console.error(
+      `[generate-replies] failed customer=${task.customerId} task=${task.id} code=${normalized.code} stage=${normalized.stage} total_elapsed_ms=${totalElapsedMs} retryable=${canRetry}`,
+    );
+    if (normalized.stage === "generation" && normalized.details && typeof normalized.details === "object") {
+      const details = normalized.details as Record<string, unknown>;
+      console.error(
+        `[ai-generation-failure-summary] code=${normalized.code} causeCode=${String(details.structured_error_code || "")} failureReason=${String(details.failure_reason || "")} parsePhase=${String(details.parse_phase || "")} elapsedMs=${String(details.elapsed_ms || totalElapsedMs)} providerElapsedMs=${String(details.provider_elapsed_ms || "")} retryable=${String(details.retryable || "")} providerRole=${String(details.provider_role || "")} providerAttempt=${String(details.provider_attempt || "")}/${String(details.provider_max_attempts || "")} httpStatus=${String(details.status || details.structured_status || "")} contentType=${String(details.content_type || "")} finalUrlHostAndPath=${String(details.final_url_host_and_path || "")} responseFormatSent=${String(details.response_format_sent || "")} streamSent=${String(details.stream_sent || "")} fetchErrorName=${String(details.fetch_error_name || "")} fetchCauseCode=${String(details.fetch_cause_code || "")} bodySnippet=${safeSnippet(details.upstream_body_snippet || "", 700)} modelContentSnippet=${safeSnippet(details.model_content_snippet || "", 700)}`,
+      );
+    }
 
     await prisma.generationTask.update({
       where: { id: task.id },
@@ -411,7 +482,12 @@ export async function processSpecificGenerationTask(taskId: string) {
         stage: canRetry ? "retry-scheduled" : "failed",
         errorCode: normalized.code,
         errorMessage: normalized.message,
-        errorDetailsJson: normalized.details ? JSON.stringify(normalized.details) : null,
+        errorDetailsJson: JSON.stringify({
+          failed_stage: normalized.stage,
+          failed_code: normalized.code,
+          total_elapsed_ms: totalElapsedMs,
+          ...(normalized.details || {}),
+        }),
         nextRetryAt: canRetry ? buildRetryAt(task.attemptCount) : null,
         leaseExpiresAt: null,
         finishedAt: canRetry ? null : new Date(),

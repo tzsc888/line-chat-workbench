@@ -12,5 +12,5 @@ export const translationPrompt = {
 5. 如果原文有歧义，要明确标出来。
 6. 只输出 JSON，不要输出任何其他文字。
 
-输出 JSON 顶层键名必须是：translation、tone_notes、ambiguity_notes、attention_points。`,
+输出 JSON 顶层键名必须是：translation。`,
 } as const;

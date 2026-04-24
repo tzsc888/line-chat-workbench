@@ -59,9 +59,6 @@ export type ContextMessage = {
 
 export type TranslationResult = {
   translation: string;
-  tone_notes: string;
-  ambiguity_notes: string;
-  attention_points: string[];
 };
 
 export type AnalysisResult = {
@@ -208,8 +205,6 @@ export type AnalysisContextPack = {
     message_id: string;
     japanese_text: string;
     chinese_translation: string;
-    tone_notes: string;
-    ambiguity_notes: string;
   };
   recent_context: Array<{
     role: "customer_or_staff";
@@ -246,7 +241,6 @@ export type GenerationContextPack = {
   latest_message: {
     japanese_text: string;
     chinese_translation: string;
-    tone_notes: string;
   };
   recent_context: Array<{
     role: "customer_or_staff";

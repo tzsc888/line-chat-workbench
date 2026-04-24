@@ -187,7 +187,8 @@ export async function executeSubmitOutboundMessage(input: SubmitExecutorInput) {
       input.onUpsertWorkspaceMessage(params.customerId, serverMessage);
       input.onUpdateCustomerLatestMessage(params.customerId, serverMessage);
       input.onRemoveOptimisticMessage(params.customerId, optimisticId);
-      if (params.type === "TEXT") {
+      const hasProvidedChinese = typeof params.chineseText === "string" && !!params.chineseText.trim();
+      if (params.type === "TEXT" && !hasProvidedChinese) {
         input.onAttachAsyncTranslation(serverMessage.id, params.japaneseText);
       }
     }

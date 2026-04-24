@@ -1,13 +1,10 @@
-import { prisma } from "@/lib/prisma";
+﻿import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
-import { buildAnalysisContext, buildGenerationContext } from "@/lib/ai/context-builder";
-import { runAnalysisRouter } from "@/lib/ai/analysis-router-service";
+import { buildMainBrainGenerationContext } from "@/lib/ai/context-builder";
 import { runReplyGeneration } from "@/lib/ai/reply-generation-service";
-import { applyAnalysisStateToCustomer } from "@/lib/ai/state-merge-service";
-import { translateCustomerJapaneseMessage } from "@/lib/ai/translation-service";
+import { translateCustomerJapaneseMessage, translateGeneratedReplies } from "@/lib/ai/translation-service";
 import { saveDraftBundle } from "@/lib/ai/draft-metadata-service";
 import { shouldReuseExistingDraft } from "@/lib/ai/workflow-policy";
-import { getActiveAiStrategyVersion } from "@/lib/ai/strategy";
 import {
   executeGenerateRepliesWorkflow,
   type GenerateRepliesWorkflowInput,
@@ -21,11 +18,10 @@ const runtimeDeps: GenerateRepliesWorkflowDeps = {
     (await prisma.customer.findUnique({
       where: { id: customerId },
       include: {
-        tags: { include: { tag: true } },
-        messages: { orderBy: { sentAt: "desc" }, take: 40 },
+        messages: { orderBy: [{ sentAt: "desc" }, { id: "desc" }], take: 120 },
         replyDraftSets: { orderBy: { createdAt: "desc" }, take: 1 },
       },
-    })) as any,
+    })) as NonNullable<Awaited<ReturnType<GenerateRepliesWorkflowDeps["findCustomerById"]>>>,
   updateMessageChineseText: async (messageId, chineseText) => {
     await prisma.message.update({
       where: { id: messageId },
@@ -33,17 +29,16 @@ const runtimeDeps: GenerateRepliesWorkflowDeps = {
     });
   },
   publishRealtimeRefresh,
-  buildAnalysisContext: (input) => buildAnalysisContext(input as any) as any,
-  buildGenerationContext: (input) => buildGenerationContext(input as any) as any,
-  runAnalysisRouter: (context) => runAnalysisRouter(context as any) as any,
-  runReplyGeneration: (context) => runReplyGeneration(context as any) as any,
-  applyAnalysisStateToCustomer: (input) => applyAnalysisStateToCustomer(input as any),
+  buildMainBrainGenerationContext: (input) =>
+    buildMainBrainGenerationContext(input as Parameters<typeof buildMainBrainGenerationContext>[0]),
+  runReplyGeneration: (context) => runReplyGeneration(context),
   translateCustomerJapaneseMessage,
-  saveDraftBundle: (input) => saveDraftBundle(input as any),
+  translateGeneratedReplies,
+  saveDraftBundle: (input) => saveDraftBundle(input as Parameters<typeof saveDraftBundle>[0]),
   shouldReuseExistingDraft,
-  getActiveAiStrategyVersion,
 };
 
 export async function generateRepliesWorkflow(input: GenerateRepliesWorkflowInput) {
   return executeGenerateRepliesWorkflow(input, runtimeDeps);
 }
+

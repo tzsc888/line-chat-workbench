@@ -1,47 +1,81 @@
-import type { BuyerLanguage, ContextMessage, DeliveryContext, IndustryStage } from "../ai/ai-types";
+﻿import type { BuyerLanguage, ContextMessage, DeliveryContext, IndustryStage } from "../ai/ai-types";
 import { buyerLanguageGuide } from "./buyer-language";
 import { postFreeConversionRule } from "./conversion";
 import { intakeReceptionRule } from "./reception";
 import { postFirstOrderRetentionRule } from "./retention";
 
-const MAX_SUMMARY = 260;
-
 function normalize(text: string) {
   return text.replace(/\s+/g, " ").trim();
 }
 
-function shorten(text: string, max = MAX_SUMMARY) {
-  const value = normalize(text);
-  if (value.length <= max) return value;
-  return `${value.slice(0, max - 1)}…`;
+function toMs(value: Date | string | undefined) {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
 }
 
-function guessCoreTheme(text: string) {
-  const raw = normalize(text);
-  if (!raw) return null;
-  const themePatterns: Array<[RegExp, string]> = [
-    [/(生活の不安|金の流れ|お金|金運|生活|受け取れなさ)/, "生活・金钱不安"],
-    [/(相手の気持ち|彼の気持ち|彼どう|関係|ご縁|縁|復縁|恋愛)/, "关系/对方想法"],
-    [/(どう動く|どうしたら|行動|次の一歩|今動くべき|主導)/, "行动判断"],
-    [/(時期|タイミング|流れ|いつ|近いうち)/, "时期/走势"],
-    [/(浄化|ヒーリング|波動|エネルギー|守護|天使)/, "净化/灵性状态"],
-  ];
-  for (const [pattern, label] of themePatterns) {
-    if (pattern.test(raw)) return label;
-  }
-  const quoted = raw.match(/[「『](.{1,18})[」』]/);
-  return quoted?.[1] || null;
+function extractQuotedOptions(text: string) {
+  const result = [...text.matchAll(/[「『“\"]([^「」『』“”\"\n]{1,24})[」』”\"]/g)]
+    .map((match) => normalize(match[1]))
+    .filter(Boolean);
+  return Array.from(new Set(result));
 }
 
 function extractCtaOptions(text: string) {
-  const matches = [...text.matchAll(/[「『]([^「」『』\n]{1,18})[」』]/g)].map((match) => normalize(match[1]));
-  return Array.from(new Set(matches)).filter(Boolean).slice(0, 4);
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const ctaCueIndex = lines.findLastIndex((line) =>
+    /(この中から|1つだけ|ひとつだけ|送ってください|選んでください|近いもの)/.test(line),
+  );
+
+  if (ctaCueIndex >= 0) {
+    const ctaTailLines: string[] = [];
+    for (const line of lines.slice(ctaCueIndex + 1, Math.min(lines.length, ctaCueIndex + 30))) {
+      if (/^(P\.?S\.?|追伸)/i.test(line)) break;
+      ctaTailLines.push(line);
+    }
+    const tailBlock = ctaTailLines.join("\n");
+    const tailOptions = extractQuotedOptions(tailBlock).slice(0, 8);
+    if (tailOptions.length >= 2) {
+      return tailOptions;
+    }
+  }
+
+  const allQuoted = extractQuotedOptions(text);
+  return allQuoted.slice(-8);
 }
 
-function inferCtaType(text: string, ctaOptions: string[], hasPurchased: boolean): DeliveryContext["ctaType"] {
-  if (ctaOptions.length > 0) return "TOPIC_REPLY";
-  if (/個別希望|詳しく希望|深く視てほしい/.test(text)) return "INDIVIDUAL_REQUEST";
-  return hasPurchased ? "NONE" : "NONE";
+function findLatestOperatorLongText(messages: ContextMessage[], latestMessageId: string) {
+  const ordered = [...messages].sort((a, b) => (toMs(a.sentAt) || 0) - (toMs(b.sentAt) || 0));
+  const latestIndex = ordered.findIndex((item) => item.id === latestMessageId);
+  const pool = latestIndex >= 0 ? ordered.slice(0, latestIndex).reverse() : ordered.reverse();
+  return (
+    pool.find((item) => item.role === "OPERATOR" && item.type === "TEXT" && normalize(item.japaneseText).length >= 80) ||
+    pool.find((item) => item.role === "OPERATOR" && item.type === "TEXT" && normalize(item.japaneseText).length > 0) ||
+    null
+  );
+}
+
+function hasOperatorTextBeforeLatest(messages: ContextMessage[], latestMessageId: string) {
+  const ordered = [...messages].sort((a, b) => (toMs(a.sentAt) || 0) - (toMs(b.sentAt) || 0));
+  const latestIndex = ordered.findIndex((item) => item.id === latestMessageId);
+  const pool = latestIndex >= 0 ? ordered.slice(0, latestIndex) : ordered;
+  return pool.some((item) => item.role === "OPERATOR" && item.type === "TEXT" && normalize(item.japaneseText).length > 0);
+}
+
+function detectExplicitObjection(text: string) {
+  const value = normalize(text);
+  if (!value) return false;
+  return /(高い|高額|予算|迷う|不安|疑問|信用|本当|効果|意味ある|どうして)/i.test(value);
+}
+
+function detectExplicitRejection(text: string) {
+  const value = normalize(text);
+  if (!value) return false;
+  return /(いらない|不要|結構です|やめます|やめとく|しない|無理|興味ない|必要ない)/i.test(value);
 }
 
 export function buildDeliveryContextFromMessages(input: {
@@ -49,15 +83,10 @@ export function buildDeliveryContextFromMessages(input: {
   recentMessages: ContextMessage[];
   customerStage: string;
 }): DeliveryContext {
-  const { latestMessage, recentMessages, customerStage } = input;
-  const hasPurchased = customerStage === "PAID" || customerStage === "AFTER_SALES";
-  const ordered = [...recentMessages].sort((a, b) => new Date(a.sentAt || 0).getTime() - new Date(b.sentAt || 0).getTime());
-  const latestIndex = ordered.findIndex((message) => message.id === latestMessage.id);
-  const searchPool = latestIndex >= 0 ? ordered.slice(0, latestIndex).reverse() : [...ordered].reverse();
-  const priorOperatorMessages = searchPool.filter((message) => message.role === "OPERATOR" && message.type === "TEXT" && normalize(message.japaneseText));
-  const readingLike = priorOperatorMessages.find((message) => normalize(message.japaneseText).length >= 80) || priorOperatorMessages[0] || null;
+  const hasPurchased = input.customerStage === "PAID" || input.customerStage === "AFTER_SALES";
+  const longMessage = findLatestOperatorLongText(input.recentMessages, input.latestMessage.id);
 
-  if (!readingLike) {
+  if (!longMessage) {
     return {
       deliveryType: null,
       summary: "",
@@ -69,22 +98,19 @@ export function buildDeliveryContextFromMessages(input: {
     };
   }
 
-  const rawText = readingLike.japaneseText || "";
-  const ctaOptions = extractCtaOptions(rawText);
-  const summary = shorten(rawText);
-  const coreTheme = guessCoreTheme(rawText);
-  const boundaryReminder = hasPurchased
-    ? "前一次正式交付已经完成，本轮重点是沿着交付后的变化、节点或下一步行动继续承接，不重复整篇鉴定内容。"
-    : "前一次免费交付已经给出整体趋势，本轮承接不能继续免费讲深，真正的根、切れ目、反复模式与时机应引导到个别深度鉴定。";
+  const fullText = longMessage.japaneseText || "";
+  const ctaOptions = extractCtaOptions(fullText);
 
   return {
     deliveryType: hasPurchased ? "FIRST_ORDER_READING" : "FREE_READING",
-    summary,
-    coreTheme,
-    ctaType: inferCtaType(rawText, ctaOptions, hasPurchased),
+    summary: fullText,
+    coreTheme: ctaOptions[0] || null,
+    ctaType: ctaOptions.length > 0 ? "TOPIC_REPLY" : "NONE",
     ctaOptions,
-    alreadySaid: [shorten(rawText, 140)],
-    boundaryReminder,
+    alreadySaid: [fullText],
+    boundaryReminder: hasPurchased
+      ? "Customer already paid previously. Focus on continuation and next action, avoid restarting from cold pitch."
+      : "There was already a free reading. Do not repeat a second full free reading.",
   };
 }
 
@@ -94,11 +120,10 @@ export function deriveIndustryStage(input: {
   latestMessage: ContextMessage;
   deliveryContext: DeliveryContext;
 }): IndustryStage {
-  const { customerStage, deliveryContext } = input;
-  if (customerStage === "PAID" || customerStage === "AFTER_SALES") {
+  if (input.customerStage === "PAID" || input.customerStage === "AFTER_SALES") {
     return "POST_FIRST_ORDER_RETENTION";
   }
-  if (deliveryContext.deliveryType === "FREE_READING") {
+  if (input.deliveryContext.deliveryType === "FREE_READING") {
     return "POST_FREE_READING_CONVERSION";
   }
   return "INTAKE_RECEPTION";
@@ -112,30 +137,23 @@ export function getIndustryStageSummary(stage: IndustryStage) {
         allowedActions: [...intakeReceptionRule.allowedActions],
         forbiddenActions: [...intakeReceptionRule.forbiddenActions],
         styleNotes: [...intakeReceptionRule.styleNotes],
-        routeBias: ["JUST_HOLD", "LIGHT_HOLD"],
+        routeBias: ["LIGHT_HOLD"],
       };
     case "POST_FREE_READING_CONVERSION":
       return {
         goal: postFreeConversionRule.goal,
         allowedActions: [...postFreeConversionRule.allowedActions],
         forbiddenActions: [...postFreeConversionRule.forbiddenActions],
-        styleNotes: [
-          "按三步承接推进",
-          "先顺着她，再半步命中，再立边界",
-          "仍然要像LINE聊天，不像正式文",
-        ],
-        routeBias: ["LIGHT_HOLD", "STEADY_PUSH", "OBJECTION_HANDLING"],
+        styleNotes: [...postFreeConversionRule.ctaGuidance],
+        routeBias: ["STEADY_PUSH"],
       };
     case "POST_FIRST_ORDER_RETENTION":
       return {
         goal: postFirstOrderRetentionRule.goal,
         allowedActions: [...postFirstOrderRetentionRule.allowedActions],
         forbiddenActions: [...postFirstOrderRetentionRule.forbiddenActions],
-        styleNotes: [
-          ...postFirstOrderRetentionRule.cadence,
-          "低压但有经营感",
-        ],
-        routeBias: ["POST_PURCHASE_CARE", "LIGHT_HOLD"],
+        styleNotes: [...postFirstOrderRetentionRule.cadence],
+        routeBias: ["POST_PURCHASE_CARE"],
       };
   }
 }
@@ -158,7 +176,69 @@ export function getIndustryRulePack(stage: IndustryStage, buyerLanguage: BuyerLa
     stepRules,
     buyerLanguageSignal: buyer.signal,
     buyerLanguageProductDirection: buyer.productDirection,
-    mustHave:
-      stage === "POST_FREE_READING_CONVERSION" ? [...postFreeConversionRule.mustHave] : [],
+    mustHave: stage === "POST_FREE_READING_CONVERSION" ? [...postFreeConversionRule.mustHave] : [],
   };
 }
+
+export function deriveObjectiveSalesFacts(input: {
+  latestMessage: ContextMessage;
+  recentMessages: ContextMessage[];
+  customerStage: string;
+  currentCustomerTurn?: {
+    joinedText: string;
+    firstMessageId: string | null;
+  };
+}) {
+  const hasPaidOrder = input.customerStage === "PAID" || input.customerStage === "AFTER_SALES";
+  const keyOperatorLongMessage = findLatestOperatorLongText(input.recentMessages, input.latestMessage.id);
+  const ctaOptions = keyOperatorLongMessage ? extractCtaOptions(keyOperatorLongMessage.japaneseText || "") : [];
+  const turnText = String(input.currentCustomerTurn?.joinedText || input.latestMessage.japaneseText || "");
+  const selectedCtaOption = ctaOptions.find((option) => turnText.includes(option)) || null;
+  const hasOperatorBeforeLatest = hasOperatorTextBeforeLatest(input.recentMessages, input.latestMessage.id);
+
+  const latestMs = toMs(input.latestMessage.sentAt) || Date.now();
+  const keyLongMs = toMs(keyOperatorLongMessage?.sentAt);
+
+  const isReplyToFreeReading = !hasPaidOrder && !!keyOperatorLongMessage;
+  const customerTextsAfterKey = keyOperatorLongMessage
+    ? [...input.recentMessages]
+        .filter((item) => item.role === "CUSTOMER" && item.type === "TEXT" && (toMs(item.sentAt) || 0) > (keyLongMs || 0))
+        .sort((a, b) => (toMs(a.sentAt) || 0) - (toMs(b.sentAt) || 0))
+    : [];
+  const firstValidCustomerTurnAfterFreeReading =
+    isReplyToFreeReading &&
+    customerTextsAfterKey.length > 0 &&
+    !!input.currentCustomerTurn?.firstMessageId &&
+    customerTextsAfterKey[0].id === input.currentCustomerTurn.firstMessageId;
+  const isFirstValidReplyAfterFreeReading =
+    firstValidCustomerTurnAfterFreeReading ||
+    (isReplyToFreeReading &&
+      customerTextsAfterKey.length > 0 &&
+      customerTextsAfterKey[0].id === input.latestMessage.id);
+
+  return {
+    is_reply_to_free_reading: isReplyToFreeReading,
+    hit_cta_option: !!selectedCtaOption,
+    selected_cta_option: selectedCtaOption,
+    cta_options: ctaOptions,
+    has_paid_order: hasPaidOrder,
+    has_explicit_objection: detectExplicitObjection(turnText),
+    has_explicit_rejection: detectExplicitRejection(turnText),
+    is_first_valid_reply_after_free_reading: isFirstValidReplyAfterFreeReading,
+    is_first_valid_customer_turn_after_free_reading: firstValidCustomerTurnAfterFreeReading,
+    is_initial_reception_phase: !hasPaidOrder && !hasOperatorBeforeLatest,
+    key_operator_long_message: keyOperatorLongMessage
+      ? {
+          message_id: keyOperatorLongMessage.id,
+          role: keyOperatorLongMessage.role,
+          type: keyOperatorLongMessage.type,
+          source: keyOperatorLongMessage.source,
+          sent_at_iso: new Date(toMs(keyOperatorLongMessage.sentAt) || Date.now()).toISOString(),
+          japanese_text: keyOperatorLongMessage.japaneseText,
+          chinese_text: keyOperatorLongMessage.chineseText || "",
+          minutes_since_key_message: keyLongMs == null ? null : Math.max(0, Math.round((latestMs - keyLongMs) / 60000)),
+        }
+      : null,
+  };
+}
+

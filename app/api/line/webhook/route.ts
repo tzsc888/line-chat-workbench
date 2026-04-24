@@ -11,6 +11,7 @@ import { decideInboundTriggerPolicy } from "@/lib/inbound/trigger-policy";
 import { isFirstInboundTextMessage } from "@/lib/inbound/first-inbound";
 import { constantTimeEqual } from "@/lib/security/secret";
 import { ingestCustomerMessage, type IngestCustomerMessageInput } from "@/lib/services/ingest-customer-message";
+import { isLegacyEndpointEnabled, legacyEndpointDisabledResponse } from "@/lib/legacy-endpoint-toggle";
 
 function verifyLineSignature(body: string, signature: string, secret: string) {
   const hash = crypto.createHmac("sha256", secret).update(body).digest("base64");
@@ -188,6 +189,12 @@ async function claimWebhookEvent(event: Record<string, unknown>) {
 
 export async function POST(req: NextRequest) {
   try {
+    // Legacy LINE webhook entry: disabled by default to avoid accidental external traffic costs.
+    // To re-enable, set ENABLE_LEGACY_LINE_WEBHOOK=true.
+    if (!isLegacyEndpointEnabled("ENABLE_LEGACY_LINE_WEBHOOK")) {
+      return legacyEndpointDisabledResponse("line_webhook");
+    }
+
     const channelSecret = process.env.LINE_CHANNEL_SECRET;
 
     if (!channelSecret) {

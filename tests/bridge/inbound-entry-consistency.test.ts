@@ -21,11 +21,9 @@ test("bridge/line/ingest routes should share first-inbound trigger policy wiring
   }
 });
 
-test("analyze route should stay analysis-only and must not call generate workflow", () => {
-  const analyzeRoute = read("app/api/analyze-customer/route.ts");
-  assert.doesNotMatch(analyzeRoute, /generateRepliesWorkflow/);
-  assert.doesNotMatch(analyzeRoute, /runReplyGeneration/);
-  assert.match(analyzeRoute, /runAnalysisRouter/);
+test("analyze route is removed in generation-only pipeline", () => {
+  const target = path.resolve(process.cwd(), "app/api/analyze-customer/route.ts");
+  assert.equal(fs.existsSync(target), false);
 });
 
 test("bridge and line webhook should share relationship transition helper", () => {

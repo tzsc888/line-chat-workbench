@@ -7,22 +7,27 @@ export async function getAiEvalMetrics(windowDays = 30) {
     where: { createdAt: { gte: since } },
     select: {
       customerId: true,
-      routeType: true,
-      sceneType: true,
-      pushLevel: true,
       selectedVariant: true,
       recommendedVariant: true,
       isStale: true,
       staleReason: true,
-      finalGateJson: true,
-      reviewFlagsJson: true,
-      aiReviewJson: true,
-      analysisPromptVersion: true,
       generationPromptVersion: true,
-      reviewPromptVersion: true,
       translationPromptVersion: true,
     },
   });
 
-  return computeAiEvalMetricsFromDrafts(rows, windowDays);
+  return computeAiEvalMetricsFromDrafts(
+    rows.map((row) => ({
+      ...row,
+      routeType: null,
+      sceneType: null,
+      pushLevel: null,
+      finalGateJson: null,
+      reviewFlagsJson: null,
+      aiReviewJson: null,
+      analysisPromptVersion: null,
+      reviewPromptVersion: null,
+    })),
+    windowDays,
+  );
 }
