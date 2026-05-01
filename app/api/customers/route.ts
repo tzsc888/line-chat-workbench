@@ -187,6 +187,9 @@ export async function GET(req: NextRequest) {
     const page = parsePositiveInt(req.nextUrl.searchParams.get("page"), 1);
     const limit = Math.min(parsePositiveInt(req.nextUrl.searchParams.get("limit"), DEFAULT_LIMIT), MAX_LIMIT);
     const keyword = req.nextUrl.searchParams.get("q")?.trim() || "";
+    const debugCustomerIdQuery = req.nextUrl.searchParams.get("debugCustomerId")?.trim() || "";
+    const debugCustomerIdEnv = process.env.DEBUG_CUSTOMER_ID?.trim() || "";
+    const debugCustomerId = debugCustomerIdQuery || debugCustomerIdEnv;
     const skip = Math.max(0, (page - 1) * limit);
     const now = Date.now();
 
@@ -259,9 +262,22 @@ export async function GET(req: NextRequest) {
       customers = [...pinnedCustomers, ...regularCustomers.slice(0, limit)];
     }
 
+    const mappedCustomers = customers.map((customer) => mapCustomer(customer, now));
+    if (process.env.NODE_ENV !== "production" && debugCustomerId) {
+      for (const customer of mappedCustomers) {
+        if (customer.id === debugCustomerId) {
+          console.info("[customers-api] unread-source", {
+            customerId: customer.id,
+            unreadCount: customer.unreadCount,
+            source: "customer.unreadCount",
+          });
+        }
+      }
+    }
+
     return NextResponse.json({
       ok: true,
-      customers: customers.map((customer) => mapCustomer(customer, now)),
+      customers: mappedCustomers,
       hasMore,
       page,
       pageSize: limit,

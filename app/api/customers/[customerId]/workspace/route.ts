@@ -53,6 +53,13 @@ export async function GET(_: Request, { params }: Props) {
     if (!customer) {
       return NextResponse.json({ ok: false, error: "customer_not_found" }, { status: 404 });
     }
+    if (process.env.NODE_ENV !== "production") {
+      console.info("[workspace-load] workspace-customer-unread", {
+        customerId: customer.id,
+        unreadCount: customer.unreadCount,
+        source: "workspace-api:get",
+      });
+    }
 
     const messages = [...customer.messages].reverse();
     const latestCustomerMessage = [...messages].reverse().find((message) => message.role === "CUSTOMER") || null;
@@ -246,6 +253,16 @@ export async function PATCH(req: NextRequest, { params }: Props) {
     if (Object.keys(data).length === 0) {
       return NextResponse.json({ ok: false, error: "no_updatable_fields" }, { status: 400 });
     }
+    if (markReadInput && process.env.NODE_ENV !== "production") {
+      const before = await prisma.customer.findUnique({
+        where: { id: customerId },
+        select: { id: true, unreadCount: true },
+      });
+      console.info("[mark-read-api] before", {
+        customerId,
+        unreadCount: before?.unreadCount ?? null,
+      });
+    }
 
     const updatedCustomer = await prisma.customer.update({
       where: { id: customerId },
@@ -263,6 +280,14 @@ export async function PATCH(req: NextRequest, { params }: Props) {
       await publishRealtimeRefresh({ customerId, reason: "customer-meta-updated" });
     } catch (error) {
       console.error("Ably publish customer-meta-updated error:", error);
+    }
+
+    if (markReadInput && process.env.NODE_ENV !== "production") {
+      console.info("[mark-read-api] after", {
+        customerId,
+        unreadCount: updatedCustomer.unreadCount,
+        reason: "mark-read",
+      });
     }
 
     return NextResponse.json({

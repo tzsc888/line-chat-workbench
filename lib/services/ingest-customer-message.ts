@@ -173,10 +173,33 @@ export async function ingestCustomerMessage(input: IngestCustomerMessageInput) {
     customerUpdate.lastInboundMessageAt = eventTime;
   }
 
-  await prisma.customer.update({
+  const unreadBefore = process.env.NODE_ENV !== "production"
+    ? await prisma.customer.findUnique({
+        where: { id: customer.id },
+        select: { unreadCount: true },
+      })
+    : null;
+  const updatedCustomer = await prisma.customer.update({
     where: { id: customer.id },
     data: customerUpdate,
+    select: {
+      id: true,
+      unreadCount: true,
+    },
   });
+  if (process.env.NODE_ENV !== "production") {
+    console.info("[unread-write] increment", {
+      source: "ingest-customer-message",
+      reason: "inbound-message",
+      customerId: customer.id,
+      messageId: message.id,
+      messageRole: MessageRole.CUSTOMER,
+      messageDirection: "inbound",
+      messageSource: MessageSource.LINE,
+      unreadBefore: unreadBefore?.unreadCount ?? null,
+      unreadAfter: updatedCustomer.unreadCount,
+    });
+  }
 
   await prisma.replyDraftSet.updateMany({
     where: {

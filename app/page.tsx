@@ -200,6 +200,7 @@ const WORKSPACE_PREFETCH_NEAR_MAX = 12;
 const WORKSPACE_PREFETCH_QUEUE_MAX = 20;
 const WORKSPACE_PREFETCH_CONCURRENCY = 1;
 const WORKSPACE_PREFETCH_IDLE_DELAY_MS = 300;
+const DEBUG_STATE_LOGS = process.env.NODE_ENV !== "production";
 
 function isAbortError(error: unknown) {
   return (error instanceof DOMException && error.name === "AbortError") ||
@@ -394,6 +395,10 @@ function normalizeWorkspaceMessagePayload(payload: unknown): WorkspaceMessage | 
     createdAt: typeof value.createdAt === "string" ? value.createdAt : String(value.sentAt || ""),
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : String(value.sentAt || ""),
   };
+}
+function debugStateLog(label: string, payload: Record<string, unknown>) {
+  if (!DEBUG_STATE_LOGS) return;
+  console.info(label, payload);
 }
 function formatDateTimeForInput(date: Date) {
   const pad = (value: number) => String(value).padStart(2, "0");
@@ -684,6 +689,7 @@ function HomePageContent() {
   const workspacePrefetchRunningRef = useRef(false);
   const workspaceTopPrefetchTriggeredRef = useRef(false);
   const workspacePrefetchTimerRef = useRef<number | null>(null);
+  const workspacePrefetchBatchIdRef = useRef(0);
   useEffect(() => {
     return () => {
       customerListAbortControllerRef.current?.abort();
@@ -752,6 +758,16 @@ function HomePageContent() {
     }
     entry.lastAccessedAt = now;
     cache.set(customerId, entry);
+    debugStateLog("[workspace-cache] hit", {
+      requestedCustomerId: customerId,
+      cachedCustomerId: entry.workspace?.customer?.id || null,
+    });
+    if (entry.workspace?.customer?.id && entry.workspace.customer.id !== customerId) {
+      debugStateLog("[workspace-cache] mismatch", {
+        requestedCustomerId: customerId,
+        cachedCustomerId: entry.workspace.customer.id,
+      });
+    }
     return entry.workspace;
   }, [cleanupWorkspaceCache]);
   const setCachedWorkspace = useCallback((customerId: string, workspaceValue: WorkspaceData | null) => {
@@ -820,6 +836,11 @@ function HomePageContent() {
         });
       }
       if (reason && customer.unreadCount > 0) {
+        debugStateLog("[unread-protection] applied", {
+          customerId: customer.id,
+          reason,
+          originalUnread: customer.unreadCount,
+        });
         if (options?.enableLog && process.env.NODE_ENV !== "production") {
           console.info("[customers-load] stale-unread-ignored", {
             requestId: options.requestId,
@@ -854,20 +875,35 @@ function HomePageContent() {
       if (workspacePrefetchInFlightRef.current.size >= WORKSPACE_PREFETCH_CONCURRENCY) return;
       const customerId = workspacePrefetchQueueRef.current.shift();
       if (!customerId) return;
+      const batchId = workspacePrefetchBatchIdRef.current;
       workspacePrefetchRunningRef.current = true;
       workspacePrefetchInFlightRef.current.add(customerId);
+      debugStateLog("[workspace-prefetch] start", { customerId, batchId });
       void (async () => {
         try {
           const response = await fetch(`/api/customers/${customerId}/workspace`, { cache: "no-store" });
           const data = await response.json();
           if (!response.ok || !data?.ok) {
+            debugStateLog("[workspace-prefetch] failed", { customerId, batchId, error: data?.error || `http_${response.status}` });
             return;
           }
           const nextWorkspace: WorkspaceData | null = data.workspace || null;
           if (nextWorkspace) {
             setCachedWorkspace(customerId, nextWorkspace);
+            debugStateLog("[workspace-prefetch] cached", {
+              customerId,
+              workspaceCustomerId: nextWorkspace.customer?.id || null,
+              batchId,
+            });
+          } else {
+            debugStateLog("[workspace-prefetch] skipped", { customerId, reason: "empty-workspace", batchId });
           }
-        } catch {
+        } catch (error) {
+          debugStateLog("[workspace-prefetch] failed", {
+            customerId,
+            batchId,
+            error: error instanceof Error ? error.message : String(error),
+          });
           // Keep prefetch failures silent.
         } finally {
           workspacePrefetchInFlightRef.current.delete(customerId);
@@ -903,22 +939,37 @@ function HomePageContent() {
       const nextIds: string[] = [];
       for (const customerId of candidateBatch) {
         if (!customerId) continue;
-        if (selectedId && customerId === selectedId) continue;
-        if (workspacePrefetchInFlightRef.current.has(customerId)) continue;
-        if (workspacePrefetchQueueRef.current.includes(customerId)) continue;
-        if (nextIds.includes(customerId)) continue;
-        if (getCachedWorkspace(customerId)) continue;
+        if (selectedId && customerId === selectedId) {
+          debugStateLog("[workspace-prefetch] skipped", { customerId, reason: "selected-customer" });
+          continue;
+        }
+        if (workspacePrefetchInFlightRef.current.has(customerId)) {
+          debugStateLog("[workspace-prefetch] skipped", { customerId, reason: "in-flight" });
+          continue;
+        }
+        if (workspacePrefetchQueueRef.current.includes(customerId) || nextIds.includes(customerId)) {
+          debugStateLog("[workspace-prefetch] skipped", { customerId, reason: "already-queued" });
+          continue;
+        }
+        if (getCachedWorkspace(customerId)) {
+          debugStateLog("[workspace-prefetch] skipped", { customerId, reason: "cache-hit" });
+          continue;
+        }
         nextIds.push(customerId);
       }
       if (!nextIds.length && !options?.replacePending) return;
       if (options?.replacePending) {
         workspacePrefetchQueueRef.current = [];
+        workspacePrefetchBatchIdRef.current += 1;
       }
       workspacePrefetchQueueRef.current = [...workspacePrefetchQueueRef.current, ...nextIds];
       if (workspacePrefetchQueueRef.current.length > WORKSPACE_PREFETCH_QUEUE_MAX) {
         workspacePrefetchQueueRef.current = workspacePrefetchQueueRef.current.slice(
           workspacePrefetchQueueRef.current.length - WORKSPACE_PREFETCH_QUEUE_MAX
         );
+      }
+      for (const customerId of nextIds) {
+        debugStateLog("[workspace-prefetch] queued", { customerId, batchId: workspacePrefetchBatchIdRef.current });
       }
       scheduleWorkspacePrefetchDrain();
     },
@@ -948,6 +999,7 @@ function HomePageContent() {
       reset?: boolean;
       search?: string;
       limitOverride?: number;
+      debugCustomerId?: string;
     }) => {
       const shouldPreserveListUi = !!options?.silent || !!options?.preserveUi || !!options?.loadMore;
       const listScrollTop = shouldPreserveListUi
@@ -987,6 +1039,9 @@ function HomePageContent() {
         if (activeSearch) {
           params.set("q", activeSearch);
         }
+        if (options?.debugCustomerId) {
+          params.set("debugCustomerId", options.debugCustomerId);
+        }
 
         const response = await fetch(`/api/customers?${params.toString()}`, {
           cache: "no-store",
@@ -1012,13 +1067,56 @@ function HomePageContent() {
         const nextStats: CustomerListStats = data.stats || { overdueFollowupCount: 0, totalUnreadCount: 0 };
 
         setCustomers((prev) => {
+          const prevUnreadMap = new Map(prev.map((item) => [item.id, item.unreadCount]));
           if (isLoadMore) {
             const merged = new Map<string, CustomerListItem>();
             for (const item of prev) merged.set(item.id, item);
             for (const item of list) merged.set(item.id, item);
-            return sortCustomerList(applyReadProtectionToCustomers(Array.from(merged.values())));
+            const next = sortCustomerList(applyReadProtectionToCustomers(Array.from(merged.values())));
+            debugStateLog("[customers-state] set", { source: "loadCustomers:loadMore", count: next.length });
+            for (const item of next) {
+              if (item.unreadCount > 0) {
+                debugStateLog("[customers-state] customer-unread", {
+                  source: "loadCustomers:loadMore",
+                  customerId: item.id,
+                  unreadCount: item.unreadCount,
+                  selectedCustomerId: selectedCustomerIdRef.current || null,
+                });
+              }
+              const previousUnread = prevUnreadMap.get(item.id) ?? 0;
+              if (previousUnread === 0 && item.unreadCount > 0) {
+                debugStateLog("[customers-state] unread-reappeared", {
+                  customerId: item.id,
+                  previousUnread,
+                  nextUnread: item.unreadCount,
+                  source: "loadCustomers:loadMore",
+                });
+              }
+            }
+            return next;
           }
-          return sortCustomerList(applyReadProtectionToCustomers(list));
+          const next = sortCustomerList(applyReadProtectionToCustomers(list));
+          debugStateLog("[customers-state] set", { source: "loadCustomers:replace", count: next.length });
+          for (const item of next) {
+            if (item.unreadCount > 0) {
+              debugStateLog("[customers-state] customer-unread", {
+                source: "loadCustomers:replace",
+                customerId: item.id,
+                unreadCount: item.unreadCount,
+                selectedCustomerId: selectedCustomerIdRef.current || null,
+              });
+            }
+            const previousUnread = prevUnreadMap.get(item.id) ?? 0;
+            if (previousUnread === 0 && item.unreadCount > 0) {
+              debugStateLog("[customers-state] unread-reappeared", {
+                customerId: item.id,
+                previousUnread,
+                nextUnread: item.unreadCount,
+                source: "loadCustomers:replace",
+              });
+            }
+          }
+          return next;
         });
 
         const loadedPinnedCountAfterFetch = list.filter((item) => !!item.pinnedAt).length;
@@ -1073,15 +1171,25 @@ function HomePageContent() {
     },
     [applyReadProtectionToCustomers]
   );
-  const markCustomerRead = useCallback(async (customerId: string) => {
-    if (!customerId || markReadInFlightRef.current.has(customerId)) return;
+  const markCustomerRead = useCallback(async (
+    customerId: string,
+    options?: { reason?: string; previousUnread?: number }
+  ) => {
+    const reason = options?.reason || "unknown";
+    const previousUnread = options?.previousUnread ?? null;
+    if (!customerId) {
+      debugStateLog("[mark-read] skipped", { customerId, reason: "empty-customer-id" });
+      return;
+    }
+    if (markReadInFlightRef.current.has(customerId)) {
+      debugStateLog("[mark-read] skipped", { customerId, reason: "in-flight" });
+      return;
+    }
     const startedAt = Date.now();
     const startedRequestId = customerListRequestIdRef.current;
     markReadInFlightRef.current.add(customerId);
     markReadPendingRef.current.set(customerId, { startedAt, startedRequestId });
-    if (process.env.NODE_ENV !== "production") {
-      console.info("[mark-read] start", { customerId });
-    }
+    debugStateLog("[mark-read] start", { customerId, previousUnread, reason });
     try {
       const response = await fetch(`/api/customers/${customerId}/workspace`, {
         method: "PATCH",
@@ -1096,62 +1204,113 @@ function HomePageContent() {
       if (!response.ok || !data?.ok) {
         throw new Error(data?.error || "mark read failed");
       }
-      if (process.env.NODE_ENV !== "production") {
-        console.info("[mark-read] success", { customerId });
-      }
+      debugStateLog("[mark-read] success", { customerId });
       markReadPendingRef.current.delete(customerId);
       markReadConfirmedAtRef.current.set(customerId, Date.now());
       markReadAwaitingAuthoritativeRef.current.add(customerId);
-      void loadCustomers({ silent: true, preserveUi: true, search: searchKeywordRef.current });
+      void loadCustomers({
+        silent: true,
+        preserveUi: true,
+        search: searchKeywordRef.current,
+        debugCustomerId: customerId,
+      });
     } catch (error) {
-      if (process.env.NODE_ENV !== "production") {
-        console.info("[mark-read] failed", { customerId });
-      }
+      debugStateLog("[mark-read] failed", {
+        customerId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       console.error("mark customer read error:", error);
       markReadPendingRef.current.delete(customerId);
       markReadConfirmedAtRef.current.delete(customerId);
       markReadAwaitingAuthoritativeRef.current.delete(customerId);
-      void loadCustomers({ silent: true, preserveUi: true, search: searchKeywordRef.current });
+      void loadCustomers({
+        silent: true,
+        preserveUi: true,
+        search: searchKeywordRef.current,
+        debugCustomerId: customerId,
+      });
     } finally {
       markReadInFlightRef.current.delete(customerId);
     }
   }, [loadCustomers]);
   const loadWorkspace = useCallback(
-    async (customerId: string, options?: { preserveUi?: boolean }) => {
+    async (customerId: string, options?: { preserveUi?: boolean; source?: string; cacheOnly?: boolean }) => {
+      const source = options?.source || "unknown";
+      const cacheOnly = !!options?.cacheOnly;
       if (!customerId) {
         workspaceAbortControllerRef.current?.abort();
         workspaceAbortControllerRef.current = null;
         setWorkspace(null);
         return;
       }
+
       const preserveUi = !!options?.preserveUi;
+      const isSelectedAtStart = selectedCustomerIdRef.current === customerId;
+      const canMutateUiAtStart = !cacheOnly && isSelectedAtStart;
+      debugStateLog("[workspace-load] guard-check", {
+        requestId: workspaceRequestIdRef.current + (canMutateUiAtStart ? 1 : 0),
+        requestedCustomerId: customerId,
+        currentSelectedCustomerId: selectedCustomerIdRef.current,
+        source,
+        cacheOnly,
+        allowUiUpdate: canMutateUiAtStart,
+      });
       const cachedWorkspace = getCachedWorkspace(customerId);
-      const shouldUseCachedUi = !!cachedWorkspace;
+      const shouldUseCachedUi = !!cachedWorkspace && canMutateUiAtStart;
       if (cachedWorkspace) {
-        setWorkspace(cachedWorkspace);
-        setPageError("");
-        setIsWorkspaceLoading(false);
+        debugStateLog("[workspace-load] cache-hit", {
+          customerId,
+          workspaceCustomerId: cachedWorkspace.customer?.id || null,
+          source,
+        });
+        if (cachedWorkspace.customer?.id && cachedWorkspace.customer.id !== customerId) {
+          debugStateLog("[workspace-load] mismatch", {
+            requestId: "cache-hit",
+            requestedCustomerId: customerId,
+            workspaceCustomerId: cachedWorkspace.customer.id,
+          });
+        }
+        if (canMutateUiAtStart) {
+          setWorkspace(cachedWorkspace);
+          setPageError("");
+          setIsWorkspaceLoading(false);
+        } else {
+          debugStateLog("[workspace-load] ignored-stale", {
+            requestedCustomerId: customerId,
+            currentSelectedCustomerId: selectedCustomerIdRef.current,
+            source: "cache-hit",
+          });
+        }
       }
+
       const shouldPreserveUi = preserveUi || shouldUseCachedUi;
-      const requestId = workspaceRequestIdRef.current + 1;
-      workspaceRequestIdRef.current = requestId;
+      const requestId = canMutateUiAtStart
+        ? workspaceRequestIdRef.current + 1
+        : workspaceRequestIdRef.current;
+      if (canMutateUiAtStart) {
+        workspaceRequestIdRef.current = requestId;
+      }
+      debugStateLog("[workspace-load] start", { requestId, customerId, source });
       const abortController = new AbortController();
-      workspaceAbortControllerRef.current?.abort();
-      workspaceAbortControllerRef.current = abortController;
+      if (canMutateUiAtStart) {
+        workspaceAbortControllerRef.current?.abort();
+        workspaceAbortControllerRef.current = abortController;
+      }
 
       const container = chatScrollRef.current;
       let previousScrollTop = 0;
       let previousScrollHeight = 0;
       let wasNearBottom = false;
-      if (shouldPreserveUi && container) {
+      if (canMutateUiAtStart && shouldPreserveUi && container) {
         previousScrollTop = container.scrollTop;
         previousScrollHeight = container.scrollHeight;
         wasNearBottom =
           container.scrollHeight - container.scrollTop - container.clientHeight < 80;
         isSilentRefreshingRef.current = true;
       }
+
       try {
-        if (!shouldPreserveUi) {
+        if (canMutateUiAtStart && !shouldPreserveUi) {
           setIsWorkspaceLoading(true);
           setPageError("");
           setCustomReply(null);
@@ -1167,16 +1326,62 @@ function HomePageContent() {
         });
         const data = await response.json();
         if (!response.ok || !data.ok) {
-          throw new Error(data?.error || "读取顾客工作台失败");
+          throw new Error(data?.error || "?????????");
         }
 
-        if (requestId !== workspaceRequestIdRef.current) {
+        if (canMutateUiAtStart && requestId !== workspaceRequestIdRef.current) {
+          debugStateLog("[workspace-load] ignored-stale", {
+            requestId,
+            requestedCustomerId: customerId,
+            currentSelectedCustomerId: selectedCustomerIdRef.current,
+            source,
+          });
           return;
         }
 
         const nextWorkspace: WorkspaceData | null = data.workspace || null;
-        setWorkspace(nextWorkspace);
+        if (nextWorkspace?.customer?.id && nextWorkspace.customer.id !== customerId) {
+          debugStateLog("[workspace-load] mismatch", {
+            requestId,
+            requestedCustomerId: customerId,
+            workspaceCustomerId: nextWorkspace.customer.id,
+          });
+        }
+        debugStateLog("[workspace-load] workspace-customer-unread", {
+          customerId: nextWorkspace?.customer?.id || customerId,
+          unreadCount: nextWorkspace?.customer?.unreadCount ?? null,
+          source,
+        });
         setCachedWorkspace(customerId, nextWorkspace);
+
+        const isStillSelected = selectedCustomerIdRef.current === customerId;
+        const canMutateUiNow = canMutateUiAtStart && !cacheOnly && isStillSelected;
+        if (!canMutateUiNow) {
+          debugStateLog("[workspace-load] ignored-stale", {
+            requestId,
+            requestedCustomerId: customerId,
+            currentSelectedCustomerId: selectedCustomerIdRef.current,
+            source,
+          });
+          if (nextWorkspace?.customer) {
+            debugStateLog("[customers-state] workspace-customer-merge-skipped", {
+              source,
+              customerId: nextWorkspace.customer.id,
+              currentSelectedCustomerId: selectedCustomerIdRef.current,
+              reason: cacheOnly ? "cache-only" : "not-selected",
+            });
+          }
+          return;
+        }
+
+        debugStateLog("[workspace-load] set", {
+          requestId,
+          requestedCustomerId: customerId,
+          workspaceCustomerId: nextWorkspace?.customer?.id || null,
+          currentSelectedCustomerId: selectedCustomerIdRef.current,
+          source,
+        });
+        setWorkspace(nextWorkspace);
         if (nextWorkspace?.customer) {
           setCustomers((prev) => {
             const merged = prev.map((item) =>
@@ -1185,12 +1390,24 @@ function HomePageContent() {
                     ...item,
                     remarkName: nextWorkspace.customer.remarkName,
                     pinnedAt: nextWorkspace.customer.pinnedAt,
-                    unreadCount: nextWorkspace.customer.unreadCount,
+                    unreadCount: item.id === customerId ? 0 : nextWorkspace.customer.unreadCount,
                     followup: nextWorkspace.customer.followup,
                   }
                 : item
             );
+            debugStateLog("[customers-state] workspace-customer-merge", {
+              source,
+              customerId: nextWorkspace.customer.id,
+              unreadCount: nextWorkspace.customer.unreadCount,
+            });
             return applyReadProtectionToCustomers(merged);
+          });
+        } else {
+          debugStateLog("[customers-state] workspace-customer-merge-skipped", {
+            source,
+            customerId,
+            currentSelectedCustomerId: selectedCustomerIdRef.current,
+            reason: "no-customer-in-workspace",
           });
         }
         if (shouldPreserveUi) {
@@ -1210,14 +1427,14 @@ function HomePageContent() {
           return;
         }
         console.error(error);
-        if (!shouldPreserveUi && requestId === workspaceRequestIdRef.current) {
+        if (canMutateUiAtStart && !shouldPreserveUi && requestId === workspaceRequestIdRef.current) {
           setWorkspace(null);
           setPageError(String(error));
-        } else if (requestId === workspaceRequestIdRef.current) {
+        } else if (canMutateUiAtStart && requestId === workspaceRequestIdRef.current) {
           setPageError(String(error));
         }
       } finally {
-        if (requestId === workspaceRequestIdRef.current) {
+        if (canMutateUiAtStart && requestId === workspaceRequestIdRef.current) {
           if (!shouldUseCachedUi) {
             setIsWorkspaceLoading(false);
           }
@@ -1258,7 +1475,7 @@ function HomePageContent() {
           search: searchKeywordRef.current,
         });
         if (activeCustomerId && (!nextTargetCustomerId || nextTargetCustomerId === activeCustomerId)) {
-          await loadWorkspace(activeCustomerId, { preserveUi: true });
+          await loadWorkspace(activeCustomerId, { preserveUi: true, source: "realtime-refresh" });
         }
       } finally {
         isRealtimeRefreshInFlightRef.current = false;
@@ -1384,6 +1601,7 @@ function HomePageContent() {
             ))
           )
         );
+        debugStateLog("[customers-state] set", { source: "updateCustomerLatestMessage" });
       });
     },
     [applyReadProtectionToCustomers, preserveCustomerListViewport]
@@ -1431,6 +1649,7 @@ function HomePageContent() {
       suggestionVariant?: "STABLE" | "ADVANCING";
       optimisticMessageId?: string;
     }) => {
+      debugStateLog("[user-action] send-message", { customerId: params.customerId, source: params.source, type: params.type });
       const sentAt = new Date().toISOString();
       const optimisticId = params.optimisticMessageId || `${OPTIMISTIC_ID_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const baseOptimisticMessage: OptimisticWorkspaceMessage = {
@@ -1673,7 +1892,11 @@ function HomePageContent() {
     void loadCustomers({ reset: true, search: debouncedSearchText });
   }, [debouncedSearchText, loadCustomers]);
   useEffect(() => {
-    void loadWorkspace(selectedCustomerId);
+    selectedCustomerIdRef.current = selectedCustomerId;
+    void loadWorkspace(selectedCustomerId, {
+      source: "user-select",
+      cacheOnly: false,
+    });
   }, [selectedCustomerId, loadWorkspace]);
   useEffect(() => {
     selectedCustomerIdRef.current = selectedCustomerId;
@@ -1753,21 +1976,26 @@ function HomePageContent() {
       const previousUnread = previousUnreadMapRef.current[customer.id] ?? 0;
       const latestPreviewFromCustomer = customer.latestMessage?.role === "CUSTOMER";
       if (!latestPreviewFromCustomer || customer.unreadCount <= previousUnread) {
-        if (process.env.NODE_ENV !== "production" && latestPreviewFromCustomer && customer.unreadCount > 0 && customer.unreadCount !== previousUnread) {
+        if (latestPreviewFromCustomer && customer.unreadCount > 0 && customer.unreadCount !== previousUnread) {
           const reason = getUnreadProtectionReason(customer.id);
           if (reason) {
-            console.info("[sound] incoming-suppressed", { customerId: customer.id, reason });
+            debugStateLog("[sound] incoming-suppressed", {
+              customerId: customer.id,
+              reason,
+              unreadBefore: previousUnread,
+              unreadAfter: customer.unreadCount,
+              source: "customers-effect",
+            });
           }
         }
         return false;
       }
-      if (process.env.NODE_ENV !== "production") {
-        console.info("[sound] incoming-play", {
-          customerId: customer.id,
-          unreadBefore: previousUnread,
-          unreadAfter: customer.unreadCount,
-        });
-      }
+      debugStateLog("[sound] incoming-play", {
+        customerId: customer.id,
+        unreadBefore: previousUnread,
+        unreadAfter: customer.unreadCount,
+        source: "customers-effect",
+      });
       return latestPreviewFromCustomer && customer.unreadCount > previousUnread;
     });
     if (hasIncomingUnread) {
@@ -1795,12 +2023,16 @@ function HomePageContent() {
   useEffect(() => {
     const selectedCustomer = customers.find((item) => item.id === selectedCustomerId);
     if (!selectedCustomerId || !selectedCustomer?.unreadCount) return;
+    debugStateLog("[user-action] mark-read", { customerId: selectedCustomerId });
     setCustomers((prev) =>
       applyReadProtectionToCustomers(prev.map((item) =>
         item.id === selectedCustomerId ? { ...item, unreadCount: 0 } : item
       ))
     );
-    void markCustomerRead(selectedCustomerId);
+    void markCustomerRead(selectedCustomerId, {
+      reason: "selected-customer-effect",
+      previousUnread: selectedCustomer.unreadCount,
+    });
   }, [customers, selectedCustomerId, markCustomerRead]);
   useEffect(() => {
     const handleCloseContextMenu = () => {
@@ -2043,7 +2275,11 @@ function HomePageContent() {
     recentLocalRefreshAtRef.current[customerId] = Date.now();
     void (async () => {
       const [workspaceResult, customersResult] = await Promise.allSettled([
-        loadWorkspace(customerId, { preserveUi: true }),
+        loadWorkspace(customerId, {
+          preserveUi: true,
+          source: "post-generate-refresh",
+          cacheOnly: selectedCustomerIdRef.current !== customerId,
+        }),
         loadCustomers({ preserveUi: true }),
       ]);
       const failures = [workspaceResult, customersResult].filter((result) => result.status === "rejected");
@@ -2321,6 +2557,7 @@ function HomePageContent() {
       return;
     }
     const customerId = workspace.customer.id;
+    debugStateLog("[user-action] generate-replies", { customerId });
     if (generatingByCustomer[customerId]) return;
     try {
       void playSoftTickSound("tap");
@@ -2727,7 +2964,7 @@ function HomePageContent() {
       setPendingImages([]);
       setIsSchedulePanelOpen(false);
       setScheduleAtInput(buildDefaultScheduledInputValue());
-      await loadWorkspace(workspace.customer.id, { preserveUi: true });
+      await loadWorkspace(workspace.customer.id, { preserveUi: true, source: "schedule-refresh" });
       await loadCustomers({ preserveUi: true });
     } catch (error) {
       console.error(error);
@@ -2747,7 +2984,7 @@ function HomePageContent() {
       if (!response.ok || !data.ok) {
         throw new Error(data?.error || "取消定时发送失败");
       }
-      await loadWorkspace(workspace.customer.id, { preserveUi: true });
+      await loadWorkspace(workspace.customer.id, { preserveUi: true, source: "schedule-refresh" });
       await loadCustomers({ preserveUi: true });
     } catch (error) {
       console.error(error);
@@ -2816,9 +3053,20 @@ function HomePageContent() {
     }
   }
   function handleSelectCustomer(customerId: string) {
+    debugStateLog("[user-action] select-customer", { customerId });
+    const previousUnread = customersRef.current.find((item) => item.id === customerId)?.unreadCount ?? 0;
+    if (previousUnread > 0) {
+      void markCustomerRead(customerId, {
+        reason: "select-customer",
+        previousUnread,
+      });
+    } else {
+      debugStateLog("[mark-read] skipped", { customerId, reason: "previous-unread-zero" });
+    }
     void playSoftTickSound("tap");
     openChatToBottomRef.current = true;
     shouldStickToBottomRef.current = true;
+    selectedCustomerIdRef.current = customerId;
     setSelectedCustomerId(customerId);
     setCustomerContextMenu(null);
     clearCustomerQuery();
