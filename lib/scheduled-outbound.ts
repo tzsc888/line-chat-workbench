@@ -9,6 +9,9 @@ import {
 } from "@prisma/client";
 
 const DUE_BATCH_SIZE = 20;
+const MAX_DUE_BATCH_SIZE = 50;
+const DEFAULT_MIN_DELAY_MINUTES = 5;
+const MAX_DELAY_MINUTES = 24 * 60;
 
 function normalizeMessageContent(text: string) {
   return text.replace(/\r\n/g, "\n");
@@ -22,11 +25,15 @@ export function normalizeScheduledAtInput(value: string) {
   return date;
 }
 
-export function validateScheduleWindow(scheduledFor: Date, minimumDelayMinutes = 30) {
+export function validateScheduleWindow(scheduledFor: Date, minimumDelayMinutes = DEFAULT_MIN_DELAY_MINUTES) {
   const now = Date.now();
   const diff = scheduledFor.getTime() - now;
+  const maxDiff = MAX_DELAY_MINUTES * 60 * 1000;
   if (diff < minimumDelayMinutes * 60 * 1000) {
-    throw new Error(`定时发送至少要比当前时间晚 ${minimumDelayMinutes} 分钟`);
+    throw new Error(`请至少提前 ${minimumDelayMinutes} 分钟设置定时发送。`);
+  }
+  if (diff > maxDiff) {
+    throw new Error("当前定时发送最多支持 24 小时以内。");
   }
 }
 
@@ -189,9 +196,10 @@ export async function dispatchScheduledMessageById(scheduledMessageId: string) {
     await prisma.scheduledMessage.update({
       where: { id: scheduled.id },
       data: {
-        status: ScheduledMessageStatus.FAILED,
-        failedAt,
+        status: ScheduledMessageStatus.PENDING,
+        failedAt: null,
         sendError: errorMessage,
+        lastAttemptAt: failedAt,
       },
     });
 
@@ -205,7 +213,8 @@ export async function dispatchScheduledMessageById(scheduledMessageId: string) {
   }
 }
 
-export async function dispatchDueScheduledMessages() {
+export async function dispatchDueScheduledMessages(options?: { batchSize?: number }) {
+  const batchSize = Math.min(Math.max(options?.batchSize ?? DUE_BATCH_SIZE, 1), MAX_DUE_BATCH_SIZE);
   const now = new Date();
   const dueItems = await prisma.scheduledMessage.findMany({
     where: {
@@ -217,7 +226,7 @@ export async function dispatchDueScheduledMessages() {
     orderBy: {
       scheduledFor: "asc",
     },
-    take: DUE_BATCH_SIZE,
+    take: batchSize,
     select: {
       id: true,
     },
@@ -230,9 +239,28 @@ export async function dispatchDueScheduledMessages() {
     results.push(result as Record<string, unknown>);
   }
 
+  const dueCount = await prisma.scheduledMessage.count({
+    where: {
+      status: ScheduledMessageStatus.PENDING,
+      scheduledFor: {
+        lte: now,
+      },
+    },
+  });
+  const dispatchedCount = results.filter((item) => item.ok === true).length;
+  const skippedCount = results.filter((item) => item.skipped === true).length;
+  const failedCount = results.length - dispatchedCount - skippedCount;
+
   return {
     scannedAt: now.toISOString(),
+    serverNow: now.toISOString(),
+    batchSize,
+    dueCount,
+    hasMoreDue: dueCount > dueItems.length,
     pickedCount: dueItems.length,
+    dispatchedCount,
+    skippedCount,
+    failedCount,
     results,
   };
 }

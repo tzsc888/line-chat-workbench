@@ -20,6 +20,7 @@ const runtimeDeps: GenerateRepliesWorkflowDeps = {
       include: {
         messages: { orderBy: [{ sentAt: "desc" }, { id: "desc" }], take: 120 },
         replyDraftSets: { orderBy: { createdAt: "desc" }, take: 1 },
+        tags: { include: { tag: true } },
       },
     })) as NonNullable<Awaited<ReturnType<GenerateRepliesWorkflowDeps["findCustomerById"]>>>,
   updateMessageChineseText: async (messageId, chineseText) => {

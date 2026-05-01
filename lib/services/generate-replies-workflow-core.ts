@@ -17,6 +17,15 @@ export type GenerateRepliesWorkflowDeps = {
     remarkName: string | null;
     originalName: string;
     stage: string;
+    aiCustomerInfo?: string | null;
+    aiCurrentStrategy?: string | null;
+    riskTags?: string[] | null;
+    followupBucket?: string | null;
+    followupTier?: string | null;
+    followupState?: string | null;
+    followupReason?: string | null;
+    nextFollowupAt?: Date | null;
+    tags?: Array<{ tag: { name: string } }> | null;
     messages: ContextMessage[];
     replyDraftSets: Array<{
       id: string;
@@ -85,6 +94,22 @@ function elapsedMs(startedAt: number) {
 
 function safeSnippet(value: unknown, max = 700) {
   return String(value || "").replace(/\s+/g, " ").slice(0, max);
+}
+
+function resolveLatestCustomerMessageForTurn(messagesAsc: ContextMessage[], requestedTargetMessageId: string | null) {
+  const latestCustomerAny = [...messagesAsc].reverse().find((message) => message.role === "CUSTOMER") || null;
+  if (!requestedTargetMessageId) return latestCustomerAny;
+  const requested = messagesAsc.find((message) => message.id === requestedTargetMessageId);
+  if (!requested || requested.role !== "CUSTOMER") return latestCustomerAny;
+  const requestedIndex = messagesAsc.findIndex((message) => message.id === requested.id);
+  if (requestedIndex < 0) return latestCustomerAny;
+  let latestInSameTurn = requested;
+  for (let i = requestedIndex + 1; i < messagesAsc.length; i += 1) {
+    const message = messagesAsc[i];
+    if (message.role === "OPERATOR") break;
+    if (message.role === "CUSTOMER") latestInSameTurn = message;
+  }
+  return latestInSameTurn;
 }
 
 function buildFailureSummary(details: Record<string, unknown> | null) {
@@ -231,13 +256,23 @@ export async function executeGenerateRepliesWorkflow(
   }
 
   const messages = [...customer.messages].reverse() as ContextMessage[];
-  const latestCustomerMessage = requestedTargetMessageId
-    ? messages.find((message) => message.id === requestedTargetMessageId)
-    : [...messages].reverse().find((message) => message.role === "CUSTOMER" && message.type === "TEXT");
+  const latestCustomerMessage = resolveLatestCustomerMessageForTurn(messages, requestedTargetMessageId);
 
-  if (!latestCustomerMessage || latestCustomerMessage.type !== "TEXT") {
-    throw new Error("target_customer_text_message_not_found");
+  if (!latestCustomerMessage) {
+    throw new Error("target_customer_message_not_found");
   }
+
+  const latestCustomerTextMessage =
+    latestCustomerMessage.type === "TEXT"
+      ? latestCustomerMessage
+      : [...messages]
+          .reverse()
+          .find(
+            (message) =>
+              message.role === "CUSTOMER" &&
+              message.type === "TEXT" &&
+              new Date(message.sentAt || 0).getTime() <= new Date(latestCustomerMessage.sentAt || 0).getTime(),
+          ) || null;
 
   const existingDraft = customer.replyDraftSets[0] ?? null;
   if (
@@ -265,24 +300,31 @@ export async function executeGenerateRepliesWorkflow(
   }
 
   const previousMessage = [...messages].reverse().find((message) => message.id !== latestCustomerMessage.id);
-  const translation = latestCustomerMessage.chineseText?.trim()
+  const translation = latestCustomerTextMessage?.chineseText?.trim()
       ? {
         line: "reuse-existing-translation",
         parsed: {
-          translation: latestCustomerMessage.chineseText,
+          translation: latestCustomerTextMessage.chineseText,
         },
         model: process.env.DEEPLX_CHAT_MODEL_SHORT || process.env.DEEPLX_REPLY_MODEL || "",
         promptVersion: "reuse-existing-translation-v1",
       }
-    : await deps.translateCustomerJapaneseMessage({
-        japaneseText: latestCustomerMessage.japaneseText,
-        previousJapanese: previousMessage?.japaneseText,
-        previousChinese: previousMessage?.chineseText || undefined,
-      });
+    : latestCustomerTextMessage
+      ? await deps.translateCustomerJapaneseMessage({
+          japaneseText: latestCustomerTextMessage.japaneseText,
+          previousJapanese: previousMessage?.japaneseText,
+          previousChinese: previousMessage?.chineseText || undefined,
+        })
+      : {
+          line: "skip-non-text-latest-customer-message",
+          model: "",
+          promptVersion: "skip-non-text-v1",
+          parsed: { translation: "" },
+        };
 
-  if (!latestCustomerMessage.chineseText && translation.parsed.translation) {
-    await deps.updateMessageChineseText(latestCustomerMessage.id, translation.parsed.translation);
-    latestCustomerMessage.chineseText = translation.parsed.translation;
+  if (latestCustomerTextMessage && !latestCustomerTextMessage.chineseText && translation.parsed.translation) {
+    await deps.updateMessageChineseText(latestCustomerTextMessage.id, translation.parsed.translation);
+    latestCustomerTextMessage.chineseText = translation.parsed.translation;
   }
 
   const generationContext = deps.buildMainBrainGenerationContext({
@@ -290,6 +332,17 @@ export async function executeGenerateRepliesWorkflow(
       id: customer.id,
       display_name: String(customer.remarkName || customer.originalName || "").trim(),
       stage: String(customer.stage),
+      ai_customer_info: String(customer.aiCustomerInfo || "").trim(),
+      ai_current_strategy: String(customer.aiCurrentStrategy || "").trim(),
+      risk_tags: Array.isArray(customer.riskTags) ? customer.riskTags : [],
+      followup: {
+        bucket: customer.followupBucket || null,
+        tier: customer.followupTier || null,
+        state: customer.followupState || null,
+        reason: customer.followupReason || null,
+        next_followup_at: customer.nextFollowupAt ? customer.nextFollowupAt.toISOString() : null,
+      },
+      tags: Array.isArray(customer.tags) ? customer.tags.map((item) => item.tag.name) : [],
     },
     latestMessage: latestCustomerMessage,
     translation: translation.parsed,

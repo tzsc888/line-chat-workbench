@@ -22,7 +22,7 @@ test("deriveDraftPresentation marks mismatched target message as stale", () => {
   );
 
   assert.equal(result.isStale, true);
-  assert.equal(result.primaryActionLabel, "Regenerate on latest messages");
+  assert.equal(result.primaryActionLabel, "生成回复");
 });
 
 test("deriveDraftPresentation no longer blocks by final gate", () => {
@@ -47,5 +47,5 @@ test("deriveDraftPresentation no longer blocks by final gate", () => {
   assert.equal(result.isBlocked, false);
   assert.equal(result.shouldDimDraft, false);
   assert.equal(result.issues.length, 0);
-  assert.equal(result.primaryActionLabel, "Regenerate");
+  assert.equal(result.primaryActionLabel, "生成回复");
 });

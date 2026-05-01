@@ -224,3 +224,62 @@ test("workflow should keep success when reply translation is empty", async () =>
   assert.equal(result.suggestion1Zh, "");
   assert.equal(result.suggestion2Zh, "");
 });
+
+test("workflow should expand requested target to latest message in same customer turn", async () => {
+  let savedTargetId = "";
+  const deps = createDeps({
+    findCustomerById: async () => ({
+      id: "c-1",
+      remarkName: "customer-1",
+      originalName: "customer-1",
+      stage: "NEW_LEAD",
+      messages: [
+        {
+          id: "m-2",
+          role: "CUSTOMER",
+          type: "TEXT",
+          source: "LINE",
+          japaneseText: "会話の写真とか送ったほーがいいですか？",
+          chineseText: null,
+          sentAt: new Date("2026-04-20T00:02:00.000Z"),
+        },
+        {
+          id: "m-1",
+          role: "CUSTOMER",
+          type: "TEXT",
+          source: "LINE",
+          japaneseText: "はい！",
+          chineseText: null,
+          sentAt: new Date("2026-04-20T00:01:00.000Z"),
+        },
+        {
+          id: "m-op",
+          role: "OPERATOR",
+          type: "TEXT",
+          source: "MANUAL",
+          japaneseText: "前回返信",
+          chineseText: null,
+          sentAt: new Date("2026-04-20T00:00:00.000Z"),
+        },
+      ],
+      replyDraftSets: [],
+    }),
+    saveDraftBundle: async (input) => {
+      savedTargetId = String(input.targetCustomerMessageId || "");
+      return { id: "draft-new" };
+    },
+  });
+
+  await executeGenerateRepliesWorkflow(
+    {
+      customerId: "c-1",
+      targetCustomerMessageId: "m-1",
+      triggerSource: "MANUAL_GENERATE",
+      autoMode: false,
+      publishRefresh: false,
+    },
+    deps,
+  );
+
+  assert.equal(savedTargetId, "m-2");
+});

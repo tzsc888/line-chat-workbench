@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildDeliveryContextFromMessages, deriveIndustryStage, getIndustryRulePack } from "../../lib/industry/core";
+import { deriveObjectiveSalesFacts } from "../../lib/industry/core";
 
 const customerMessage = {
   id: "m2",
@@ -77,4 +78,76 @@ test("getIndustryRulePack exposes compact stage and buyer-language guidance", ()
   assert.ok(pack.stepRules.length >= 3);
   assert.equal(typeof pack.buyerLanguageSignal, "string");
   assert.equal(typeof pack.buyerLanguageProductDirection, "string");
+});
+
+test("deriveObjectiveSalesFacts should not treat short operator text as free-reading long message", () => {
+  const messages = [
+    {
+      id: "o1",
+      role: "OPERATOR" as const,
+      type: "TEXT" as const,
+      source: "MANUAL" as const,
+      japaneseText: "はい、見ていきますね",
+      chineseText: null,
+      sentAt: new Date("2026-01-01T10:00:00Z"),
+    },
+    {
+      ...customerMessage,
+      id: "c2",
+      japaneseText: "相手との本音",
+      sentAt: new Date("2026-01-01T10:01:00Z"),
+    },
+  ];
+
+  const facts = deriveObjectiveSalesFacts({
+    latestMessage: messages[1],
+    recentMessages: messages,
+    customerStage: "NEW",
+    currentCustomerTurn: {
+      joinedText: "相手との本音",
+      firstMessageId: "c2",
+    },
+  });
+
+  assert.equal(facts.is_reply_to_free_reading, false);
+  assert.equal(facts.key_operator_long_message, null);
+});
+
+test("deriveObjectiveSalesFacts should fuzzy-match close CTA option wording", () => {
+  const longMessage = [
+    "ここから先を見ていくために、この中から1つだけ送ってください",
+    "『相手の本音』",
+    "『距離の縮め方』",
+    "『付き合える流れ』",
+  ].join("\n");
+  const messages = [
+    {
+      id: "o1",
+      role: "OPERATOR" as const,
+      type: "TEXT" as const,
+      source: "MANUAL" as const,
+      japaneseText: longMessage,
+      chineseText: null,
+      sentAt: new Date("2026-01-01T10:00:00Z"),
+    },
+    {
+      ...customerMessage,
+      id: "c3",
+      japaneseText: "相手との本音",
+      sentAt: new Date("2026-01-01T10:01:00Z"),
+    },
+  ];
+
+  const facts = deriveObjectiveSalesFacts({
+    latestMessage: messages[1],
+    recentMessages: messages,
+    customerStage: "NEW",
+    currentCustomerTurn: {
+      joinedText: "相手との本音",
+      firstMessageId: "c3",
+    },
+  });
+
+  assert.equal(facts.hit_cta_option, true);
+  assert.equal(facts.selected_cta_option, "相手の本音");
 });

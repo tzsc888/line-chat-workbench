@@ -19,6 +19,27 @@ type DeepLXTranslateInput = {
   targetLang?: string;
 };
 
+function normalizeBubbleSpacing(text: string) {
+  const source = String(text || "").replace(/\r\n/g, "\n");
+  let normalized = source;
+  if (/[①②]/.test(normalized)) normalized = normalized.replace(/\n*\s*②/g, "\n\n②");
+  if (/③/.test(normalized)) normalized = normalized.replace(/\n*\s*③/g, "\n\n③");
+  normalized = normalized.replace(/\n{3,}/g, "\n\n");
+  return normalized.trim();
+}
+
+function normalizeChineseReviewTone(text: string) {
+  let out = String(text || "");
+  out = out.replace(/酱/g, "小姐");
+  out = out.replace(/占断/g, "鉴定");
+  out = out.replace(/调查/g, "查看");
+  out = out.replace(/個別鑑定/g, "个别鉴定");
+  out = out.replace(/鑑定/g, "鉴定");
+  out = out.replace(/もも小姐/g, "ももさん");
+  out = out.replace(/momo小姐/gi, "ももさん");
+  return normalizeBubbleSpacing(out);
+}
+
 function toPositiveInt(value: string | undefined, fallback: number) {
   const parsed = Number(value || "");
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -145,7 +166,7 @@ export async function translateCustomerJapaneseMessage(input: {
     model: translated.model,
     promptVersion: TRANSLATION_PROMPT_VERSION,
     parsed: {
-      translation: translated.text,
+      translation: normalizeChineseReviewTone(translated.text),
     } satisfies TranslationResult,
   };
 }
@@ -177,8 +198,13 @@ export async function translateGeneratedReplies(input: {
     model,
     promptVersion: `${TRANSLATION_PROMPT_VERSION}-reply`,
     parsed: {
-      reply_a_zh: replyA.text,
-      reply_b_zh: replyB.text,
+      reply_a_zh: normalizeChineseReviewTone(replyA.text),
+      reply_b_zh: normalizeChineseReviewTone(replyB.text),
     },
   };
 }
+
+export const __testOnly = {
+  normalizeChineseReviewTone,
+  normalizeBubbleSpacing,
+};

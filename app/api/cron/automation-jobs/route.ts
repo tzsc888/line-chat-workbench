@@ -7,7 +7,7 @@ import { isLegacyEndpointEnabled, legacyEndpointDisabledResponse } from "@/lib/l
 
 function isAuthorized(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
-  if (!cronSecret) throw new Error("缂哄皯 CRON_SECRET");
+  if (!cronSecret) throw new Error("missing CRON_SECRET");
   const bearer = request.headers.get("authorization");
   const headerSecret = request.headers.get("x-cron-secret");
   if (bearer?.startsWith("Bearer ") && constantTimeEqual(bearer.slice(7), cronSecret)) return true;

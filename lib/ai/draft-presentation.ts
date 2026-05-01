@@ -17,8 +17,8 @@ export type ReplyDraftLike = {
 
 function getDraftStaleReasonLabel(value?: string | null) {
   const map: Record<string, string> = {
-    "new-inbound-message": "Customer sent a newer message, draft is stale.",
-    "new-generation-generated": "A newer draft was generated, current draft is stale.",
+    "new-inbound-message": "顾客发来了更新消息，当前建议已过期。",
+    "new-generation-generated": "已有更新版本建议，当前建议已过期。",
   };
   return value ? map[value] || value : "";
 }
@@ -36,18 +36,18 @@ export function deriveDraftPresentation(latestDraft: ReplyDraftLike | null, late
   const issues: string[] = [];
 
   const statusNote = isUsed
-    ? `Selected: ${latestDraft?.selectedVariant === "STABLE" ? "A (safer)" : "B (more advancing)"}`
+    ? `已使用：${latestDraft?.selectedVariant === "STABLE" ? "A 稳妥版" : "B 推进版"}`
     : isStale
-      ? getDraftStaleReasonLabel(latestDraft?.staleReason) || "Draft is stale, regenerate with latest context."
-      : "Draft generated.";
+      ? getDraftStaleReasonLabel(latestDraft?.staleReason) || "当前建议已过期，请基于最新上下文重新生成回复。"
+      : "建议已生成。";
 
-  const primaryActionLabel = !latestDraft ? "Generate replies" : isStale ? "Regenerate on latest messages" : "Regenerate";
+  const primaryActionLabel = "生成回复";
 
   const primaryActionHint = !latestDraft
-    ? "No draft exists yet. Generate two reply options."
+    ? "当前还没有建议，点击生成回复后会给出两种回复方案。"
     : isStale
-      ? "Current draft is outdated. Generate again with latest conversation."
-      : "Regenerate to adjust tone, push strength, or constraints.";
+      ? "当前建议可能不是基于最新对话生成，请重新生成回复。"
+      : "可重新生成回复，调整语气、推进力度或约束。";
 
   return {
     isUsed,

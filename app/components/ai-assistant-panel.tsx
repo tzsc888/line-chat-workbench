@@ -13,6 +13,7 @@ type SuggestionCardProps = {
 };
 
 type AiAssistantPanelProps = {
+  hasCustomer: boolean;
   hasDraft: boolean;
   latestDraftPrimaryActionLabel: string;
   latestDraftPrimaryActionHint: string;
@@ -87,10 +88,18 @@ export function AiAssistantPanel(props: AiAssistantPanelProps) {
       </div>
 
       <div className="space-y-5">
+        {!props.hasCustomer ? (
+          <div className="space-y-2 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600">
+            <div className="font-semibold text-gray-900">请先选择顾客</div>
+            <div>从左侧顾客列表选择一位顾客后，可以生成本轮回复建议。</div>
+          </div>
+        ) : null}
+        {!props.hasCustomer ? null : (
+          <>
         {!props.hasDraft ? (
           <div className="space-y-3 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600">
-            <div className="font-semibold text-gray-900">当前还没有建议草稿</div>
-            <div>点击生成，主脑会基于最新高保真上下文输出 A/B 建议。</div>
+            <div className="font-semibold text-gray-900">当前还没有建议</div>
+            <div>当前还没有建议，点击生成回复后会给出两种回复方案。</div>
           </div>
         ) : null}
         {props.aiNotice ? <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">{props.aiNotice}</div> : null}
@@ -104,9 +113,9 @@ export function AiAssistantPanel(props: AiAssistantPanelProps) {
             <button
               onClick={props.onRewrite}
               disabled={props.isGenerating}
-              className="rounded-lg bg-black px-3 py-2 text-sm text-white disabled:opacity-60"
+              className="rounded-lg bg-black px-3 py-2 text-sm leading-none text-white whitespace-nowrap disabled:opacity-60"
             >
-              {props.isGenerating ? "生成中..." : props.latestDraftPrimaryActionLabel}
+              {props.isGenerating ? "正在生成回复..." : props.latestDraftPrimaryActionLabel}
             </button>
           </div>
           {props.isPostGenerateSyncing ? (
@@ -157,10 +166,12 @@ export function AiAssistantPanel(props: AiAssistantPanelProps) {
             disabled={props.isGenerating}
             className="mt-2 w-full rounded-lg bg-black py-2 text-white disabled:opacity-60"
           >
-            {props.isGenerating ? "生成中..." : props.latestDraftPrimaryActionLabel}
+            {props.isGenerating ? "正在生成回复..." : props.latestDraftPrimaryActionLabel}
           </button>
           {props.apiError ? <div className="mt-2 break-all text-xs text-red-500">{props.apiError}</div> : null}
         </div>
+          </>
+        )}
       </div>
     </div>
   );

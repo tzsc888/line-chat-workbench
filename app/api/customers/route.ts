@@ -190,14 +190,22 @@ export async function GET(req: NextRequest) {
     const skip = Math.max(0, (page - 1) * limit);
     const now = Date.now();
 
-    const overdueFollowupCount = await prisma.customer.count({
-      where: {
-        followupState: "ACTIVE",
-        nextFollowupAt: {
-          lte: new Date(),
+    const [overdueFollowupCount, unreadAggregate] = await Promise.all([
+      prisma.customer.count({
+        where: {
+          followupState: "ACTIVE",
+          nextFollowupAt: {
+            lte: new Date(),
+          },
         },
-      },
-    });
+      }),
+      prisma.customer.aggregate({
+        _sum: {
+          unreadCount: true,
+        },
+      }),
+    ]);
+    const totalUnreadCount = unreadAggregate._sum.unreadCount ?? 0;
 
     let customers: CustomerListRow[] = [];
     let hasMore = false;
@@ -259,6 +267,7 @@ export async function GET(req: NextRequest) {
       pageSize: limit,
       stats: {
         overdueFollowupCount,
+        totalUnreadCount,
       },
     });
   } catch (error) {

@@ -8,6 +8,29 @@ function normalize(text: string) {
   return text.replace(/\s+/g, " ").trim();
 }
 
+function normalizeForOptionMatch(text: string) {
+  const normalized = normalize(text)
+    .toLowerCase()
+    .replace(/(でお願いします|をお願いします|お願いします|です)$/g, "")
+    .replace(/ご縁/g, "御縁")
+    .replace(/良縁/g, "御縁")
+    .replace(/縁の相手/g, "御縁の相手")
+    .replace(/[「」『』（）\(\)\[\]【】,，。．・!！?？:：;；"'`~～\-ー_]/g, "")
+    .replace(/[のとがをにはへで]/g, "");
+  return normalized;
+}
+
+function getOptionMatchKeys(option: string) {
+  const base = normalizeForOptionMatch(option);
+  if (!base) return [];
+  const keys = new Set<string>([base]);
+  if (base.includes("御縁相手")) {
+    keys.add(base.replace(/御縁相手/g, "ご縁相手"));
+    keys.add(base.replace(/御縁相手/g, "縁相手"));
+  }
+  return Array.from(keys).filter((key) => key.length >= 2);
+}
+
 function toMs(value: Date | string | undefined) {
   if (!value) return null;
   const ms = new Date(value).getTime();
@@ -28,7 +51,7 @@ function extractCtaOptions(text: string) {
     .filter(Boolean);
 
   const ctaCueIndex = lines.findLastIndex((line) =>
-    /(この中から|1つだけ|ひとつだけ|送ってください|選んでください|近いもの)/.test(line),
+    /(この中から|1つだけ|ひとつだけ|送ってください|選んでください|近いもの|choose|send back)/i.test(line),
   );
 
   if (ctaCueIndex >= 0) {
@@ -42,6 +65,13 @@ function extractCtaOptions(text: string) {
     if (tailOptions.length >= 2) {
       return tailOptions;
     }
+    const plainTailOptions = ctaTailLines
+      .map((line) => normalize(line.replace(/^[\-*・●\d０-９]+[\.．:\-]?\s*/u, "")))
+      .filter((line) => /option|選択|流れ|本音|未来|安心|距離|お金|生活/i.test(line))
+      .slice(0, 8);
+    if (plainTailOptions.length >= 2) {
+      return Array.from(new Set(plainTailOptions));
+    }
   }
 
   const allQuoted = extractQuotedOptions(text);
@@ -52,11 +82,22 @@ function findLatestOperatorLongText(messages: ContextMessage[], latestMessageId:
   const ordered = [...messages].sort((a, b) => (toMs(a.sentAt) || 0) - (toMs(b.sentAt) || 0));
   const latestIndex = ordered.findIndex((item) => item.id === latestMessageId);
   const pool = latestIndex >= 0 ? ordered.slice(0, latestIndex).reverse() : ordered.reverse();
-  return (
-    pool.find((item) => item.role === "OPERATOR" && item.type === "TEXT" && normalize(item.japaneseText).length >= 80) ||
-    pool.find((item) => item.role === "OPERATOR" && item.type === "TEXT" && normalize(item.japaneseText).length > 0) ||
-    null
-  );
+  return pool.find((item) => {
+    if (item.role !== "OPERATOR" || item.type !== "TEXT") return false;
+    const rawText = String(item.japaneseText || "");
+    const text = normalize(rawText);
+    if (!text) return false;
+    const options = extractCtaOptions(text);
+    const plainOptionLineCount = rawText
+      .split(/\r?\n/)
+      .filter((line) => /(option[-\s]?\d+|^\s*[①-⑩]|『.+』|「.+」)/i.test(line)).length;
+    const hasCtaCue = /(この中から|1つだけ|ひとつだけ|送ってください|選んでください|近いもの|choose|option)/i.test(text);
+    const hasFreeReadingCue =
+      /(鑑定|占|流れ|深く|個別|ここから先|無料|有料|お伝え|視て|見ていきます|選んで|option|choose)/i.test(text);
+    const lineCount = text.split(/\r?\n/).filter(Boolean).length;
+    const longEnough = text.length >= 120 || (text.length >= 80 && lineCount >= 4);
+    return ((options.length >= 2 || plainOptionLineCount >= 2) && hasCtaCue) || (longEnough && hasFreeReadingCue);
+  }) || null;
 }
 
 function hasOperatorTextBeforeLatest(messages: ContextMessage[], latestMessageId: string) {
@@ -193,7 +234,12 @@ export function deriveObjectiveSalesFacts(input: {
   const keyOperatorLongMessage = findLatestOperatorLongText(input.recentMessages, input.latestMessage.id);
   const ctaOptions = keyOperatorLongMessage ? extractCtaOptions(keyOperatorLongMessage.japaneseText || "") : [];
   const turnText = String(input.currentCustomerTurn?.joinedText || input.latestMessage.japaneseText || "");
-  const selectedCtaOption = ctaOptions.find((option) => turnText.includes(option)) || null;
+  const normalizedTurnText = normalizeForOptionMatch(turnText);
+  const selectedCtaOption =
+    ctaOptions.find((option) => {
+      const keys = getOptionMatchKeys(option);
+      return keys.some((key) => normalizedTurnText.includes(key));
+    }) || null;
   const hasOperatorBeforeLatest = hasOperatorTextBeforeLatest(input.recentMessages, input.latestMessage.id);
 
   const latestMs = toMs(input.latestMessage.sentAt) || Date.now();

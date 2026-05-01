@@ -60,7 +60,7 @@ export async function POST(req: Request, { params }: Props) {
     }
 
     const scheduledFor = normalizeScheduledAtInput(scheduledForRaw);
-    validateScheduleWindow(scheduledFor, 30);
+    validateScheduleWindow(scheduledFor);
 
     let chineseText: string | null = null;
     if (japaneseText.trim()) {

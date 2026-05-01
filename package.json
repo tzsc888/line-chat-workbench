@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "check:mojibake": "node scripts/check-utf8-mojibake.mjs",
     "check:ai": "tsx scripts/check-ai-provider.ts",
     "postinstall": "prisma generate",
     "prisma:generate": "prisma generate",

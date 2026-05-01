@@ -2,7 +2,7 @@ name: Dispatch Scheduled Messages
 
 on:
   schedule:
-    - cron: '17,47 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -12,18 +12,19 @@ jobs:
       - name: Trigger production cron endpoint
         env:
           APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          BRIDGE_SHARED_SECRET: ${{ secrets.BRIDGE_SHARED_SECRET }}
         run: |
           if [ -z "$APP_BASE_URL" ]; then
             echo "APP_BASE_URL is required"
             exit 1
           fi
 
-          if [ -z "$CRON_SECRET" ]; then
-            echo "CRON_SECRET is required"
+          if [ -z "$BRIDGE_SHARED_SECRET" ]; then
+            echo "BRIDGE_SHARED_SECRET is required"
             exit 1
           fi
 
           curl --fail-with-body --show-error --silent \
-            -H "Authorization: Bearer ${CRON_SECRET}" \
-            "${APP_BASE_URL%/}/api/cron/scheduled-messages"
+            -X POST \
+            -H "x-bridge-secret: ${BRIDGE_SHARED_SECRET}" \
+            "${APP_BASE_URL%/}/api/bridge/scheduled-messages/dispatch"

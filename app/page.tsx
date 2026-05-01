@@ -145,6 +145,12 @@ type CustomerContextMenuState = {
   x: number;
   y: number;
 };
+type MessageContextMenuState = {
+  messageId: string;
+  customerId: string;
+  x: number;
+  y: number;
+};
 type PresetSnippet = {
   id: string;
   title: string;
@@ -166,6 +172,7 @@ type OptimisticWorkspaceMessage = WorkspaceMessage & {
 };
 type CustomerListStats = {
   overdueFollowupCount: number;
+  totalUnreadCount: number;
 };
 const CUSTOMER_PAGE_SIZE = 50;
 const OPTIMISTIC_ID_PREFIX = "optimistic:";
@@ -432,7 +439,7 @@ function HomePageContent() {
   const pathname = usePathname();
   const requestedCustomerId = searchParams.get("customerId") || "";
   const [customers, setCustomers] = useState<CustomerListItem[]>([]);
-  const [customerStats, setCustomerStats] = useState<CustomerListStats>({ overdueFollowupCount: 0 });
+  const [customerStats, setCustomerStats] = useState<CustomerListStats>({ overdueFollowupCount: 0, totalUnreadCount: 0 });
   const [customerPage, setCustomerPage] = useState(1);
   const [hasMoreCustomers, setHasMoreCustomers] = useState(false);
   const [isLoadingMoreCustomers, setIsLoadingMoreCustomers] = useState(false);
@@ -447,6 +454,7 @@ function HomePageContent() {
   const [customReply, setCustomReply] = useState<RewriteResult | null>(null);
   const [customerContextMenu, setCustomerContextMenu] =
     useState<CustomerContextMenuState | null>(null);
+  const [messageContextMenu, setMessageContextMenu] = useState<MessageContextMenuState | null>(null);
   const [isComposerMenuOpen, setIsComposerMenuOpen] = useState(false);
   const [isPresetPanelOpen, setIsPresetPanelOpen] = useState(false);
   const [presetSnippets, setPresetSnippets] = useState<PresetSnippet[]>([]);
@@ -460,7 +468,7 @@ function HomePageContent() {
   const [isComposerDragOver, setIsComposerDragOver] = useState(false);
   const [isListLoading, setIsListLoading] = useState(true);
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [generatingByCustomer, setGeneratingByCustomer] = useState<Record<string, boolean>>({});
   const [isSchedulingManual, setIsSchedulingManual] = useState(false);
   const [isSchedulePanelOpen, setIsSchedulePanelOpen] = useState(false);
   const [scheduleAtInput, setScheduleAtInput] = useState(() => buildDefaultScheduledInputValue());
@@ -471,42 +479,124 @@ function HomePageContent() {
   const [pageError, setPageError] = useState("");
   const [apiError, setApiError] = useState("");
   const [aiNotice, setAiNotice] = useState("");
+  const [opNotice, setOpNotice] = useState("");
+  const [translatingMessageIds, setTranslatingMessageIds] = useState<Record<string, boolean>>({});
   const clearCustomerQuery = useCallback(() => {
     if (!requestedCustomerId) return;
     router.replace(pathname, { scroll: false });
   }, [pathname, requestedCustomerId, router]);
-  const playIncomingSound = useCallback(() => {
-    if (!audioEnabledRef.current) return;
-    const now = Date.now();
-    if (now - lastIncomingSoundAtRef.current < 900) return;
-    lastIncomingSoundAtRef.current = now;
+  const showOpNotice = useCallback((text: string) => {
+    setOpNotice(text);
+    if (opNoticeTimerRef.current != null) {
+      window.clearTimeout(opNoticeTimerRef.current);
+    }
+    opNoticeTimerRef.current = window.setTimeout(() => {
+      setOpNotice("");
+      opNoticeTimerRef.current = null;
+    }, 1800);
+  }, []);
+  const ensureAudioReady = useCallback(async () => {
     try {
       const AudioContextClass =
         typeof window !== "undefined"
           ? (window.AudioContext ||
               (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)
           : undefined;
-      if (!AudioContextClass) return;
+      if (!AudioContextClass) return null;
       const context = audioContextRef.current ?? new AudioContextClass();
       audioContextRef.current = context;
       if (context.state === "suspended") {
-        void context.resume();
+        await context.resume();
       }
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      oscillator.type = "sine";
-      oscillator.frequency.setValueAtTime(880, context.currentTime);
-      gain.gain.setValueAtTime(0.0001, context.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.06, context.currentTime + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.18);
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.start(context.currentTime);
-      oscillator.stop(context.currentTime + 0.18);
+      audioEnabledRef.current = true;
+      return context;
+    } catch (error) {
+      console.error("audio ensure error:", error);
+      return null;
+    }
+  }, []);
+  const playDingDongSound = useCallback(async () => {
+    const now = Date.now();
+    if (now - lastIncomingSoundAtRef.current < 900) return;
+    lastIncomingSoundAtRef.current = now;
+    try {
+      const context = await ensureAudioReady();
+      if (!context) return;
+
+      const buildNote = (params: {
+        start: number;
+        duration: number;
+        mainFreq: number;
+        bodyFreq: number;
+        peak: number;
+      }) => {
+        const { start, duration, mainFreq, bodyFreq, peak } = params;
+        const end = start + duration;
+
+        const mainGain = context.createGain();
+        mainGain.gain.setValueAtTime(0.0001, start);
+        mainGain.connect(context.destination);
+        const mainOsc = context.createOscillator();
+        mainOsc.type = "sine";
+        mainOsc.frequency.setValueAtTime(mainFreq, start);
+        mainOsc.connect(mainGain);
+        mainGain.gain.exponentialRampToValueAtTime(peak, start + 0.014);
+        mainGain.gain.exponentialRampToValueAtTime(0.0001, end);
+        mainOsc.start(start);
+        mainOsc.stop(end);
+
+        const bodyGain = context.createGain();
+        bodyGain.gain.setValueAtTime(0.0001, start);
+        bodyGain.connect(context.destination);
+        const bodyOsc = context.createOscillator();
+        bodyOsc.type = "sine";
+        bodyOsc.frequency.setValueAtTime(bodyFreq, start);
+        bodyOsc.connect(bodyGain);
+        bodyGain.gain.exponentialRampToValueAtTime(peak * 0.2, start + 0.016);
+        bodyGain.gain.exponentialRampToValueAtTime(0.0001, end);
+        bodyOsc.start(start);
+        bodyOsc.stop(end);
+      };
+
+      const note1Start = context.currentTime;
+      const note2Start = note1Start + 0.18;
+      buildNote({
+        start: note1Start,
+        duration: 0.2,
+        mainFreq: 660,
+        bodyFreq: 294,
+        peak: 0.3,
+      });
+      buildNote({
+        start: note2Start,
+        duration: 0.28,
+        mainFreq: 520,
+        bodyFreq: 220,
+        peak: 0.25,
+      });
     } catch (error) {
       console.error("incoming sound error:", error);
     }
-  }, []);
+  }, [ensureAudioReady]);
+  const playSoftTickSound = useCallback(async (kind: "tap" | "success" = "tap") => {
+    try {
+      const context = await ensureAudioReady();
+      if (!context) return;
+      const osc = context.createOscillator();
+      const gain = context.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(kind === "success" ? 460 : 400, context.currentTime);
+      gain.gain.setValueAtTime(0.0001, context.currentTime);
+      gain.gain.exponentialRampToValueAtTime(kind === "success" ? 0.075 : 0.055, context.currentTime + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + (kind === "success" ? 0.09 : 0.07));
+      osc.connect(gain);
+      gain.connect(context.destination);
+      osc.start(context.currentTime);
+      osc.stop(context.currentTime + (kind === "success" ? 0.09 : 0.07));
+    } catch (error) {
+      console.error("ui sound error:", error);
+    }
+  }, [ensureAudioReady]);
   const resizeManualReplyTextarea = useCallback(() => {
     const textarea = manualReplyTextareaRef.current;
     if (!textarea) return;
@@ -546,16 +636,31 @@ function HomePageContent() {
   const lastOpenedCustomerIdRef = useRef("");
   const hasInitializedUnreadSnapshotRef = useRef(false);
   const previousUnreadMapRef = useRef<Record<string, number>>({});
+  const opNoticeTimerRef = useRef<number | null>(null);
   const audioEnabledRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastIncomingSoundAtRef = useRef(0);
-  const generationPollTimerRef = useRef<number | null>(null);
-  const generationPollAbortRef = useRef<AbortController | null>(null);
-  const activeGenerationTaskRef = useRef<{ taskId: string; customerId: string } | null>(null);
+  const generationPollersRef = useRef<Record<string, {
+    taskId: string;
+    timerId: number | null;
+    abortController: AbortController | null;
+  }>>({});
+  const customerListLatestScrollTopRef = useRef(0);
+  const recentLocalRefreshAtRef = useRef<Record<string, number>>({});
   useEffect(() => {
     return () => {
       customerListAbortControllerRef.current?.abort();
       workspaceAbortControllerRef.current?.abort();
+      Object.values(generationPollersRef.current).forEach((poller) => {
+        if (poller.timerId != null) {
+          window.clearTimeout(poller.timerId);
+        }
+        poller.abortController?.abort();
+      });
+      generationPollersRef.current = {};
+      if (opNoticeTimerRef.current != null) {
+        window.clearTimeout(opNoticeTimerRef.current);
+      }
     };
   }, []);
   const preserveCustomerListViewport = useCallback((apply: () => void) => {
@@ -566,7 +671,11 @@ function HomePageContent() {
     requestAnimationFrame(() => {
       const current = customerListScrollRef.current;
       if (!current) return;
+      // Do not override user scroll when they moved during async refresh.
+      const latestScrollTop = customerListLatestScrollTopRef.current;
+      if (Math.abs(latestScrollTop - previousScrollTop) > 4) return;
       current.scrollTop = previousScrollTop;
+      customerListLatestScrollTopRef.current = current.scrollTop;
     });
   }, []);
   const loadPresetSnippets = useCallback(async () => {
@@ -645,7 +754,7 @@ function HomePageContent() {
         const list: CustomerListItem[] = data.customers || [];
         const nextHasMore = !!data.hasMore;
         const nextPage = Number(data.page || page);
-        const nextStats: CustomerListStats = data.stats || { overdueFollowupCount: 0 };
+        const nextStats: CustomerListStats = data.stats || { overdueFollowupCount: 0, totalUnreadCount: 0 };
 
         setCustomers((prev) => {
           if (isLoadMore) {
@@ -681,7 +790,9 @@ function HomePageContent() {
           requestAnimationFrame(() => {
             const container = customerListScrollRef.current;
             if (!container) return;
+            if (Math.abs(customerListLatestScrollTopRef.current - listScrollTop) > 4) return;
             container.scrollTop = listScrollTop;
+            customerListLatestScrollTopRef.current = container.scrollTop;
           });
         }
       } catch (error) {
@@ -1231,6 +1342,9 @@ function HomePageContent() {
     setScheduleAtInput(buildDefaultScheduledInputValue());
   }, [selectedCustomerId]);
   useEffect(() => {
+    customerListLatestScrollTopRef.current = customerListScrollRef.current?.scrollTop ?? 0;
+  }, [customers.length]);
+  useEffect(() => {
     resizeManualReplyTextarea();
   }, [manualReply, resizeManualReplyTextarea]);
   useEffect(() => {
@@ -1275,10 +1389,10 @@ function HomePageContent() {
       return latestPreviewFromCustomer && customer.unreadCount > previousUnread;
     });
     if (hasIncomingUnread) {
-      playIncomingSound();
+      void playDingDongSound();
     }
     previousUnreadMapRef.current = nextUnreadMap;
-  }, [customers, playIncomingSound]);
+  }, [customers, playDingDongSound]);
   useEffect(() => {
     function handleDocumentClick(event: MouseEvent) {
       const target = event.target as Node;
@@ -1288,6 +1402,7 @@ function HomePageContent() {
       if (schedulePanelRef.current && !schedulePanelRef.current.contains(target)) {
         setIsSchedulePanelOpen(false);
       }
+      setMessageContextMenu(null);
     }
     document.addEventListener("mousedown", handleDocumentClick);
     return () => document.removeEventListener("mousedown", handleDocumentClick);
@@ -1303,14 +1418,31 @@ function HomePageContent() {
     void markCustomerRead(selectedCustomerId);
   }, [customers, selectedCustomerId, markCustomerRead]);
   useEffect(() => {
-    const handleCloseContextMenu = () => setCustomerContextMenu(null);
+    const handleCloseContextMenu = () => {
+      setCustomerContextMenu(null);
+      setMessageContextMenu(null);
+    };
+    const handleEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setCustomerContextMenu(null);
+      setMessageContextMenu(null);
+    };
+    const handleScrollClose = () => setMessageContextMenu(null);
+    const chatContainer = chatScrollRef.current;
     window.addEventListener("click", handleCloseContextMenu);
     window.addEventListener("resize", handleCloseContextMenu);
+    window.addEventListener("keydown", handleEscape);
+    chatContainer?.addEventListener("scroll", handleScrollClose, { passive: true });
     return () => {
       window.removeEventListener("click", handleCloseContextMenu);
       window.removeEventListener("resize", handleCloseContextMenu);
+      window.removeEventListener("keydown", handleEscape);
+      chatContainer?.removeEventListener("scroll", handleScrollClose);
     };
   }, []);
+  useEffect(() => {
+    setMessageContextMenu(null);
+  }, [selectedCustomerId]);
   useEffect(() => {
     const sentinel = customerListLoadMoreRef.current;
     const container = customerListScrollRef.current;
@@ -1388,6 +1520,12 @@ function HomePageContent() {
           payload && typeof payload.customerId === "string" && payload.customerId.trim()
             ? payload.customerId.trim()
             : null;
+        if (targetCustomerId) {
+          const lastLocalRefreshAt = recentLocalRefreshAtRef.current[targetCustomerId] ?? 0;
+          if (Date.now() - lastLocalRefreshAt < 1200) {
+            return;
+          }
+        }
         void runRealtimeRefresh(targetCustomerId);
       }, 250);
     };
@@ -1492,7 +1630,7 @@ function HomePageContent() {
   const effectiveAiNotice =
     aiNotice ||
     (hasLatestDraftTranslationFailure
-      ? "Japanese suggestions are ready. Chinese meaning is temporarily unavailable."
+      ? "日语建议已生成，中文释义暂不可用。"
       : "");
   const isLatestDraftUsed = !!latestDraft?.selectedVariant;
   const isLatestDraftStale =
@@ -1502,21 +1640,22 @@ function HomePageContent() {
       !!latestDraft.targetCustomerMessageId &&
       latestDraft.targetCustomerMessageId !== workspace.latestCustomerMessageId);
   const shouldDimDraft = isLatestDraftUsed || isLatestDraftStale;
-  const latestDraftPrimaryActionLabel = !latestDraft ? "Generate replies" : isLatestDraftStale ? "Regenerate on latest messages" : "Regenerate";
+  const latestDraftPrimaryActionLabel = "生成回复";
   const latestDraftPrimaryActionHint = !latestDraft
-    ? "No draft exists yet. Generate two reply options."
+    ? "当前还没有建议，点击生成回复后会给出两种回复方案。"
     : isLatestDraftStale
-      ? "Current draft is outdated. Generate again with latest conversation."
-      : "Regenerate to adjust tone, push strength, or constraints.";
+      ? "当前建议可能不是基于最新对话生成，请重新生成回复。"
+      : "可重新生成回复，调整语气、推进力度或约束。";
   useEffect(() => {
     setCustomReply(null);
     setAiNotice("");
     setIsPostGenerateSyncing(false);
     setPostGenerateSyncMessage("");
-  }, [selectedCustomerId, workspace?.latestReplyDraftSet?.id, workspace?.latestCustomerMessageId]);
+  }, [selectedCustomerId]);
   const runPostGenerateRefresh = useCallback((customerId: string) => {
     setIsPostGenerateSyncing(true);
     setPostGenerateSyncMessage("");
+    recentLocalRefreshAtRef.current[customerId] = Date.now();
     void (async () => {
       const [workspaceResult, customersResult] = await Promise.allSettled([
         loadWorkspace(customerId, { preserveUi: true }),
@@ -1537,133 +1676,232 @@ function HomePageContent() {
       setIsPostGenerateSyncing(false);
     })();
   }, [loadCustomers, loadWorkspace]);
-  const stopGenerationPolling = useCallback(() => {
-    if (generationPollTimerRef.current != null) {
-      window.clearTimeout(generationPollTimerRef.current);
-      generationPollTimerRef.current = null;
+  const stopGenerationPollingByCustomer = useCallback((customerId: string) => {
+    const poller = generationPollersRef.current[customerId];
+    if (!poller) return;
+    if (poller.timerId != null) {
+      window.clearTimeout(poller.timerId);
     }
-    if (generationPollAbortRef.current) {
-      generationPollAbortRef.current.abort();
-      generationPollAbortRef.current = null;
-    }
-    activeGenerationTaskRef.current = null;
+    poller.abortController?.abort();
+    delete generationPollersRef.current[customerId];
+    setGeneratingByCustomer((prev) => {
+      if (!prev[customerId]) return prev;
+      const next = { ...prev };
+      delete next[customerId];
+      return next;
+    });
   }, []);
+  const buildMessageCopyText = useCallback((message: WorkspaceMessage | OptimisticWorkspaceMessage) => {
+    const japanese = message.japaneseText.trim();
+    const chinese = (message.chineseText || "").trim();
+    if (japanese && chinese) {
+      return `原文：\n${japanese}\n\n翻译：\n${chinese}`;
+    }
+    if (japanese) return japanese;
+    if (chinese) return chinese;
+    if (message.type === "IMAGE") return message.imageUrl ? `图片：${message.imageUrl}` : "";
+    if (message.type === "STICKER") {
+      const packageId = message.stickerPackageId || "-";
+      const stickerId = message.stickerId || "-";
+      return `贴图 packageId: ${packageId}\n贴图 stickerId: ${stickerId}`;
+    }
+    return "";
+  }, []);
+  const handleCopyMessage = useCallback(async (message: WorkspaceMessage | OptimisticWorkspaceMessage) => {
+    const text = buildMessageCopyText(message);
+    if (!text) {
+      showOpNotice("当前消息没有可复制的文本。");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      void playSoftTickSound("success");
+      showOpNotice("已复制消息内容");
+    } catch (error) {
+      console.error("copy message failed:", error);
+      showOpNotice("复制失败，请手动选择文本复制。");
+    }
+  }, [buildMessageCopyText, playSoftTickSound, showOpNotice]);
+  const handleTranslateSingleMessage = useCallback(async (message: WorkspaceMessage | OptimisticWorkspaceMessage) => {
+    if (isOptimisticMessageId(message.id)) {
+      showOpNotice("消息发送中，暂时无法翻译。");
+      return;
+    }
+    if (message.type !== "TEXT") {
+      showOpNotice("该消息暂不支持翻译。");
+      return;
+    }
+    const japanese = message.japaneseText.trim();
+    if (!japanese) {
+      showOpNotice("当前消息没有可翻译文本。");
+      return;
+    }
+    if (translatingMessageIds[message.id]) return;
+    setTranslatingMessageIds((prev) => ({ ...prev, [message.id]: true }));
+    try {
+      const translateResponse = await fetch("/api/translate-message", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ japanese }),
+      });
+      const translateData = await translateResponse.json();
+      if (!translateResponse.ok || !translateData.ok || !translateData.chinese) {
+        throw new Error(translateData?.error || "translate_failed");
+      }
+      const chineseText = String(translateData.chinese || "").trim();
+      if (!chineseText) {
+        throw new Error("translate_empty");
+      }
+      const patchResponse = await fetch(`/api/messages/${message.id}/translation`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ chineseText }),
+      });
+      const patchData = await patchResponse.json().catch(() => ({}));
+      if (!patchResponse.ok || !patchData.ok) {
+        throw new Error(patchData?.error || "save_translation_failed");
+      }
+      updateWorkspaceMessage(message.customerId, message.id, (prev) => ({
+        ...prev,
+        chineseText,
+      }));
+      void playSoftTickSound("success");
+      showOpNotice("翻译已更新");
+    } catch (error) {
+      console.error("translate single message failed:", error);
+      showOpNotice("翻译失败，请稍后重试。");
+    } finally {
+      setTranslatingMessageIds((prev) => {
+        const next = { ...prev };
+        delete next[message.id];
+        return next;
+      });
+    }
+  }, [playSoftTickSound, showOpNotice, translatingMessageIds, updateWorkspaceMessage]);
   const formatGenerationTaskError = useCallback((task: GenerationTaskView) => {
     const code = String(task.errorCode || "").trim();
     const message = String(task.errorMessage || "").trim();
-    if (code === "generation_structured_timeout") return "Generation failed: Japanese A/B generation timed out.";
-    if (code === "translation_structured_timeout") return "Generation failed: Chinese meaning translation timed out.";
-    if (code === "generation_structured_failed") return "Generation failed: Japanese A/B structured output failed.";
-    if (code === "translation_structured_failed") return "Generation failed: Chinese meaning structured output failed.";
-    if (code === "MODEL_TIMEOUT") return "Generation failed: model timeout.";
-    if (code === "MODEL_JSON_PARSE_ERROR") return "Generation failed: malformed JSON output.";
-    if (code === "MODEL_SCHEMA_INVALID") return "Generation failed: schema validation failed.";
-    if (code === "generation_missing_japanese_reply") return "Generation failed: missing Japanese reply.";
-    if (code === "translation_missing_reply_meaning") return "Generation failed: missing Chinese meaning.";
-    if (code === "TASK_STALE_TIMEOUT") return "Generation failed: task timed out and reached retry limit.";
+    if (code === "generation_structured_timeout") return "生成失败：日语 A/B 回复生成超时。";
+    if (code === "translation_structured_timeout") return "生成失败：中文释义翻译超时。";
+    if (code === "generation_structured_failed") return "生成失败：日语 A/B 结构化输出失败。";
+    if (code === "translation_structured_failed") return "生成失败：中文释义结构化输出失败。";
+    if (code === "MODEL_TIMEOUT") return "生成失败：模型响应超时。";
+    if (code === "MODEL_JSON_PARSE_ERROR") return "生成失败：模型 JSON 输出格式错误。";
+    if (code === "MODEL_SCHEMA_INVALID") return "生成失败：模型输出未通过结构校验。";
+    if (code === "generation_missing_japanese_reply") return "生成失败：缺少日语回复内容。";
+    if (code === "translation_missing_reply_meaning") return "生成失败：缺少中文释义。";
+    if (code === "TASK_STALE_TIMEOUT") return "生成失败：任务轮询超时并达到重试上限。";
     if (message) return message;
-    return code ? `Generation failed: ${code}` : "Generation failed: unknown error.";
+    return code ? ("生成失败：" + code) : "生成失败：未知错误。";
   }, []);
   const startGenerationPolling = useCallback((taskId: string, customerId: string) => {
-    stopGenerationPolling();
-    activeGenerationTaskRef.current = { taskId, customerId };
+    stopGenerationPollingByCustomer(customerId);
+    generationPollersRef.current[customerId] = {
+      taskId,
+      timerId: null,
+      abortController: null,
+    };
+    setGeneratingByCustomer((prev) => ({ ...prev, [customerId]: true }));
 
     const poll = async () => {
-      const active = activeGenerationTaskRef.current;
-      if (!active || active.taskId !== taskId || active.customerId !== customerId) return;
+      const active = generationPollersRef.current[customerId];
+      if (!active || active.taskId !== taskId) return;
 
       const controller = new AbortController();
-      generationPollAbortRef.current = controller;
+      active.abortController = controller;
 
       try {
         const response = await fetch(
-          `/api/generate-replies/tasks/${encodeURIComponent(taskId)}?customerId=${encodeURIComponent(customerId)}`,
+          "/api/generate-replies/tasks/" + encodeURIComponent(taskId) + "?customerId=" + encodeURIComponent(customerId),
           { method: "GET", signal: controller.signal },
         );
         const payload = await response.json().catch(() => ({}));
         if (!response.ok || !payload?.ok || !payload?.task) {
-          throw new Error(payload?.error || `task_status_http_${response.status}`);
+          throw new Error(payload?.error || ("task_status_http_" + response.status));
         }
 
         const task = payload.task as GenerationTaskView;
         if (task.status === "SUCCEEDED") {
-          stopGenerationPolling();
-          if (selectedCustomerIdRef.current !== customerId) return;
+          stopGenerationPollingByCustomer(customerId);
           const taskErrorCode = String(task.errorCode || "").trim();
           const translationFailed =
             String(task.stage || "").includes("translation-failure") ||
             taskErrorCode.startsWith("translation_");
-          setIsGenerating(false);
-          setApiError("");
-          setAiNotice(
-            translationFailed
-              ? "Japanese suggestions are ready. Chinese meaning is temporarily unavailable."
-              : "Suggestions are ready.",
-          );
-          setRewriteInput("");
+          if (selectedCustomerIdRef.current === customerId) {
+            setApiError("");
+            setAiNotice(
+              translationFailed
+                ? "日语建议已生成，中文释义暂不可用。"
+                : "建议已生成。",
+            );
+            setRewriteInput("");
+          }
           runPostGenerateRefresh(customerId);
           return;
         }
 
         if (task.status === "FAILED") {
-          stopGenerationPolling();
-          if (selectedCustomerIdRef.current !== customerId) return;
-          setIsGenerating(false);
+          stopGenerationPollingByCustomer(customerId);
           const errorText = formatGenerationTaskError(task);
-          setApiError(errorText);
-          setAiNotice("");
-          window.alert(errorText);
+          if (selectedCustomerIdRef.current === customerId) {
+            setApiError(errorText);
+            setAiNotice("");
+          }
+          showOpNotice("生成失败，请稍后重试。");
           return;
         }
 
         if (selectedCustomerIdRef.current === customerId) {
-          setAiNotice("Generating reply suggestions...");
+          setAiNotice("正在生成回复...");
         }
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        stopGenerationPolling();
+        stopGenerationPollingByCustomer(customerId);
         if (selectedCustomerIdRef.current === customerId) {
-          setIsGenerating(false);
           setApiError(String(error instanceof Error ? error.message : error));
+          setAiNotice("");
         }
         return;
       } finally {
-        generationPollAbortRef.current = null;
+        const current = generationPollersRef.current[customerId];
+        if (current && current.taskId === taskId) {
+          current.abortController = null;
+        }
       }
 
-      generationPollTimerRef.current = window.setTimeout(poll, 1200);
+      const current = generationPollersRef.current[customerId];
+      if (!current || current.taskId !== taskId) return;
+      current.timerId = window.setTimeout(poll, 1200);
     };
 
     void poll();
-  }, [formatGenerationTaskError, runPostGenerateRefresh, stopGenerationPolling]);
-  useEffect(() => {
-    stopGenerationPolling();
-    setIsGenerating(false);
-  }, [selectedCustomerId, stopGenerationPolling]);
-  useEffect(() => {
-    return () => {
-      stopGenerationPolling();
-    };
-  }, [stopGenerationPolling]);
+  }, [formatGenerationTaskError, runPostGenerateRefresh, showOpNotice, stopGenerationPollingByCustomer]);
   async function handleRewrite() {
     if (!workspace) {
-      window.alert("No customer selected.");
+      showOpNotice("请先选择顾客。");
       return;
     }
+    const customerId = workspace.customer.id;
+    if (generatingByCustomer[customerId]) return;
     try {
-      setIsGenerating(true);
+      void playSoftTickSound("tap");
+      setGeneratingByCustomer((prev) => ({ ...prev, [customerId]: true }));
       setApiError("");
       setAiNotice("");
       setCustomReply(null);
       setPostGenerateSyncMessage("");
-      stopGenerationPolling();
+      stopGenerationPollingByCustomer(customerId);
       const response = await fetch("/api/generate-replies", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          customerId: workspace.customer.id,
+          customerId,
           rewriteInput,
         }),
       });
@@ -1675,7 +1913,14 @@ function HomePageContent() {
       if (!taskId) throw new Error("missing taskId");
       const immediateSucceeded = String(data?.status || "").toUpperCase() === "SUCCEEDED";
       if (immediateSucceeded) {
-        if (selectedCustomerIdRef.current !== workspace.customer.id) return;
+        if (selectedCustomerIdRef.current !== customerId) {
+          setGeneratingByCustomer((prev) => {
+            const next = { ...prev };
+            delete next[customerId];
+            return next;
+          });
+          return;
+        }
         setCustomReply({
           suggestion1Ja: String(data?.suggestion1Ja || ""),
           suggestion1Zh: String(data?.suggestion1Zh || ""),
@@ -1685,25 +1930,32 @@ function HomePageContent() {
             String(data?.translationStatus || "").trim() === "failed" ? "failed" : "succeeded",
           translationErrorCode: String(data?.translationErrorCode || "").trim(),
         });
-        setIsGenerating(false);
+        setGeneratingByCustomer((prev) => {
+          const next = { ...prev };
+          delete next[customerId];
+          return next;
+        });
         setApiError("");
         setAiNotice(
           String(data?.translationStatus || "").trim() === "failed"
-            ? "Japanese suggestions are ready. Chinese meaning is temporarily unavailable."
-            : "Suggestions are ready.",
+            ? "日语建议已生成，中文释义暂不可用。"
+            : "建议已生成。",
         );
         setRewriteInput("");
-        void runPostGenerateRefresh(workspace.customer.id);
+        void runPostGenerateRefresh(customerId);
         return;
       }
-      setAiNotice("Generating reply suggestions...");
-      startGenerationPolling(taskId, workspace.customer.id);
+      setAiNotice("正在生成回复...");
+      startGenerationPolling(taskId, customerId);
     } catch (error) {
       console.error(error);
-      stopGenerationPolling();
-      setIsGenerating(false);
+      setGeneratingByCustomer((prev) => {
+        const next = { ...prev };
+        delete next[customerId];
+        return next;
+      });
       setApiError(String(error));
-      window.alert("Generate failed. Please check the error panel.");
+      showOpNotice("生成失败，请稍后重试。");
     }
   }
   async function addAiReplyToChat(
@@ -2007,8 +2259,13 @@ function HomePageContent() {
       window.alert("定时发送时间格式不正确");
       return;
     }
-    if (scheduledFor.getTime() - Date.now() < 30 * 60 * 1000) {
-      window.alert("定时发送至少要比当前时间晚 30 分钟");
+    const diffMs = scheduledFor.getTime() - Date.now();
+    if (diffMs < 5 * 60 * 1000) {
+      window.alert("请至少提前 5 分钟设置定时发送。");
+      return;
+    }
+    if (diffMs > 24 * 60 * 60 * 1000) {
+      window.alert("当前定时发送最多支持 24 小时以内。");
       return;
     }
     const japaneseText = manualReply.replace(/\r\n/g, "\n");
@@ -2124,6 +2381,7 @@ function HomePageContent() {
     }
   }
   function handleSelectCustomer(customerId: string) {
+    void playSoftTickSound("tap");
     openChatToBottomRef.current = true;
     shouldStickToBottomRef.current = true;
     setSelectedCustomerId(customerId);
@@ -2189,16 +2447,37 @@ function HomePageContent() {
     const nearBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight < 80;
     shouldStickToBottomRef.current = nearBottom;
+    setMessageContextMenu(null);
+  }
+  function handleCustomerListScroll() {
+    const container = customerListScrollRef.current;
+    if (!container) return;
+    customerListLatestScrollTopRef.current = container.scrollTop;
   }
   const contextMenuCustomer = customerContextMenu?.customer || null;
+  const contextMenuMessage =
+    messageContextMenu
+      ? displayedWorkspaceMessages.find(
+          (item) => item.id === messageContextMenu.messageId && item.customerId === messageContextMenu.customerId
+        ) || null
+      : null;
   const overdueFollowupCount = customerStats.overdueFollowupCount;
+  const totalUnreadCount = customerStats.totalUnreadCount;
+  const isGeneratingCurrentCustomer = !!(selectedCustomerId && generatingByCustomer[selectedCustomerId]);
   const canManualSend = !!workspace && !isUploadingImage && (pendingImages.length > 0 || !!manualReply.trim());
   const canScheduleManual = !!workspace && !isSchedulingManual && !isUploadingImage && pendingImages.length === 0 && !!manualReply.trim();
   return (
     <div className="h-screen bg-gray-100 flex">
-      <div ref={customerListScrollRef} className="w-[24%] bg-gray-50 border-r border-gray-200 p-4 overflow-y-auto">
+      <div ref={customerListScrollRef} onScroll={handleCustomerListScroll} className="w-[24%] bg-gray-50 border-r border-gray-200 p-4 overflow-y-auto">
         <div className="mb-3 flex items-center justify-between gap-3">
-          <button onClick={handleCollapseChat} className="text-lg font-bold text-left hover:text-green-700 transition">顾客列表</button>
+          <div className="flex items-center gap-2">
+            <button onClick={handleCollapseChat} className="text-lg font-bold text-left text-gray-900 hover:text-emerald-700 transition">顾客列表</button>
+            {totalUnreadCount > 0 ? (
+              <span className="inline-flex min-w-6 items-center justify-center rounded-full bg-emerald-600 px-2 py-0.5 text-[11px] font-semibold text-white">
+                {totalUnreadCount > 99 ? "99+" : totalUnreadCount}
+              </span>
+            ) : null}
+          </div>
           <Link
             href="/followups"
             className="inline-flex shrink-0 items-center gap-2 rounded-full border border-neutral-300 bg-white px-3 py-1 text-xs font-medium text-neutral-700 shadow-sm transition hover:bg-neutral-50"
@@ -2234,16 +2513,17 @@ function HomePageContent() {
                   onClick={() => handleSelectCustomer(customer.id)}
                   onContextMenu={(event) => {
                     event.preventDefault();
+                    void playSoftTickSound("tap");
                     setCustomerContextMenu({
                       customer,
                       x: event.clientX,
                       y: event.clientY,
                     });
                   }}
-                  className={`group h-[76px] px-3 rounded-xl cursor-pointer border transition-all shadow-sm ${
+                  className={`group h-[76px] px-3 rounded-xl cursor-pointer border transition-all ${
                     isActive
-                      ? "bg-green-50 border-green-200 shadow-green-100/80"
-                      : "bg-white border-gray-200 hover:bg-gray-50 hover:border-gray-300"
+                      ? "bg-emerald-50 border-emerald-300 shadow-sm shadow-emerald-200/70 ring-1 ring-emerald-200/80"
+                      : "bg-white border-slate-200 shadow-sm hover:bg-slate-50 hover:border-slate-300"
                   }`}
                 >
                   <div className="h-full flex items-center gap-3">
@@ -2264,16 +2544,16 @@ function HomePageContent() {
                           {customer.followup?.isOverdue ? (
                             <span className="h-2 w-2 shrink-0 rounded-full bg-red-500" title="跟进已到期" />
                           ) : null}
-                          <div className="truncate text-[14px] font-semibold text-gray-900">
-                            {getDisplayName(customer)}
-                          </div>
+                        <div className={`truncate text-[14px] font-semibold ${customer.unreadCount > 0 ? "text-slate-950" : "text-gray-900"}`}>
+                          {getDisplayName(customer)}
+                        </div>
                         </div>
                         <div className="shrink-0 text-[11px] text-gray-400">
                           {formatListTime(customer.lastMessageAt)}
                         </div>
                       </div>
                       <div className="mt-1 flex items-center gap-2">
-                        <div className="min-w-0 flex-1 truncate text-[12px] text-gray-500">
+                        <div className={`min-w-0 flex-1 truncate text-[12px] ${customer.unreadCount > 0 ? "text-slate-700" : "text-gray-500"}`}>
                           {latestPreview}
                         </div>
                         {customer.followup ? (
@@ -2381,6 +2661,22 @@ function HomePageContent() {
                   >
                     <div className="max-w-md">
                       <div
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          const menuWidth = 184;
+                          const menuHeight = 116;
+                          const maxLeft = Math.max(8, window.innerWidth - menuWidth - 8);
+                          const maxTop = Math.max(8, window.innerHeight - menuHeight - 8);
+                          const left = Math.max(8, Math.min(event.clientX, maxLeft));
+                          const top = Math.max(8, Math.min(event.clientY, maxTop));
+                          setMessageContextMenu({
+                            messageId: msg.id,
+                            customerId: msg.customerId,
+                            x: left,
+                            y: top,
+                          });
+                          void playSoftTickSound("tap");
+                        }}
                         className={`p-3 rounded-2xl shadow text-sm ${
                           msg.role === "CUSTOMER"
                             ? "bg-white text-black"
@@ -2470,6 +2766,11 @@ function HomePageContent() {
                           {msg.sendError}
                         </div>
                       ) : null}
+                      {translatingMessageIds[msg.id] ? (
+                        <div className="mt-1 text-[11px] text-sky-600">
+                          正在翻译...
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -2547,13 +2848,6 @@ function HomePageContent() {
                       <div className="text-[11px] text-gray-400 mt-1">支持点击选择，也支持把图片拖到输入区</div>
                     </button>
                     <button
-                      onClick={handleSendSticker}
-                      className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50 border-t border-gray-100"
-                    >
-                      发送贴图
-                      <div className="text-[11px] text-gray-400 mt-1">输入 packageId 和 stickerId 后立即发送</div>
-                    </button>
-                    <button
                       onClick={openPresetPanel}
                       className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50 border-t border-gray-100"
                     >
@@ -2587,7 +2881,7 @@ function HomePageContent() {
                 {isSchedulePanelOpen ? (
                   <div className="absolute bottom-14 right-0 z-20 w-[320px] rounded-2xl border border-gray-200 bg-white p-4 shadow-2xl">
                     <div className="text-sm font-semibold text-gray-900">定时发送</div>
-                    <div className="mt-1 text-xs text-gray-500">至少比当前时间晚 30 分钟。到点后系统会自动发送，就算你关掉页面也照样会发。当前定时发送只支持文字。</div>
+                    <div className="mt-1 text-xs text-gray-500">请至少提前 5 分钟，且不超过 24 小时。到点后系统会自动发送，就算你关掉页面也照样会发。当前定时发送只支持文字。</div>
                     <input
                       type="datetime-local"
                       step={1800}
@@ -2770,6 +3064,7 @@ function HomePageContent() {
       </div>
       <div className="flex h-full min-h-0 min-w-0 w-[30%] flex-col border-l border-gray-200 bg-white">
       <AiAssistantPanel
+        hasCustomer={!!workspace?.customer}
         hasDraft={!!latestDraft}
         latestDraftPrimaryActionLabel={latestDraftPrimaryActionLabel}
         latestDraftPrimaryActionHint={latestDraftPrimaryActionHint}
@@ -2785,7 +3080,7 @@ function HomePageContent() {
         onRewrite={handleRewrite}
         onSendStable={() => addAiReplyToChat(displayedSuggestion1Ja, displayedSuggestion1Zh, "stable")}
         onSendAdvancing={() => addAiReplyToChat(displayedSuggestion2Ja, displayedSuggestion2Zh, "advancing")}
-        isGenerating={isGenerating}
+        isGenerating={isGeneratingCurrentCustomer}
         isSendingAi={isSendingAi}
         apiError={apiError}
         aiNotice={effectiveAiNotice}
@@ -2795,6 +3090,36 @@ function HomePageContent() {
         postGenerateSyncMessage={postGenerateSyncMessage}
       />
       </div>
+      {messageContextMenu && contextMenuMessage ? (
+        <div
+          className="fixed z-50 min-w-44 rounded-xl border border-gray-200 bg-white py-2 shadow-xl"
+          style={{ top: messageContextMenu.y, left: messageContextMenu.x }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              void handleCopyMessage(contextMenuMessage);
+              setMessageContextMenu(null);
+            }}
+            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50"
+          >
+            复制此消息
+          </button>
+          <button
+            type="button"
+            disabled={contextMenuMessage.type !== "TEXT" || !!translatingMessageIds[contextMenuMessage.id]}
+            onClick={() => {
+              void playSoftTickSound("tap");
+              void handleTranslateSingleMessage(contextMenuMessage);
+              setMessageContextMenu(null);
+            }}
+            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
+          >
+            {translatingMessageIds[contextMenuMessage.id] ? "正在翻译..." : "翻译此消息"}
+          </button>
+        </div>
+      ) : null}
       {customerContextMenu && contextMenuCustomer ? (
         <div
           className="fixed z-50 min-w-40 rounded-xl border border-gray-200 bg-white shadow-xl py-2"
@@ -2813,6 +3138,11 @@ function HomePageContent() {
           >
             备注名字
           </button>
+        </div>
+      ) : null}
+      {opNotice ? (
+        <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full bg-slate-900/90 px-4 py-2 text-xs text-white shadow-lg">
+          {opNotice}
         </div>
       ) : null}
     </div>

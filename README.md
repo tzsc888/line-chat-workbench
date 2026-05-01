@@ -38,6 +38,25 @@ Shared policy modules:
 - `/api/cron/automation-jobs`: inbound automation + outbox processing
 - `/api/cron/scheduled-messages`: scheduled message sending
 - `/api/cron/maintenance`: retention cleanup
+- `/api/bridge/scheduled-messages/dispatch`: bridge-first scheduled dispatch (recommended primary path)
+
+## Scheduled Dispatch (Bridge-First)
+
+- Primary path: bridge calls `POST /api/bridge/scheduled-messages/dispatch` every 60 seconds.
+- Auth header: `x-bridge-secret: <BRIDGE_SHARED_SECRET>`.
+- This endpoint does not depend on legacy cron toggles.
+- GitHub Actions is fallback only (every 5 minutes by default).
+
+Window rules:
+
+- Minimum lead time: 5 minutes.
+- Maximum lead time: 24 hours.
+
+Suggested bridge-side env (bridge repository):
+
+- `WORKBENCH_BASE_URL=https://<your-workbench-domain>`
+- `BRIDGE_SHARED_SECRET=<same secret as Vercel>`
+- Optional interval: `SCHEDULE_DISPATCH_INTERVAL_MS=60000`
 
 ## Setup
 
