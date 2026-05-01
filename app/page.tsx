@@ -151,6 +151,14 @@ type MessageContextMenuState = {
   x: number;
   y: number;
 };
+
+function normalizeMessageType(value: unknown): "TEXT" | "IMAGE" | "STICKER" | "UNKNOWN" {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "TEXT") return "TEXT";
+  if (normalized === "IMAGE") return "IMAGE";
+  if (normalized === "STICKER") return "STICKER";
+  return "UNKNOWN";
+}
 type PresetSnippet = {
   id: string;
   title: string;
@@ -174,8 +182,24 @@ type CustomerListStats = {
   overdueFollowupCount: number;
   totalUnreadCount: number;
 };
+type WorkspaceCacheEntry = {
+  workspace: WorkspaceData;
+  loadedAt: number;
+  lastAccessedAt: number;
+};
+type MarkReadPendingEntry = {
+  startedAt: number;
+  startedRequestId: number;
+};
 const CUSTOMER_PAGE_SIZE = 50;
 const OPTIMISTIC_ID_PREFIX = "optimistic:";
+const WORKSPACE_CACHE_MAX = 30;
+const WORKSPACE_CACHE_TTL_MS = 30 * 60 * 1000;
+const WORKSPACE_PREFETCH_TOP_MAX = 12;
+const WORKSPACE_PREFETCH_NEAR_MAX = 12;
+const WORKSPACE_PREFETCH_QUEUE_MAX = 20;
+const WORKSPACE_PREFETCH_CONCURRENCY = 1;
+const WORKSPACE_PREFETCH_IDLE_DELAY_MS = 300;
 
 function isAbortError(error: unknown) {
   return (error instanceof DOMException && error.name === "AbortError") ||
@@ -481,6 +505,7 @@ function HomePageContent() {
   const [aiNotice, setAiNotice] = useState("");
   const [opNotice, setOpNotice] = useState("");
   const [translatingMessageIds, setTranslatingMessageIds] = useState<Record<string, boolean>>({});
+  const messageContextMenuRef = useRef<HTMLDivElement | null>(null);
   const clearCustomerQuery = useCallback(() => {
     if (!requestedCustomerId) return;
     router.replace(pathname, { scroll: false });
@@ -494,6 +519,9 @@ function HomePageContent() {
       setOpNotice("");
       opNoticeTimerRef.current = null;
     }, 1800);
+  }, []);
+  const closeMessageContextMenu = useCallback(() => {
+    setMessageContextMenu(null);
   }, []);
   const ensureAudioReady = useCallback(async () => {
     try {
@@ -628,6 +656,9 @@ function HomePageContent() {
   const realtimeRefreshTimerRef = useRef<number | null>(null);
   const ablyClientRef = useRef<Ably.Realtime | null>(null);
   const markReadInFlightRef = useRef(new Set<string>());
+  const markReadPendingRef = useRef<Map<string, MarkReadPendingEntry>>(new Map());
+  const markReadConfirmedAtRef = useRef<Map<string, number>>(new Map());
+  const markReadAwaitingAuthoritativeRef = useRef<Set<string>>(new Set());
   const composerMenuRef = useRef<HTMLDivElement | null>(null);
   const schedulePanelRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
@@ -647,10 +678,19 @@ function HomePageContent() {
   }>>({});
   const customerListLatestScrollTopRef = useRef(0);
   const recentLocalRefreshAtRef = useRef<Record<string, number>>({});
+  const workspaceCacheRef = useRef<Map<string, WorkspaceCacheEntry>>(new Map());
+  const workspacePrefetchQueueRef = useRef<string[]>([]);
+  const workspacePrefetchInFlightRef = useRef<Set<string>>(new Set());
+  const workspacePrefetchRunningRef = useRef(false);
+  const workspaceTopPrefetchTriggeredRef = useRef(false);
+  const workspacePrefetchTimerRef = useRef<number | null>(null);
   useEffect(() => {
     return () => {
       customerListAbortControllerRef.current?.abort();
       workspaceAbortControllerRef.current?.abort();
+      if (workspacePrefetchTimerRef.current != null) {
+        window.clearTimeout(workspacePrefetchTimerRef.current);
+      }
       Object.values(generationPollersRef.current).forEach((poller) => {
         if (poller.timerId != null) {
           window.clearTimeout(poller.timerId);
@@ -678,6 +718,212 @@ function HomePageContent() {
       customerListLatestScrollTopRef.current = current.scrollTop;
     });
   }, []);
+  const cleanupWorkspaceCache = useCallback(() => {
+    const now = Date.now();
+    const cache = workspaceCacheRef.current;
+
+    for (const [customerId, entry] of cache.entries()) {
+      if (now - entry.loadedAt > WORKSPACE_CACHE_TTL_MS) {
+        cache.delete(customerId);
+      }
+    }
+
+    if (cache.size <= WORKSPACE_CACHE_MAX) return;
+
+    const sorted = [...cache.entries()].sort((a, b) => a[1].lastAccessedAt - b[1].lastAccessedAt);
+    const overflow = cache.size - WORKSPACE_CACHE_MAX;
+    for (let i = 0; i < overflow; i += 1) {
+      const customerId = sorted[i]?.[0];
+      if (customerId) {
+        cache.delete(customerId);
+      }
+    }
+  }, []);
+  const getCachedWorkspace = useCallback((customerId: string) => {
+    if (!customerId) return null;
+    cleanupWorkspaceCache();
+    const cache = workspaceCacheRef.current;
+    const entry = cache.get(customerId);
+    if (!entry) return null;
+    const now = Date.now();
+    if (now - entry.loadedAt > WORKSPACE_CACHE_TTL_MS) {
+      cache.delete(customerId);
+      return null;
+    }
+    entry.lastAccessedAt = now;
+    cache.set(customerId, entry);
+    return entry.workspace;
+  }, [cleanupWorkspaceCache]);
+  const setCachedWorkspace = useCallback((customerId: string, workspaceValue: WorkspaceData | null) => {
+    if (!customerId || !workspaceValue) return;
+    const now = Date.now();
+    workspaceCacheRef.current.set(customerId, {
+      workspace: workspaceValue,
+      loadedAt: now,
+      lastAccessedAt: now,
+    });
+    cleanupWorkspaceCache();
+  }, [cleanupWorkspaceCache]);
+  const patchWorkspaceCache = useCallback((customerId: string, updater: (workspaceValue: WorkspaceData) => WorkspaceData) => {
+    if (!customerId) return;
+    const cache = workspaceCacheRef.current;
+    const entry = cache.get(customerId);
+    if (!entry) return;
+    const now = Date.now();
+    if (now - entry.loadedAt > WORKSPACE_CACHE_TTL_MS) {
+      cache.delete(customerId);
+      return;
+    }
+    const nextWorkspace = updater(entry.workspace);
+    cache.set(customerId, {
+      workspace: nextWorkspace,
+      loadedAt: now,
+      lastAccessedAt: now,
+    });
+    cleanupWorkspaceCache();
+  }, [cleanupWorkspaceCache]);
+  const invalidateWorkspaceCache = useCallback((customerId: string) => {
+    if (!customerId) return;
+    workspaceCacheRef.current.delete(customerId);
+  }, []);
+  const getUnreadProtectionReason = useCallback((customerId: string, requestStartedAt?: number) => {
+    if (!customerId) return null as string | null;
+    if (customerId === selectedCustomerIdRef.current) {
+      return "selected-customer";
+    }
+    if (markReadPendingRef.current.has(customerId)) {
+      return "mark-read-pending";
+    }
+    if (markReadAwaitingAuthoritativeRef.current.has(customerId)) {
+      const confirmedAt = markReadConfirmedAtRef.current.get(customerId) ?? 0;
+      if (!requestStartedAt || requestStartedAt <= confirmedAt) {
+        return "awaiting-authoritative-refresh";
+      }
+      markReadAwaitingAuthoritativeRef.current.delete(customerId);
+      markReadConfirmedAtRef.current.delete(customerId);
+    }
+    return null;
+  }, []);
+  const applyReadProtectionToCustomer = useCallback(
+    (
+      customer: CustomerListItem,
+      options?: { requestId?: number; requestStartedAt?: number; enableLog?: boolean }
+    ) => {
+      const reason = getUnreadProtectionReason(customer.id, options?.requestStartedAt);
+      const protectedUnread = reason && customer.unreadCount > 0 ? 0 : customer.unreadCount;
+      if (options?.enableLog && process.env.NODE_ENV !== "production" && customer.unreadCount > 0) {
+        console.info("[customers-load] response-customer", {
+          requestId: options.requestId,
+          customerId: customer.id,
+          returnedUnread: customer.unreadCount,
+          protectedUnread,
+        });
+      }
+      if (reason && customer.unreadCount > 0) {
+        if (options?.enableLog && process.env.NODE_ENV !== "production") {
+          console.info("[customers-load] stale-unread-ignored", {
+            requestId: options.requestId,
+            customerId: customer.id,
+            returnedUnread: customer.unreadCount,
+            reason,
+          });
+          console.info("[sound] incoming-suppressed", {
+            customerId: customer.id,
+            reason,
+          });
+        }
+        return {
+          ...customer,
+          unreadCount: 0,
+        };
+      }
+      return customer;
+    },
+    [getUnreadProtectionReason]
+  );
+  const applyReadProtectionToCustomers = useCallback(
+    (items: CustomerListItem[], options?: { requestId?: number; requestStartedAt?: number; enableLog?: boolean }) =>
+      items.map((item) => applyReadProtectionToCustomer(item, options)),
+    [applyReadProtectionToCustomer]
+  );
+  const scheduleWorkspacePrefetchDrain = useCallback(() => {
+    if (workspacePrefetchTimerRef.current != null) return;
+    const run = () => {
+      workspacePrefetchTimerRef.current = null;
+      if (workspacePrefetchRunningRef.current) return;
+      if (workspacePrefetchInFlightRef.current.size >= WORKSPACE_PREFETCH_CONCURRENCY) return;
+      const customerId = workspacePrefetchQueueRef.current.shift();
+      if (!customerId) return;
+      workspacePrefetchRunningRef.current = true;
+      workspacePrefetchInFlightRef.current.add(customerId);
+      void (async () => {
+        try {
+          const response = await fetch(`/api/customers/${customerId}/workspace`, { cache: "no-store" });
+          const data = await response.json();
+          if (!response.ok || !data?.ok) {
+            return;
+          }
+          const nextWorkspace: WorkspaceData | null = data.workspace || null;
+          if (nextWorkspace) {
+            setCachedWorkspace(customerId, nextWorkspace);
+          }
+        } catch {
+          // Keep prefetch failures silent.
+        } finally {
+          workspacePrefetchInFlightRef.current.delete(customerId);
+          workspacePrefetchRunningRef.current = false;
+          if (workspacePrefetchQueueRef.current.length > 0) {
+            scheduleWorkspacePrefetchDrain();
+          }
+        }
+      })();
+    };
+
+    if (typeof window !== "undefined") {
+      const requestIdleCallbackFn = (window as Window & {
+        requestIdleCallback?: (callback: () => void) => number;
+      }).requestIdleCallback;
+      if (typeof requestIdleCallbackFn === "function") {
+        requestIdleCallbackFn(run);
+        return;
+      }
+    }
+    if (typeof window !== "undefined") {
+      workspacePrefetchTimerRef.current = window.setTimeout(run, WORKSPACE_PREFETCH_IDLE_DELAY_MS);
+      return;
+    }
+  }, [setCachedWorkspace]);
+  const enqueueWorkspacePrefetch = useCallback(
+    (customerIds: string[], options?: { replacePending?: boolean; selectedId?: string | null }) => {
+      const selectedId = options?.selectedId || null;
+      const candidateBatch = customerIds
+        .map((item) => item.trim())
+        .filter((item) => !!item)
+        .slice(0, WORKSPACE_PREFETCH_NEAR_MAX);
+      const nextIds: string[] = [];
+      for (const customerId of candidateBatch) {
+        if (!customerId) continue;
+        if (selectedId && customerId === selectedId) continue;
+        if (workspacePrefetchInFlightRef.current.has(customerId)) continue;
+        if (workspacePrefetchQueueRef.current.includes(customerId)) continue;
+        if (nextIds.includes(customerId)) continue;
+        if (getCachedWorkspace(customerId)) continue;
+        nextIds.push(customerId);
+      }
+      if (!nextIds.length && !options?.replacePending) return;
+      if (options?.replacePending) {
+        workspacePrefetchQueueRef.current = [];
+      }
+      workspacePrefetchQueueRef.current = [...workspacePrefetchQueueRef.current, ...nextIds];
+      if (workspacePrefetchQueueRef.current.length > WORKSPACE_PREFETCH_QUEUE_MAX) {
+        workspacePrefetchQueueRef.current = workspacePrefetchQueueRef.current.slice(
+          workspacePrefetchQueueRef.current.length - WORKSPACE_PREFETCH_QUEUE_MAX
+        );
+      }
+      scheduleWorkspacePrefetchDrain();
+    },
+    [getCachedWorkspace, scheduleWorkspacePrefetchDrain]
+  );
   const loadPresetSnippets = useCallback(async () => {
     try {
       setIsPresetLoading(true);
@@ -717,7 +963,11 @@ function HomePageContent() {
       }
 
       const requestId = customerListRequestIdRef.current + 1;
+      const requestStartedAt = Date.now();
       customerListRequestIdRef.current = requestId;
+      if (process.env.NODE_ENV !== "production") {
+        console.info("[customers-load] start", { requestId });
+      }
       const abortController = new AbortController();
       customerListAbortControllerRef.current?.abort();
       customerListAbortControllerRef.current = abortController;
@@ -751,7 +1001,12 @@ function HomePageContent() {
           return;
         }
 
-        const list: CustomerListItem[] = data.customers || [];
+        const rawList: CustomerListItem[] = data.customers || [];
+        const list = applyReadProtectionToCustomers(rawList, {
+          requestId,
+          requestStartedAt,
+          enableLog: true,
+        });
         const nextHasMore = !!data.hasMore;
         const nextPage = Number(data.page || page);
         const nextStats: CustomerListStats = data.stats || { overdueFollowupCount: 0, totalUnreadCount: 0 };
@@ -761,9 +1016,9 @@ function HomePageContent() {
             const merged = new Map<string, CustomerListItem>();
             for (const item of prev) merged.set(item.id, item);
             for (const item of list) merged.set(item.id, item);
-            return sortCustomerList(Array.from(merged.values()));
+            return sortCustomerList(applyReadProtectionToCustomers(Array.from(merged.values())));
           }
-          return sortCustomerList(list);
+          return sortCustomerList(applyReadProtectionToCustomers(list));
         });
 
         const loadedPinnedCountAfterFetch = list.filter((item) => !!item.pinnedAt).length;
@@ -816,13 +1071,19 @@ function HomePageContent() {
         }
       }
     },
-    []
+    [applyReadProtectionToCustomers]
   );
   const markCustomerRead = useCallback(async (customerId: string) => {
     if (!customerId || markReadInFlightRef.current.has(customerId)) return;
+    const startedAt = Date.now();
+    const startedRequestId = customerListRequestIdRef.current;
     markReadInFlightRef.current.add(customerId);
+    markReadPendingRef.current.set(customerId, { startedAt, startedRequestId });
+    if (process.env.NODE_ENV !== "production") {
+      console.info("[mark-read] start", { customerId });
+    }
     try {
-      await fetch(`/api/customers/${customerId}/workspace`, {
+      const response = await fetch(`/api/customers/${customerId}/workspace`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
@@ -831,12 +1092,30 @@ function HomePageContent() {
           markRead: true,
         }),
       });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.ok) {
+        throw new Error(data?.error || "mark read failed");
+      }
+      if (process.env.NODE_ENV !== "production") {
+        console.info("[mark-read] success", { customerId });
+      }
+      markReadPendingRef.current.delete(customerId);
+      markReadConfirmedAtRef.current.set(customerId, Date.now());
+      markReadAwaitingAuthoritativeRef.current.add(customerId);
+      void loadCustomers({ silent: true, preserveUi: true, search: searchKeywordRef.current });
     } catch (error) {
+      if (process.env.NODE_ENV !== "production") {
+        console.info("[mark-read] failed", { customerId });
+      }
       console.error("mark customer read error:", error);
+      markReadPendingRef.current.delete(customerId);
+      markReadConfirmedAtRef.current.delete(customerId);
+      markReadAwaitingAuthoritativeRef.current.delete(customerId);
+      void loadCustomers({ silent: true, preserveUi: true, search: searchKeywordRef.current });
     } finally {
       markReadInFlightRef.current.delete(customerId);
     }
-  }, []);
+  }, [loadCustomers]);
   const loadWorkspace = useCallback(
     async (customerId: string, options?: { preserveUi?: boolean }) => {
       if (!customerId) {
@@ -846,6 +1125,14 @@ function HomePageContent() {
         return;
       }
       const preserveUi = !!options?.preserveUi;
+      const cachedWorkspace = getCachedWorkspace(customerId);
+      const shouldUseCachedUi = !!cachedWorkspace;
+      if (cachedWorkspace) {
+        setWorkspace(cachedWorkspace);
+        setPageError("");
+        setIsWorkspaceLoading(false);
+      }
+      const shouldPreserveUi = preserveUi || shouldUseCachedUi;
       const requestId = workspaceRequestIdRef.current + 1;
       workspaceRequestIdRef.current = requestId;
       const abortController = new AbortController();
@@ -856,7 +1143,7 @@ function HomePageContent() {
       let previousScrollTop = 0;
       let previousScrollHeight = 0;
       let wasNearBottom = false;
-      if (preserveUi && container) {
+      if (shouldPreserveUi && container) {
         previousScrollTop = container.scrollTop;
         previousScrollHeight = container.scrollHeight;
         wasNearBottom =
@@ -864,7 +1151,7 @@ function HomePageContent() {
         isSilentRefreshingRef.current = true;
       }
       try {
-        if (!preserveUi) {
+        if (!shouldPreserveUi) {
           setIsWorkspaceLoading(true);
           setPageError("");
           setCustomReply(null);
@@ -889,9 +1176,10 @@ function HomePageContent() {
 
         const nextWorkspace: WorkspaceData | null = data.workspace || null;
         setWorkspace(nextWorkspace);
+        setCachedWorkspace(customerId, nextWorkspace);
         if (nextWorkspace?.customer) {
-          setCustomers((prev) =>
-            prev.map((item) =>
+          setCustomers((prev) => {
+            const merged = prev.map((item) =>
               item.id === nextWorkspace.customer.id
                 ? {
                     ...item,
@@ -901,10 +1189,11 @@ function HomePageContent() {
                     followup: nextWorkspace.customer.followup,
                   }
                 : item
-            )
-          );
+            );
+            return applyReadProtectionToCustomers(merged);
+          });
         }
-        if (preserveUi) {
+        if (shouldPreserveUi) {
           requestAnimationFrame(() => {
             const el = chatScrollRef.current;
             if (!el) return;
@@ -921,13 +1210,17 @@ function HomePageContent() {
           return;
         }
         console.error(error);
-        if (!preserveUi && requestId === workspaceRequestIdRef.current) {
+        if (!shouldPreserveUi && requestId === workspaceRequestIdRef.current) {
           setWorkspace(null);
+          setPageError(String(error));
+        } else if (requestId === workspaceRequestIdRef.current) {
           setPageError(String(error));
         }
       } finally {
         if (requestId === workspaceRequestIdRef.current) {
-          setIsWorkspaceLoading(false);
+          if (!shouldUseCachedUi) {
+            setIsWorkspaceLoading(false);
+          }
           if (workspaceAbortControllerRef.current === abortController) {
             workspaceAbortControllerRef.current = null;
           }
@@ -935,7 +1228,7 @@ function HomePageContent() {
         }
       }
     },
-    []
+    [applyReadProtectionToCustomers, getCachedWorkspace, setCachedWorkspace]
   );
   const runRealtimeRefresh = useCallback(
     async (targetCustomerId?: string | null) => {
@@ -950,6 +1243,10 @@ function HomePageContent() {
 
       isRealtimeRefreshInFlightRef.current = true;
       try {
+        const activeCustomerId = selectedCustomerIdRef.current;
+        if (nextTargetCustomerId && activeCustomerId && nextTargetCustomerId !== activeCustomerId) {
+          invalidateWorkspaceCache(nextTargetCustomerId);
+        }
         const loadedRegularCount = Math.max(
           0,
           customersRef.current.filter((item) => !item.pinnedAt).length
@@ -960,7 +1257,6 @@ function HomePageContent() {
           limitOverride: Math.max(loadedRegularCount, CUSTOMER_PAGE_SIZE),
           search: searchKeywordRef.current,
         });
-        const activeCustomerId = selectedCustomerIdRef.current;
         if (activeCustomerId && (!nextTargetCustomerId || nextTargetCustomerId === activeCustomerId)) {
           await loadWorkspace(activeCustomerId, { preserveUi: true });
         }
@@ -974,7 +1270,7 @@ function HomePageContent() {
         }
       }
     },
-    [loadCustomers, loadWorkspace]
+    [invalidateWorkspaceCache, loadCustomers, loadWorkspace]
   );
   const addOptimisticMessage = useCallback((customerId: string, message: OptimisticWorkspaceMessage) => {
     setOptimisticMessagesByCustomer((prev) => {
@@ -1035,7 +1331,23 @@ function HomePageContent() {
         messages: nextMessages,
       };
     });
-  }, []);
+    patchWorkspaceCache(customerId, (workspaceValue) => {
+      const nextMessages = [...workspaceValue.messages.filter((item) => item.id !== message.id), message].sort((a, b) => {
+        const aTime = new Date(a.sentAt).getTime();
+        const bTime = new Date(b.sentAt).getTime();
+        if (aTime !== bTime) return aTime - bTime;
+        return a.id.localeCompare(b.id);
+      });
+      return {
+        ...workspaceValue,
+        customer: {
+          ...workspaceValue.customer,
+          lastMessageAt: message.sentAt,
+        },
+        messages: nextMessages,
+      };
+    });
+  }, [patchWorkspaceCache]);
   const updateWorkspaceMessage = useCallback(
     (
       customerId: string,
@@ -1049,15 +1361,19 @@ function HomePageContent() {
           messages: prev.messages.map((item) => (item.id === messageId ? updater(item) : item)),
         };
       });
+      patchWorkspaceCache(customerId, (workspaceValue) => ({
+        ...workspaceValue,
+        messages: workspaceValue.messages.map((item) => (item.id === messageId ? updater(item) : item)),
+      }));
     },
-    []
+    [patchWorkspaceCache]
   );
   const updateCustomerLatestMessage = useCallback(
     (customerId: string, message: WorkspaceMessage | OptimisticWorkspaceMessage) => {
       preserveCustomerListViewport(() => {
         setCustomers((prev) =>
           sortCustomerList(
-            prev.map((item) =>
+            applyReadProtectionToCustomers(prev.map((item) =>
               item.id === customerId
                 ? {
                     ...item,
@@ -1065,12 +1381,12 @@ function HomePageContent() {
                     latestMessage: buildCustomerLatestMessage(message),
                   }
                 : item
-            )
+            ))
           )
         );
       });
     },
-    [preserveCustomerListViewport]
+    [applyReadProtectionToCustomers, preserveCustomerListViewport]
   );
   const attachAsyncTranslation = useCallback(async (messageId: string, japaneseText: string) => {
     if (!messageId || !japaneseText.trim()) return;
@@ -1231,7 +1547,7 @@ function HomePageContent() {
       preserveCustomerListViewport(() => {
         setCustomers((prev) =>
           sortCustomerList(
-            prev.map((item) => {
+            applyReadProtectionToCustomers(prev.map((item) => {
               if (item.id !== customerId) return item;
               return {
                 ...item,
@@ -1243,7 +1559,7 @@ function HomePageContent() {
                   : {}),
                 ...(payload.markRead ? { unreadCount: 0 } : {}),
               };
-            })
+            }))
           )
         );
       });
@@ -1264,6 +1580,19 @@ function HomePageContent() {
             },
           };
         });
+        patchWorkspaceCache(customerId, (workspaceValue) => ({
+          ...workspaceValue,
+          customer: {
+            ...workspaceValue.customer,
+            ...(payload.remarkName !== undefined
+              ? { remarkName: payload.remarkName?.trim() || null }
+              : {}),
+            ...(payload.pinned !== undefined
+              ? { pinnedAt: payload.pinned ? new Date().toISOString() : null }
+              : {}),
+            ...(payload.markRead ? { unreadCount: 0 } : {}),
+          },
+        }));
       }
 
       const response = await fetch(`/api/customers/${customerId}/workspace`, {
@@ -1275,8 +1604,11 @@ function HomePageContent() {
       });
       const data = await response.json();
       if (!response.ok || !data.ok) {
-        setCustomers(previousCustomers);
+        setCustomers(applyReadProtectionToCustomers(previousCustomers));
         setWorkspace(previousWorkspace);
+        if (previousWorkspace?.customer?.id === customerId) {
+          setCachedWorkspace(customerId, previousWorkspace);
+        }
         throw new Error(data?.error || "更新顾客信息失败");
       }
 
@@ -1284,7 +1616,7 @@ function HomePageContent() {
       preserveCustomerListViewport(() => {
         setCustomers((prev) =>
           sortCustomerList(
-            prev.map((item) =>
+            applyReadProtectionToCustomers(prev.map((item) =>
               item.id === customerId
                 ? {
                     ...item,
@@ -1293,7 +1625,7 @@ function HomePageContent() {
                     unreadCount: nextCustomer.unreadCount,
                   }
                 : item
-            )
+            ))
           )
         );
       });
@@ -1310,9 +1642,18 @@ function HomePageContent() {
             },
           };
         });
+        patchWorkspaceCache(customerId, (workspaceValue) => ({
+          ...workspaceValue,
+          customer: {
+            ...workspaceValue.customer,
+            remarkName: nextCustomer.remarkName,
+            pinnedAt: nextCustomer.pinnedAt,
+            unreadCount: nextCustomer.unreadCount,
+          },
+        }));
       }
     },
-    [preserveCustomerListViewport, workspace]
+    [applyReadProtectionToCustomers, patchWorkspaceCache, preserveCustomerListViewport, setCachedWorkspace, workspace]
   );
   useEffect(() => {
     customersRef.current = customers;
@@ -1337,6 +1678,30 @@ function HomePageContent() {
   useEffect(() => {
     selectedCustomerIdRef.current = selectedCustomerId;
   }, [selectedCustomerId]);
+  useEffect(() => {
+    if (selectedCustomerId) return;
+    if (!customers.length) return;
+    if (workspaceTopPrefetchTriggeredRef.current) return;
+    workspaceTopPrefetchTriggeredRef.current = true;
+    const topIds = customers
+      .map((item) => item.id)
+      .filter((item) => !!item)
+      .slice(0, WORKSPACE_PREFETCH_TOP_MAX);
+    enqueueWorkspacePrefetch(topIds, { selectedId: null });
+  }, [customers, enqueueWorkspacePrefetch, selectedCustomerId]);
+  useEffect(() => {
+    if (!selectedCustomerId) return;
+    const selectedIndex = customers.findIndex((item) => item.id === selectedCustomerId);
+    if (selectedIndex < 0) return;
+    const start = Math.max(0, selectedIndex - 5);
+    const end = Math.min(customers.length, selectedIndex + 8);
+    const nearIds = customers
+      .slice(start, end)
+      .map((item) => item.id)
+      .filter((item) => item && item !== selectedCustomerId)
+      .slice(0, WORKSPACE_PREFETCH_NEAR_MAX);
+    enqueueWorkspacePrefetch(nearIds, { replacePending: true, selectedId: selectedCustomerId });
+  }, [customers, enqueueWorkspacePrefetch, selectedCustomerId]);
   useEffect(() => {
     setIsSchedulePanelOpen(false);
     setScheduleAtInput(buildDefaultScheduledInputValue());
@@ -1377,43 +1742,63 @@ function HomePageContent() {
       hasInitializedUnreadSnapshotRef.current = true;
       return;
     }
-    const nextUnreadMap = Object.fromEntries(customers.map((customer) => [customer.id, customer.unreadCount]));
+    const protectedCustomers = applyReadProtectionToCustomers(customers);
+    const nextUnreadMap = Object.fromEntries(protectedCustomers.map((customer) => [customer.id, customer.unreadCount]));
     if (!hasInitializedUnreadSnapshotRef.current) {
       previousUnreadMapRef.current = nextUnreadMap;
       hasInitializedUnreadSnapshotRef.current = true;
       return;
     }
-    const hasIncomingUnread = customers.some((customer) => {
+    const hasIncomingUnread = protectedCustomers.some((customer) => {
       const previousUnread = previousUnreadMapRef.current[customer.id] ?? 0;
       const latestPreviewFromCustomer = customer.latestMessage?.role === "CUSTOMER";
+      if (!latestPreviewFromCustomer || customer.unreadCount <= previousUnread) {
+        if (process.env.NODE_ENV !== "production" && latestPreviewFromCustomer && customer.unreadCount > 0 && customer.unreadCount !== previousUnread) {
+          const reason = getUnreadProtectionReason(customer.id);
+          if (reason) {
+            console.info("[sound] incoming-suppressed", { customerId: customer.id, reason });
+          }
+        }
+        return false;
+      }
+      if (process.env.NODE_ENV !== "production") {
+        console.info("[sound] incoming-play", {
+          customerId: customer.id,
+          unreadBefore: previousUnread,
+          unreadAfter: customer.unreadCount,
+        });
+      }
       return latestPreviewFromCustomer && customer.unreadCount > previousUnread;
     });
     if (hasIncomingUnread) {
       void playDingDongSound();
     }
     previousUnreadMapRef.current = nextUnreadMap;
-  }, [customers, playDingDongSound]);
+  }, [applyReadProtectionToCustomers, customers, getUnreadProtectionReason, playDingDongSound]);
   useEffect(() => {
     function handleDocumentClick(event: MouseEvent) {
       const target = event.target as Node;
+      if (messageContextMenuRef.current?.contains(target)) {
+        return;
+      }
       if (composerMenuRef.current && !composerMenuRef.current.contains(target)) {
         setIsComposerMenuOpen(false);
       }
       if (schedulePanelRef.current && !schedulePanelRef.current.contains(target)) {
         setIsSchedulePanelOpen(false);
       }
-      setMessageContextMenu(null);
+      closeMessageContextMenu();
     }
     document.addEventListener("mousedown", handleDocumentClick);
     return () => document.removeEventListener("mousedown", handleDocumentClick);
-  }, []);
+  }, [closeMessageContextMenu]);
   useEffect(() => {
     const selectedCustomer = customers.find((item) => item.id === selectedCustomerId);
     if (!selectedCustomerId || !selectedCustomer?.unreadCount) return;
     setCustomers((prev) =>
-      prev.map((item) =>
+      applyReadProtectionToCustomers(prev.map((item) =>
         item.id === selectedCustomerId ? { ...item, unreadCount: 0 } : item
-      )
+      ))
     );
     void markCustomerRead(selectedCustomerId);
   }, [customers, selectedCustomerId, markCustomerRead]);
@@ -1695,50 +2080,80 @@ function HomePageContent() {
     const japanese = message.japaneseText.trim();
     const chinese = (message.chineseText || "").trim();
     if (japanese && chinese) {
-      return `原文：\n${japanese}\n\n翻译：\n${chinese}`;
+      return `\u539f\u6587\uff1a\n${japanese}\n\n\u7ffb\u8bd1\uff1a\n${chinese}`;
     }
     if (japanese) return japanese;
     if (chinese) return chinese;
-    if (message.type === "IMAGE") return message.imageUrl ? `图片：${message.imageUrl}` : "";
+    if (message.type === "IMAGE") return message.imageUrl ? `\u56fe\u7247\uff1a${message.imageUrl}` : "";
     if (message.type === "STICKER") {
       const packageId = message.stickerPackageId || "-";
       const stickerId = message.stickerId || "-";
-      return `贴图 packageId: ${packageId}\n贴图 stickerId: ${stickerId}`;
+      return `\u8d34\u56fe packageId: ${packageId}\n\u8d34\u56fe stickerId: ${stickerId}`;
     }
     return "";
   }, []);
   const handleCopyMessage = useCallback(async (message: WorkspaceMessage | OptimisticWorkspaceMessage) => {
     const text = buildMessageCopyText(message);
     if (!text) {
-      showOpNotice("当前消息没有可复制的文本。");
+      showOpNotice("\u5f53\u524d\u6d88\u606f\u6ca1\u6709\u53ef\u590d\u5236\u7684\u6587\u672c\u3002");
       return;
     }
     try {
       await navigator.clipboard.writeText(text);
       void playSoftTickSound("success");
-      showOpNotice("已复制消息内容");
+      showOpNotice("\u5df2\u590d\u5236\u6d88\u606f\u5185\u5bb9\u3002");
     } catch (error) {
       console.error("copy message failed:", error);
-      showOpNotice("复制失败，请手动选择文本复制。");
+      showOpNotice("\u590d\u5236\u5931\u8d25\uff0c\u8bf7\u624b\u52a8\u9009\u62e9\u6587\u672c\u590d\u5236\u3002");
     }
   }, [buildMessageCopyText, playSoftTickSound, showOpNotice]);
+  const getMessageSourceText = useCallback((message: WorkspaceMessage | OptimisticWorkspaceMessage) => {
+    const japaneseText = typeof message.japaneseText === "string" ? message.japaneseText : "";
+    if (japaneseText.trim()) return japaneseText.trim();
+    return "";
+  }, []);
   const handleTranslateSingleMessage = useCallback(async (message: WorkspaceMessage | OptimisticWorkspaceMessage) => {
+    const normalizedType = normalizeMessageType(message.type);
+    const sourceText = getMessageSourceText(message);
+    console.info("[manual-translation] handler-start", {
+      messageId: message.id,
+      type: message.type,
+      normalizedType,
+      role: message.role,
+      hasJapaneseText: Boolean(sourceText),
+      japaneseTextLength: sourceText.length,
+    });
     if (isOptimisticMessageId(message.id)) {
-      showOpNotice("消息发送中，暂时无法翻译。");
+      console.info("[manual-translation] early-return optimistic", { messageId: message.id });
+      showOpNotice("\u6d88\u606f\u53d1\u9001\u4e2d\uff0c\u6682\u65f6\u65e0\u6cd5\u7ffb\u8bd1\u3002");
       return;
     }
-    if (message.type !== "TEXT") {
-      showOpNotice("该消息暂不支持翻译。");
+    if (normalizedType !== "TEXT") {
+      console.info("[manual-translation] early-return non-text", {
+        messageId: message.id,
+        type: message.type,
+        normalizedType,
+      });
+      showOpNotice("\u8be5\u6d88\u606f\u6682\u4e0d\u652f\u6301\u7ffb\u8bd1\u3002");
       return;
     }
-    const japanese = message.japaneseText.trim();
+    const japanese = sourceText;
     if (!japanese) {
-      showOpNotice("当前消息没有可翻译文本。");
+      console.info("[manual-translation] early-return empty-source-text", { messageId: message.id });
+      showOpNotice("\u5f53\u524d\u6d88\u606f\u6ca1\u6709\u53ef\u7ffb\u8bd1\u6587\u672c\u3002");
       return;
     }
-    if (translatingMessageIds[message.id]) return;
+    if (translatingMessageIds[message.id]) {
+      console.info("[manual-translation] early-return inflight", { messageId: message.id });
+      return;
+    }
+    console.info("[manual-translation] set-spinner", { messageId: message.id });
     setTranslatingMessageIds((prev) => ({ ...prev, [message.id]: true }));
     try {
+      console.info("[manual-translation] request-translate:start", {
+        messageId: message.id,
+        textLength: japanese.length,
+      });
       const translateResponse = await fetch("/api/translate-message", {
         method: "POST",
         headers: {
@@ -1747,6 +2162,12 @@ function HomePageContent() {
         body: JSON.stringify({ japanese }),
       });
       const translateData = await translateResponse.json();
+      console.info("[manual-translation] request-translate:done", {
+        messageId: message.id,
+        ok: translateResponse.ok && !!translateData?.ok,
+        status: translateResponse.status,
+        hasChinese: Boolean(translateData?.chinese),
+      });
       if (!translateResponse.ok || !translateData.ok || !translateData.chinese) {
         throw new Error(translateData?.error || "translate_failed");
       }
@@ -1754,6 +2175,10 @@ function HomePageContent() {
       if (!chineseText) {
         throw new Error("translate_empty");
       }
+      console.info("[manual-translation] request-save:start", {
+        messageId: message.id,
+        chineseTextLength: chineseText.length,
+      });
       const patchResponse = await fetch(`/api/messages/${message.id}/translation`, {
         method: "PATCH",
         headers: {
@@ -1762,6 +2187,11 @@ function HomePageContent() {
         body: JSON.stringify({ chineseText }),
       });
       const patchData = await patchResponse.json().catch(() => ({}));
+      console.info("[manual-translation] request-save:done", {
+        messageId: message.id,
+        ok: patchResponse.ok && !!patchData?.ok,
+        status: patchResponse.status,
+      });
       if (!patchResponse.ok || !patchData.ok) {
         throw new Error(patchData?.error || "save_translation_failed");
       }
@@ -1769,19 +2199,24 @@ function HomePageContent() {
         ...prev,
         chineseText,
       }));
+      console.info("[manual-translation] patch-local-message:done", { messageId: message.id });
       void playSoftTickSound("success");
-      showOpNotice("翻译已更新");
+      showOpNotice("\u7ffb\u8bd1\u5df2\u66f4\u65b0\u3002");
     } catch (error) {
-      console.error("translate single message failed:", error);
-      showOpNotice("翻译失败，请稍后重试。");
+      console.error("translate single message failed:", {
+        messageId: message.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      showOpNotice("\u7ffb\u8bd1\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
     } finally {
+      console.info("[manual-translation] clear-spinner", { messageId: message.id });
       setTranslatingMessageIds((prev) => {
         const next = { ...prev };
         delete next[message.id];
         return next;
       });
     }
-  }, [playSoftTickSound, showOpNotice, translatingMessageIds, updateWorkspaceMessage]);
+  }, [getMessageSourceText, playSoftTickSound, showOpNotice, translatingMessageIds, updateWorkspaceMessage]);
   const formatGenerationTaskError = useCallback((task: GenerationTaskView) => {
     const code = String(task.errorCode || "").trim();
     const message = String(task.errorMessage || "").trim();
@@ -2388,9 +2823,9 @@ function HomePageContent() {
     setCustomerContextMenu(null);
     clearCustomerQuery();
     setCustomers((prev) =>
-      prev.map((item) =>
+      applyReadProtectionToCustomers(prev.map((item) =>
         item.id === customerId ? { ...item, unreadCount: 0 } : item
-      )
+      ))
     );
   }
   function handleCollapseChat() {
@@ -2461,6 +2896,10 @@ function HomePageContent() {
           (item) => item.id === messageContextMenu.messageId && item.customerId === messageContextMenu.customerId
         ) || null
       : null;
+  const canTranslateContextMenuMessage =
+    !!contextMenuMessage &&
+    normalizeMessageType(contextMenuMessage.type) === "TEXT" &&
+    !translatingMessageIds[contextMenuMessage.id];
   const overdueFollowupCount = customerStats.overdueFollowupCount;
   const totalUnreadCount = customerStats.totalUnreadCount;
   const isGeneratingCurrentCustomer = !!(selectedCustomerId && generatingByCustomer[selectedCustomerId]);
@@ -2663,6 +3102,14 @@ function HomePageContent() {
                       <div
                         onContextMenu={(event) => {
                           event.preventDefault();
+                          console.info("[manual-translation] menu-open", {
+                            messageId: msg.id,
+                            type: msg.type,
+                            normalizedType: normalizeMessageType(msg.type),
+                            role: msg.role,
+                            hasJapaneseText: Boolean(typeof msg.japaneseText === "string" && msg.japaneseText.trim()),
+                            japaneseTextLength: msg.japaneseText?.length ?? 0,
+                          });
                           const menuWidth = 184;
                           const menuHeight = 116;
                           const maxLeft = Math.max(8, window.innerWidth - menuWidth - 8);
@@ -2745,6 +3192,12 @@ function HomePageContent() {
                         }`}
                       >
                         <span>{formatBubbleTime(msg.sentAt)}</span>
+                        {translatingMessageIds[msg.id] ? (
+                          <span
+                            className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-slate-300 border-t-slate-500"
+                            aria-label="translating"
+                          />
+                        ) : null}
                         {getDeliveryStatusMeta(msg) ? (
                           <span className={getDeliveryStatusMeta(msg)?.className}>
                             {getDeliveryStatusMeta(msg)?.label}
@@ -2764,11 +3217,6 @@ function HomePageContent() {
                       {msg.role === "OPERATOR" && msg.deliveryStatus === "FAILED" && msg.sendError ? (
                         <div className="mt-1 text-[11px] text-red-500 text-right line-clamp-2">
                           {msg.sendError}
-                        </div>
-                      ) : null}
-                      {translatingMessageIds[msg.id] ? (
-                        <div className="mt-1 text-[11px] text-sky-600">
-                          正在翻译...
                         </div>
                       ) : null}
                     </div>
@@ -3092,15 +3540,24 @@ function HomePageContent() {
       </div>
       {messageContextMenu && contextMenuMessage ? (
         <div
+          ref={messageContextMenuRef}
           className="fixed z-50 min-w-44 rounded-xl border border-gray-200 bg-white py-2 shadow-xl"
           style={{ top: messageContextMenu.y, left: messageContextMenu.x }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
           onClick={(event) => event.stopPropagation()}
         >
           <button
             type="button"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void handleCopyMessage(contextMenuMessage);
+              closeMessageContextMenu();
+            }}
             onClick={() => {
               void handleCopyMessage(contextMenuMessage);
-              setMessageContextMenu(null);
+              closeMessageContextMenu();
             }}
             className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50"
           >
@@ -3108,15 +3565,57 @@ function HomePageContent() {
           </button>
           <button
             type="button"
-            disabled={contextMenuMessage.type !== "TEXT" || !!translatingMessageIds[contextMenuMessage.id]}
+            aria-disabled={!canTranslateContextMenuMessage}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (!canTranslateContextMenuMessage) {
+                console.info("[manual-translation] disabled-non-text", {
+                  messageId: contextMenuMessage.id,
+                  type: contextMenuMessage.type,
+                  normalizedType: normalizeMessageType(contextMenuMessage.type),
+                });
+                showOpNotice("\u8be5\u6d88\u606f\u6682\u4e0d\u652f\u6301\u7ffb\u8bd1\u3002");
+                return;
+              }
+              console.info("[manual-translation] clicked", {
+                messageId: contextMenuMessage.id,
+                type: contextMenuMessage.type,
+                normalizedType: normalizeMessageType(contextMenuMessage.type),
+                role: contextMenuMessage.role,
+                hasJapaneseText: Boolean(
+                  typeof contextMenuMessage.japaneseText === "string" && contextMenuMessage.japaneseText.trim(),
+                ),
+                japaneseTextLength: contextMenuMessage.japaneseText?.length ?? 0,
+                disabled: !canTranslateContextMenuMessage,
+              });
+              void playSoftTickSound("tap");
+              const message = contextMenuMessage;
+              closeMessageContextMenu();
+              void handleTranslateSingleMessage(message);
+            }}
             onClick={() => {
+              if (!canTranslateContextMenuMessage) return;
+              console.info("[manual-translation] clicked", {
+                messageId: contextMenuMessage.id,
+                type: contextMenuMessage.type,
+                normalizedType: normalizeMessageType(contextMenuMessage.type),
+                role: contextMenuMessage.role,
+                hasJapaneseText: Boolean(
+                  typeof contextMenuMessage.japaneseText === "string" && contextMenuMessage.japaneseText.trim(),
+                ),
+                japaneseTextLength: contextMenuMessage.japaneseText?.length ?? 0,
+                disabled: !canTranslateContextMenuMessage,
+              });
               void playSoftTickSound("tap");
               void handleTranslateSingleMessage(contextMenuMessage);
-              setMessageContextMenu(null);
+              closeMessageContextMenu();
             }}
-            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
+            className={`w-full px-4 py-2 text-left text-sm ${
+              canTranslateContextMenuMessage ? "hover:bg-gray-50" : "cursor-not-allowed text-gray-400"
+            }`}
           >
-            {translatingMessageIds[contextMenuMessage.id] ? "正在翻译..." : "翻译此消息"}
+            翻译此消息
           </button>
         </div>
       ) : null}

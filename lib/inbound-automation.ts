@@ -141,10 +141,18 @@ async function executeInboundTranslationJob(job: {
     throw new Error(PIPELINE_REASON_CODES.JOB_EXECUTION_ERROR);
   }
 
-  await prisma.message.update({
-    where: { id: message.id },
+  const writeResult = await prisma.message.updateMany({
+    where: {
+      id: message.id,
+      chineseText: null,
+    },
     data: { chineseText },
   });
+
+  if (writeResult.count === 0) {
+    await finishJob(job.id, AutomationJobStatus.SKIPPED, PIPELINE_REASON_CODES.ALREADY_TRANSLATED);
+    return { ok: true, skipped: true } as const;
+  }
 
   await publishRealtimeRefresh({
     customerId: job.customerId,

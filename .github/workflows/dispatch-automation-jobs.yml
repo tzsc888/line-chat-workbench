@@ -14,6 +14,8 @@ jobs:
           APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
+          # Fallback executor for queued inbound translation/workflow jobs.
+          # Vercel must set ENABLE_LEGACY_CRON_AUTOMATION=true for this endpoint.
           if [ -z "$APP_BASE_URL" ]; then
             echo "APP_BASE_URL is required"
             exit 1

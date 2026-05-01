@@ -12,22 +12,17 @@ export async function PATCH(req: Request, { params }: Props) {
     const body = await req.json();
 
     const chineseText = String(body.chineseText || "").trim();
-
+    console.info("[manual-translation-save] request", {
+      messageId,
+      chineseTextLength: chineseText.length,
+    });
     if (!chineseText) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "chineseText 不能为空",
-        },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "MISSING_CHINESE_TEXT" }, { status: 400 });
     }
 
     const updated = await prisma.message.update({
       where: { id: messageId },
-      data: {
-        chineseText,
-      },
+      data: { chineseText },
       select: {
         id: true,
         customerId: true,
@@ -50,13 +45,13 @@ export async function PATCH(req: Request, { params }: Props) {
     });
   } catch (error) {
     console.error("PATCH /api/messages/[messageId]/translation error:", error);
-
     return NextResponse.json(
       {
         ok: false,
-        error: String(error),
+        error: "SAVE_TRANSLATION_FAILED",
+        detail: error instanceof Error ? error.message : String(error),
       },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

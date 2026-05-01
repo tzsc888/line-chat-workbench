@@ -40,6 +40,7 @@ export type GenerateRepliesWorkflowDeps = {
     }>;
   } | null>;
   updateMessageChineseText: (messageId: string, chineseText: string) => Promise<void>;
+  getMessageChineseText?: (messageId: string) => Promise<string | null>;
   publishRealtimeRefresh: (params: { customerId: string; reason: string }) => Promise<unknown>;
   buildMainBrainGenerationContext: (input: Record<string, unknown>) => Record<string, unknown>;
   runReplyGeneration: (context: Record<string, unknown>) => Promise<{
@@ -300,6 +301,15 @@ export async function executeGenerateRepliesWorkflow(
   }
 
   const previousMessage = [...messages].reverse().find((message) => message.id !== latestCustomerMessage.id);
+  const latestChineseFromDb =
+    latestCustomerTextMessage && !latestCustomerTextMessage.chineseText?.trim() && deps.getMessageChineseText
+      ? String((await deps.getMessageChineseText(latestCustomerTextMessage.id)) || "").trim()
+      : "";
+
+  if (latestCustomerTextMessage && latestChineseFromDb) {
+    latestCustomerTextMessage.chineseText = latestChineseFromDb;
+  }
+
   const translation = latestCustomerTextMessage?.chineseText?.trim()
       ? {
         line: "reuse-existing-translation",

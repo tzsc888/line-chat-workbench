@@ -40,6 +40,18 @@ Shared policy modules:
 - `/api/cron/maintenance`: retention cleanup
 - `/api/bridge/scheduled-messages/dispatch`: bridge-first scheduled dispatch (recommended primary path)
 
+Automation translation/reply jobs run through `/api/cron/automation-jobs` and require:
+
+- `ENABLE_LEGACY_CRON_AUTOMATION=true`
+- `CRON_SECRET=<shared secret>`
+
+GitHub Actions fallback runner (`.github/workflows/dispatch-automation-jobs.yml`) should provide:
+
+- `APP_BASE_URL=https://<your-vercel-domain>`
+- `CRON_SECRET=<same value as Vercel>`
+
+Local note: GitHub Actions does not run in local dev. To test queued inbound auto translation locally, call `/api/cron/automation-jobs` manually with `CRON_SECRET`.
+
 ## Scheduled Dispatch (Bridge-First)
 
 - Primary path: bridge calls `POST /api/bridge/scheduled-messages/dispatch` every 60 seconds.

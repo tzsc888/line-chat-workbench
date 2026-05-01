@@ -24,10 +24,20 @@ const runtimeDeps: GenerateRepliesWorkflowDeps = {
       },
     })) as NonNullable<Awaited<ReturnType<GenerateRepliesWorkflowDeps["findCustomerById"]>>>,
   updateMessageChineseText: async (messageId, chineseText) => {
-    await prisma.message.update({
-      where: { id: messageId },
+    await prisma.message.updateMany({
+      where: {
+        id: messageId,
+        chineseText: null,
+      },
       data: { chineseText },
     });
+  },
+  getMessageChineseText: async (messageId) => {
+    const message = await prisma.message.findUnique({
+      where: { id: messageId },
+      select: { chineseText: true },
+    });
+    return message?.chineseText || null;
   },
   publishRealtimeRefresh,
   buildMainBrainGenerationContext: (input) =>
