@@ -13,6 +13,11 @@ type FollowupSummary = {
   nextFollowupAt: string | null;
   isOverdue: boolean;
 };
+type CustomerTag = {
+  id: string;
+  name: string;
+  color: string | null;
+};
 type CustomerListItem = {
   id: string;
   lineUserId: string | null;
@@ -27,11 +32,7 @@ type CustomerListItem = {
   lineRefollowedAt: string | null;
   lastMessageAt: string | null;
   followup: FollowupSummary | null;
-  tags: {
-    id: string;
-    name: string;
-    color: string | null;
-  }[];
+  tags: CustomerTag[];
   latestMessage: {
     id: string;
     role: "CUSTOMER" | "OPERATOR";
@@ -113,12 +114,9 @@ type WorkspaceData = {
     lineRefollowedAt: string | null;
     lastMessageAt: string | null;
     followup: FollowupSummary | null;
+    tags: CustomerTag[];
   };
-  tags: {
-    id: string;
-    name: string;
-    color: string | null;
-  }[];
+  tags: CustomerTag[];
   messages: WorkspaceMessage[];
   scheduledMessages: ScheduledMessageItem[];
   latestCustomerMessageId: string | null;
@@ -127,8 +125,6 @@ type WorkspaceData = {
 type RewriteResult = {
   suggestion1Ja: string;
   suggestion1Zh: string;
-  suggestion2Ja: string;
-  suggestion2Zh: string;
   translationStatus?: "succeeded" | "failed";
   translationErrorCode?: string;
 };
@@ -186,6 +182,28 @@ type WorkspaceCacheEntry = {
   workspace: WorkspaceData;
   loadedAt: number;
   lastAccessedAt: number;
+};
+type CustomerTagItem = {
+  id: string;
+  name: string;
+  color: string | null;
+  sortOrder: number;
+};
+type CustomerListViewportAnchor =
+  | {
+      kind: "customer";
+      customerId: string;
+      offsetTop: number;
+      scrollTop: number;
+    }
+  | {
+      kind: "scrollTop";
+      scrollTop: number;
+    };
+
+type PreserveCustomerListViewportOptions = {
+  excludeCustomerIdFromAnchor?: string | null;
+  excludeCustomerIdsFromAnchor?: string[];
 };
 type MarkReadPendingEntry = {
   startedAt: number;
@@ -471,6 +489,7 @@ function HomePageContent() {
   const [customerStats, setCustomerStats] = useState<CustomerListStats>({ overdueFollowupCount: 0, totalUnreadCount: 0 });
   const [customerPage, setCustomerPage] = useState(1);
   const [hasMoreCustomers, setHasMoreCustomers] = useState(false);
+  const [regularNextCursor, setRegularNextCursor] = useState<string | null>(null);
   const [isLoadingMoreCustomers, setIsLoadingMoreCustomers] = useState(false);
   const [optimisticMessagesByCustomer, setOptimisticMessagesByCustomer] = useState<Record<string, OptimisticWorkspaceMessage[]>>({});
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
@@ -484,6 +503,20 @@ function HomePageContent() {
   const [customerContextMenu, setCustomerContextMenu] =
     useState<CustomerContextMenuState | null>(null);
   const [messageContextMenu, setMessageContextMenu] = useState<MessageContextMenuState | null>(null);
+  const [allTags, setAllTags] = useState<CustomerTagItem[]>([]);
+  const [isLoadingTags, setIsLoadingTags] = useState(false);
+  const [isTagSubmenuOpen, setIsTagSubmenuOpen] = useState(false);
+  const [isTagCreateDialogOpen, setIsTagCreateDialogOpen] = useState(false);
+  const [tagDialogTargetCustomerId, setTagDialogTargetCustomerId] = useState("");
+  const [newTagName, setNewTagName] = useState("");
+  const [isCreatingTag, setIsCreatingTag] = useState(false);
+  const [tagCreateError, setTagCreateError] = useState("");
+  const [updatingCustomerTagKey, setUpdatingCustomerTagKey] = useState("");
+  const [isTagDeleteDialogOpen, setIsTagDeleteDialogOpen] = useState(false);
+  const [tagDeleteTarget, setTagDeleteTarget] = useState<CustomerTagItem | null>(null);
+  const [tagDeleteTargetCustomerId, setTagDeleteTargetCustomerId] = useState("");
+  const [isDeletingTag, setIsDeletingTag] = useState(false);
+  const [tagDeleteError, setTagDeleteError] = useState("");
   const [isComposerMenuOpen, setIsComposerMenuOpen] = useState(false);
   const [isPresetPanelOpen, setIsPresetPanelOpen] = useState(false);
   const [presetSnippets, setPresetSnippets] = useState<PresetSnippet[]>([]);
@@ -511,6 +544,7 @@ function HomePageContent() {
   const [opNotice, setOpNotice] = useState("");
   const [translatingMessageIds, setTranslatingMessageIds] = useState<Record<string, boolean>>({});
   const messageContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const tagSubmenuCloseTimerRef = useRef<number | null>(null);
   const clearCustomerQuery = useCallback(() => {
     if (!requestedCustomerId) return;
     router.replace(pathname, { scroll: false });
@@ -527,6 +561,33 @@ function HomePageContent() {
   }, []);
   const closeMessageContextMenu = useCallback(() => {
     setMessageContextMenu(null);
+  }, []);
+  const cancelTagSubmenuClose = useCallback(() => {
+    if (tagSubmenuCloseTimerRef.current != null) {
+      window.clearTimeout(tagSubmenuCloseTimerRef.current);
+      tagSubmenuCloseTimerRef.current = null;
+    }
+  }, []);
+  const scheduleTagSubmenuClose = useCallback(() => {
+    cancelTagSubmenuClose();
+    tagSubmenuCloseTimerRef.current = window.setTimeout(() => {
+      setIsTagSubmenuOpen(false);
+      tagSubmenuCloseTimerRef.current = null;
+    }, 120);
+  }, [cancelTagSubmenuClose]);
+  const resetTagCreateDialogState = useCallback(() => {
+    setIsTagCreateDialogOpen(false);
+    setNewTagName("");
+    setTagCreateError("");
+    setTagDialogTargetCustomerId("");
+    setIsCreatingTag(false);
+  }, []);
+  const resetTagDeleteDialogState = useCallback(() => {
+    setIsTagDeleteDialogOpen(false);
+    setTagDeleteTarget(null);
+    setTagDeleteTargetCustomerId("");
+    setTagDeleteError("");
+    setIsDeletingTag(false);
   }, []);
   const ensureAudioReady = useCallback(async () => {
     try {
@@ -644,9 +705,13 @@ function HomePageContent() {
   const customerListScrollRef = useRef<HTMLDivElement | null>(null);
   const customerListLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const manualReplyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerInputRowRef = useRef<HTMLDivElement | null>(null);
+  const manualReplyResizeFrameRef = useRef<number | null>(null);
   const customersRef = useRef<CustomerListItem[]>([]);
   const customerPageRef = useRef(1);
   const hasMoreCustomersRef = useRef(false);
+  const regularNextCursorRef = useRef<string | null>(null);
+  const requestedRegularCursorsRef = useRef<Set<string>>(new Set());
   const searchKeywordRef = useRef("");
   const isCustomerListRequestInFlightRef = useRef(false);
   const customerListRequestIdRef = useRef(0);
@@ -670,8 +735,7 @@ function HomePageContent() {
   const openChatToBottomRef = useRef(false);
   const shouldStickToBottomRef = useRef(true);
   const lastOpenedCustomerIdRef = useRef("");
-  const hasInitializedUnreadSnapshotRef = useRef(false);
-  const previousUnreadMapRef = useRef<Record<string, number>>({});
+  const playedInboundMessageIdsRef = useRef<Set<string>>(new Set());
   const opNoticeTimerRef = useRef<number | null>(null);
   const audioEnabledRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -690,8 +754,45 @@ function HomePageContent() {
   const workspaceTopPrefetchTriggeredRef = useRef(false);
   const workspacePrefetchTimerRef = useRef<number | null>(null);
   const workspacePrefetchBatchIdRef = useRef(0);
+  const customerSummaryRequestSeqRef = useRef<Map<string, number>>(new Map());
+  const customerStatsRequestIdRef = useRef(0);
+  const customerStatsRefreshTimerRef = useRef<number | null>(null);
+  const customerSummaryPreferredReasonsRef = useRef(
+    new Set([
+      "inbound-message",
+      "bridge-inbound-message",
+      "inbound-message-created",
+      "bridge-inbound-history",
+      "outbound-message-queued",
+      "bridge-outbound-sent",
+      "bridge-outbound-failed",
+      "bridge-outbound-timeout",
+      "customer-meta-updated",
+      "bridge-customer-updated",
+      "bridge-thread-status",
+    ])
+  );
+  const workspaceRefreshReasonsRef = useRef(
+    new Set([
+      "translation-updated",
+      "generation-updated",
+      "generation-reused",
+      "outbound-message-queued",
+      "bridge-outbound-sent",
+      "bridge-outbound-failed",
+      "bridge-outbound-timeout",
+      "inbound-message",
+      "bridge-inbound-message",
+    ])
+  );
+  const inboundSoundReasonsRef = useRef(
+    new Set(["inbound-message", "bridge-inbound-message", "inbound-message-created"])
+  );
   useEffect(() => {
     return () => {
+      if (tagSubmenuCloseTimerRef.current != null) {
+        window.clearTimeout(tagSubmenuCloseTimerRef.current);
+      }
       customerListAbortControllerRef.current?.abort();
       workspaceAbortControllerRef.current?.abort();
       if (workspacePrefetchTimerRef.current != null) {
@@ -707,23 +808,116 @@ function HomePageContent() {
       if (opNoticeTimerRef.current != null) {
         window.clearTimeout(opNoticeTimerRef.current);
       }
+      if (customerStatsRefreshTimerRef.current != null) {
+        window.clearTimeout(customerStatsRefreshTimerRef.current);
+      }
     };
   }, []);
-  const preserveCustomerListViewport = useCallback((apply: () => void) => {
+  const captureCustomerListAnchor = useCallback((options?: PreserveCustomerListViewportOptions): CustomerListViewportAnchor | null => {
     const container = customerListScrollRef.current;
-    const previousScrollTop = container?.scrollTop ?? null;
-    apply();
-    if (previousScrollTop === null) return;
+    if (!container) return null;
+    const excludedIds = new Set(
+      [
+        options?.excludeCustomerIdFromAnchor || "",
+        ...(options?.excludeCustomerIdsFromAnchor || []),
+      ]
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+    );
+    const cards = Array.from(container.querySelectorAll<HTMLElement>("[data-customer-id]"));
+    if (!cards.length) return null;
+    const containerTop = container.getBoundingClientRect().top;
+    let anchorCard: HTMLElement | null = null;
+    for (const card of cards) {
+      const customerId = String(card.dataset.customerId || "").trim();
+      if (!customerId || excludedIds.has(customerId)) {
+        continue;
+      }
+      const rect = card.getBoundingClientRect();
+      if (rect.bottom >= containerTop) {
+        anchorCard = card;
+        break;
+      }
+    }
+    if (!anchorCard) {
+      for (let i = cards.length - 1; i >= 0; i -= 1) {
+        const customerId = String(cards[i]?.dataset.customerId || "").trim();
+        if (!customerId || excludedIds.has(customerId)) {
+          continue;
+        }
+        anchorCard = cards[i] ?? null;
+        break;
+      }
+    }
+    if (!anchorCard) {
+      return {
+        kind: "scrollTop",
+        scrollTop: container.scrollTop,
+      };
+    }
+    const customerId = anchorCard?.dataset.customerId || "";
+    if (!customerId) {
+      return {
+        kind: "scrollTop",
+        scrollTop: container.scrollTop,
+      };
+    }
+    return {
+      kind: "customer",
+      customerId,
+      offsetTop: anchorCard.getBoundingClientRect().top - containerTop,
+      scrollTop: container.scrollTop,
+    };
+  }, []);
+  const restoreCustomerListAnchor = useCallback((anchor: CustomerListViewportAnchor | null) => {
+    if (!anchor) return;
     requestAnimationFrame(() => {
-      const current = customerListScrollRef.current;
-      if (!current) return;
-      // Do not override user scroll when they moved during async refresh.
+      const container = customerListScrollRef.current;
+      if (!container) return;
+      const threshold = 4;
       const latestScrollTop = customerListLatestScrollTopRef.current;
-      if (Math.abs(latestScrollTop - previousScrollTop) > 4) return;
-      current.scrollTop = previousScrollTop;
-      customerListLatestScrollTopRef.current = current.scrollTop;
+      const currentScrollTop = container.scrollTop;
+      const userMovedByLatest = Math.abs(latestScrollTop - anchor.scrollTop) > threshold;
+      const userMovedNow = Math.abs(currentScrollTop - anchor.scrollTop) > threshold;
+      if (userMovedByLatest || userMovedNow) return;
+      if (anchor.kind === "scrollTop") {
+        container.scrollTop = anchor.scrollTop;
+        customerListLatestScrollTopRef.current = container.scrollTop;
+        return;
+      }
+
+      const anchorCard = Array.from(
+        container.querySelectorAll<HTMLElement>("[data-customer-id]")
+      ).find((item) => item.dataset.customerId === anchor.customerId);
+      if (!anchorCard) {
+        container.scrollTop = anchor.scrollTop;
+        customerListLatestScrollTopRef.current = container.scrollTop;
+        return;
+      }
+      const containerTop = container.getBoundingClientRect().top;
+      const nextOffsetTop = anchorCard.getBoundingClientRect().top - containerTop;
+      container.scrollTop += nextOffsetTop - anchor.offsetTop;
+      customerListLatestScrollTopRef.current = container.scrollTop;
     });
   }, []);
+  const preserveCustomerListViewport = useCallback((
+    apply: () => void,
+    options?: PreserveCustomerListViewportOptions
+  ) => {
+    const anchor = captureCustomerListAnchor(options);
+    apply();
+    restoreCustomerListAnchor(anchor);
+  }, [captureCustomerListAnchor, restoreCustomerListAnchor]);
+  const scheduleManualReplyTextareaResize = useCallback(() => {
+    if (typeof window === "undefined") return;
+    if (manualReplyResizeFrameRef.current != null) {
+      window.cancelAnimationFrame(manualReplyResizeFrameRef.current);
+    }
+    manualReplyResizeFrameRef.current = window.requestAnimationFrame(() => {
+      manualReplyResizeFrameRef.current = null;
+      resizeManualReplyTextarea();
+    });
+  }, [resizeManualReplyTextarea]);
   const cleanupWorkspaceCache = useCallback(() => {
     const now = Date.now();
     const cache = workspaceCacheRef.current;
@@ -980,7 +1174,7 @@ function HomePageContent() {
       setIsPresetLoading(true);
       const response = await fetch("/api/preset-messages", { cache: "no-store" });
       const data = await response.json();
-      if (!response.ok || !data.ok) {
+        if (!response.ok || !data.ok) {
         throw new Error(data?.error || "读取预设信息失败");
       }
       setPresetSnippets(data.items || []);
@@ -1000,18 +1194,31 @@ function HomePageContent() {
       search?: string;
       limitOverride?: number;
       debugCustomerId?: string;
+      excludeCustomerIdFromAnchor?: string | null;
     }) => {
       const shouldPreserveListUi = !!options?.silent || !!options?.preserveUi || !!options?.loadMore;
-      const listScrollTop = shouldPreserveListUi
-        ? customerListScrollRef.current?.scrollTop ?? 0
-        : 0;
+      const listAnchor = shouldPreserveListUi
+        ? captureCustomerListAnchor({
+            excludeCustomerIdFromAnchor: options?.excludeCustomerIdFromAnchor,
+          })
+        : null;
       const isLoadMore = !!options?.loadMore;
       const activeSearch = options?.search ?? searchKeywordRef.current;
+      const isSearching = !!activeSearch.trim();
+      const useCursorLoadMore = isLoadMore && !isSearching;
       const limit = Math.max(options?.limitOverride ?? CUSTOMER_PAGE_SIZE, CUSTOMER_PAGE_SIZE);
       const page = isLoadMore ? customerPageRef.current + 1 : 1;
+      const cursorToUse = useCursorLoadMore ? regularNextCursorRef.current : null;
 
       if (isCustomerListRequestInFlightRef.current && isLoadMore) {
         return;
+      }
+      if (useCursorLoadMore) {
+        if (!cursorToUse) return;
+        if (requestedRegularCursorsRef.current.has(cursorToUse)) {
+          return;
+        }
+        requestedRegularCursorsRef.current.add(cursorToUse);
       }
 
       const requestId = customerListRequestIdRef.current + 1;
@@ -1023,6 +1230,7 @@ function HomePageContent() {
       const abortController = new AbortController();
       customerListAbortControllerRef.current?.abort();
       customerListAbortControllerRef.current = abortController;
+      let requestSucceeded = false;
 
       try {
         isCustomerListRequestInFlightRef.current = true;
@@ -1034,10 +1242,12 @@ function HomePageContent() {
         setPageError("");
 
         const params = new URLSearchParams();
-        params.set("page", String(page));
         params.set("limit", String(limit));
-        if (activeSearch) {
+        if (isSearching) {
+          params.set("page", String(page));
           params.set("q", activeSearch);
+        } else if (useCursorLoadMore && cursorToUse) {
+          params.set("cursor", cursorToUse);
         }
         if (options?.debugCustomerId) {
           params.set("debugCustomerId", options.debugCustomerId);
@@ -1048,6 +1258,20 @@ function HomePageContent() {
           signal: abortController.signal,
         });
         const data = await response.json();
+        if (response.status === 400 && data?.error === "invalid_cursor") {
+          console.error("load customers invalid cursor:", {
+            isLoadMore,
+            cursor: cursorToUse,
+            search: activeSearch,
+          });
+          if (useCursorLoadMore) {
+            setHasMoreCustomers(false);
+            setRegularNextCursor(null);
+            hasMoreCustomersRef.current = false;
+            regularNextCursorRef.current = null;
+          }
+          return;
+        }
         if (!response.ok || !data.ok) {
           throw new Error(data?.error || "读取顾客列表失败");
         }
@@ -1064,7 +1288,13 @@ function HomePageContent() {
         });
         const nextHasMore = !!data.hasMore;
         const nextPage = Number(data.page || page);
-        const nextStats: CustomerListStats = data.stats || { overdueFollowupCount: 0, totalUnreadCount: 0 };
+        const responsePageSize = Number(data.pageSize || limit);
+        const nextCursor = typeof data.nextCursor === "string" && data.nextCursor.trim() ? data.nextCursor.trim() : null;
+        const isCappedFullRefresh =
+          !isLoadMore &&
+          !isSearching &&
+          shouldPreserveListUi &&
+          limit > responsePageSize;
 
         setCustomers((prev) => {
           const prevUnreadMap = new Map(prev.map((item) => [item.id, item.unreadCount]));
@@ -1095,7 +1325,12 @@ function HomePageContent() {
             }
             return next;
           }
-          const next = sortCustomerList(applyReadProtectionToCustomers(list));
+          const fetchedIds = new Set(list.map((item) => item.id));
+          const preservedRegularTail = isCappedFullRefresh
+            ? prev.filter((item) => !item.pinnedAt && !fetchedIds.has(item.id))
+            : [];
+          const replaceBase = [...list, ...preservedRegularTail];
+          const next = sortCustomerList(applyReadProtectionToCustomers(replaceBase));
           debugStateLog("[customers-state] set", { source: "loadCustomers:replace", count: next.length });
           for (const item of next) {
             if (item.unreadCount > 0) {
@@ -1122,16 +1357,22 @@ function HomePageContent() {
         const loadedPinnedCountAfterFetch = list.filter((item) => !!item.pinnedAt).length;
         const loadedRegularCountAfterFetch = Math.max(0, list.length - loadedPinnedCountAfterFetch);
         const nextPageValue =
-          !activeSearch && !isLoadMore
+          !isSearching && !isLoadMore
             ? Math.max(1, Math.ceil(loadedRegularCountAfterFetch / CUSTOMER_PAGE_SIZE))
             : nextPage;
+        const nextRegularCursorValue = isSearching ? null : nextCursor;
 
-        setCustomerStats(nextStats);
         setCustomerPage(nextPageValue);
+        setRegularNextCursor(nextRegularCursorValue);
         setHasMoreCustomers(nextHasMore);
         customerPageRef.current = nextPageValue;
+        regularNextCursorRef.current = nextRegularCursorValue;
         hasMoreCustomersRef.current = nextHasMore;
         searchKeywordRef.current = activeSearch;
+        if (!useCursorLoadMore) {
+          requestedRegularCursorsRef.current.clear();
+        }
+        requestSucceeded = true;
 
         setSelectedCustomerId((prev) => {
           if (prev && list.some((item) => item.id === prev)) return prev;
@@ -1140,13 +1381,7 @@ function HomePageContent() {
         });
 
         if (shouldPreserveListUi) {
-          requestAnimationFrame(() => {
-            const container = customerListScrollRef.current;
-            if (!container) return;
-            if (Math.abs(customerListLatestScrollTopRef.current - listScrollTop) > 4) return;
-            container.scrollTop = listScrollTop;
-            customerListLatestScrollTopRef.current = container.scrollTop;
-          });
+          restoreCustomerListAnchor(listAnchor);
         }
       } catch (error) {
         if (isAbortError(error)) {
@@ -1157,6 +1392,9 @@ function HomePageContent() {
           setPageError(String(error));
         }
       } finally {
+        if (useCursorLoadMore && cursorToUse && !requestSucceeded) {
+          requestedRegularCursorsRef.current.delete(cursorToUse);
+        }
         if (requestId === customerListRequestIdRef.current) {
           isCustomerListRequestInFlightRef.current = false;
           if (customerListAbortControllerRef.current === abortController) {
@@ -1169,8 +1407,70 @@ function HomePageContent() {
         }
       }
     },
-    [applyReadProtectionToCustomers]
+    [applyReadProtectionToCustomers, captureCustomerListAnchor, restoreCustomerListAnchor]
   );
+  const loadCustomerStats = useCallback(async (options?: { debounceMs?: number }) => {
+    const debounceMs = Math.max(0, options?.debounceMs ?? 0);
+    const run = async () => {
+      const requestId = customerStatsRequestIdRef.current + 1;
+      customerStatsRequestIdRef.current = requestId;
+      try {
+        const response = await fetch("/api/customers/stats", {
+          cache: "no-store",
+        });
+        const data = await response.json();
+        if (!response.ok || !data?.ok || !data?.stats) {
+          throw new Error(data?.error || "读取顾客统计失败");
+        }
+        if (requestId !== customerStatsRequestIdRef.current) {
+          return;
+        }
+        setCustomerStats({
+          overdueFollowupCount: Number(data.stats.overdueFollowupCount || 0),
+          totalUnreadCount: Number(data.stats.totalUnreadCount || 0),
+        });
+      } catch (error) {
+        console.error("load customer stats error:", error);
+      }
+    };
+
+    if (debounceMs <= 0) {
+      await run();
+      return;
+    }
+    if (customerStatsRefreshTimerRef.current != null) {
+      window.clearTimeout(customerStatsRefreshTimerRef.current);
+    }
+    customerStatsRefreshTimerRef.current = window.setTimeout(() => {
+      customerStatsRefreshTimerRef.current = null;
+      void run();
+    }, debounceMs);
+  }, []);
+  const loadAllTags = useCallback(async () => {
+    try {
+      setIsLoadingTags(true);
+      const response = await fetch("/api/tags", { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok || !data?.ok || !Array.isArray(data.tags)) {
+        throw new Error(data?.error || "failed_to_load_tags");
+      }
+      setAllTags(
+        data.tags
+          .map((item: { id?: unknown; name?: unknown; color?: unknown; sortOrder?: unknown }) => ({
+            id: String(item?.id || ""),
+            name: String(item?.name || ""),
+            color: item?.color == null ? null : String(item.color),
+            sortOrder: Number(item?.sortOrder || 0),
+          }))
+          .filter((item: CustomerTagItem) => !!item.id && !!item.name)
+          .sort((a: CustomerTagItem, b: CustomerTagItem) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+      );
+    } catch (error) {
+      console.error("load all tags error:", error);
+    } finally {
+      setIsLoadingTags(false);
+    }
+  }, []);
   const markCustomerRead = useCallback(async (
     customerId: string,
     options?: { reason?: string; previousUnread?: number }
@@ -1208,6 +1508,7 @@ function HomePageContent() {
       markReadPendingRef.current.delete(customerId);
       markReadConfirmedAtRef.current.set(customerId, Date.now());
       markReadAwaitingAuthoritativeRef.current.add(customerId);
+      void loadCustomerStats({ debounceMs: 120 });
       void loadCustomers({
         silent: true,
         preserveUi: true,
@@ -1232,7 +1533,7 @@ function HomePageContent() {
     } finally {
       markReadInFlightRef.current.delete(customerId);
     }
-  }, [loadCustomers]);
+  }, [loadCustomerStats, loadCustomers]);
   const loadWorkspace = useCallback(
     async (customerId: string, options?: { preserveUi?: boolean; source?: string; cacheOnly?: boolean }) => {
       const source = options?.source || "unknown";
@@ -1383,25 +1684,32 @@ function HomePageContent() {
         });
         setWorkspace(nextWorkspace);
         if (nextWorkspace?.customer) {
-          setCustomers((prev) => {
-            const merged = prev.map((item) =>
-              item.id === nextWorkspace.customer.id
-                ? {
-                    ...item,
-                    remarkName: nextWorkspace.customer.remarkName,
-                    pinnedAt: nextWorkspace.customer.pinnedAt,
-                    unreadCount: item.id === customerId ? 0 : nextWorkspace.customer.unreadCount,
-                    followup: nextWorkspace.customer.followup,
-                  }
-                : item
-            );
-            debugStateLog("[customers-state] workspace-customer-merge", {
-              source,
-              customerId: nextWorkspace.customer.id,
-              unreadCount: nextWorkspace.customer.unreadCount,
-            });
-            return applyReadProtectionToCustomers(merged);
-          });
+          preserveCustomerListViewport(
+            () => {
+              setCustomers((prev) => {
+                const merged = prev.map((item) =>
+                  item.id === nextWorkspace.customer.id
+                    ? {
+                        ...item,
+                        remarkName: nextWorkspace.customer.remarkName,
+                        pinnedAt: nextWorkspace.customer.pinnedAt,
+                        unreadCount: item.id === customerId ? 0 : nextWorkspace.customer.unreadCount,
+                        followup: nextWorkspace.customer.followup,
+                      }
+                    : item
+                );
+                debugStateLog("[customers-state] workspace-customer-merge", {
+                  source,
+                  customerId: nextWorkspace.customer.id,
+                  unreadCount: nextWorkspace.customer.unreadCount,
+                });
+                return sortCustomerList(applyReadProtectionToCustomers(merged));
+              });
+            },
+            {
+              excludeCustomerIdFromAnchor: nextWorkspace.customer.id,
+            }
+          );
         } else {
           debugStateLog("[customers-state] workspace-customer-merge-skipped", {
             source,
@@ -1445,7 +1753,7 @@ function HomePageContent() {
         }
       }
     },
-    [applyReadProtectionToCustomers, getCachedWorkspace, setCachedWorkspace]
+    [applyReadProtectionToCustomers, getCachedWorkspace, preserveCustomerListViewport, setCachedWorkspace]
   );
   const runRealtimeRefresh = useCallback(
     async (targetCustomerId?: string | null) => {
@@ -1473,7 +1781,9 @@ function HomePageContent() {
           preserveUi: true,
           limitOverride: Math.max(loadedRegularCount, CUSTOMER_PAGE_SIZE),
           search: searchKeywordRef.current,
+          excludeCustomerIdFromAnchor: nextTargetCustomerId,
         });
+        void loadCustomerStats({ debounceMs: 200 });
         if (activeCustomerId && (!nextTargetCustomerId || nextTargetCustomerId === activeCustomerId)) {
           await loadWorkspace(activeCustomerId, { preserveUi: true, source: "realtime-refresh" });
         }
@@ -1487,7 +1797,53 @@ function HomePageContent() {
         }
       }
     },
-    [invalidateWorkspaceCache, loadCustomers, loadWorkspace]
+    [invalidateWorkspaceCache, loadCustomerStats, loadCustomers, loadWorkspace]
+  );
+  const refreshCustomerSummary = useCallback(
+    async (customerId: string, options?: { preserveUi?: boolean }) => {
+      const normalizedId = String(customerId || "").trim();
+      if (!normalizedId) return;
+      const lastSeq = customerSummaryRequestSeqRef.current.get(normalizedId) ?? 0;
+      const localSeq = lastSeq + 1;
+      customerSummaryRequestSeqRef.current.set(normalizedId, localSeq);
+      try {
+        const response = await fetch(`/api/customers/${normalizedId}/summary`, {
+          cache: "no-store",
+        });
+        const latestSeq = customerSummaryRequestSeqRef.current.get(normalizedId) ?? 0;
+        if (latestSeq !== localSeq) {
+          return;
+        }
+        const data = await response.json();
+        if (response.status === 404) {
+          return;
+        }
+        if (!response.ok || !data?.ok || !data?.customer) {
+          throw new Error(data?.error || "refresh customer summary failed");
+        }
+        const nextCustomer = data.customer as CustomerListItem;
+        const applySummary = () => {
+          setCustomers((prev) => {
+            const exists = prev.some((item) => item.id === normalizedId);
+            const merged = exists
+              ? prev.map((item) => (item.id === normalizedId ? nextCustomer : item))
+              : [...prev, nextCustomer];
+            return sortCustomerList(applyReadProtectionToCustomers(merged));
+          });
+        };
+        if (options?.preserveUi) {
+          preserveCustomerListViewport(applySummary, {
+            excludeCustomerIdFromAnchor: normalizedId,
+          });
+        } else {
+          applySummary();
+        }
+        void loadCustomerStats({ debounceMs: 200 });
+      } catch (error) {
+        console.error("refresh customer summary error:", error);
+      }
+    },
+    [applyReadProtectionToCustomers, loadCustomerStats, preserveCustomerListViewport]
   );
   const addOptimisticMessage = useCallback((customerId: string, message: OptimisticWorkspaceMessage) => {
     setOptimisticMessagesByCustomer((prev) => {
@@ -1587,22 +1943,27 @@ function HomePageContent() {
   );
   const updateCustomerLatestMessage = useCallback(
     (customerId: string, message: WorkspaceMessage | OptimisticWorkspaceMessage) => {
-      preserveCustomerListViewport(() => {
-        setCustomers((prev) =>
-          sortCustomerList(
-            applyReadProtectionToCustomers(prev.map((item) =>
-              item.id === customerId
-                ? {
-                    ...item,
-                    lastMessageAt: message.sentAt,
-                    latestMessage: buildCustomerLatestMessage(message),
-                  }
-                : item
-            ))
-          )
-        );
-        debugStateLog("[customers-state] set", { source: "updateCustomerLatestMessage" });
-      });
+      preserveCustomerListViewport(
+        () => {
+          setCustomers((prev) =>
+            sortCustomerList(
+              applyReadProtectionToCustomers(prev.map((item) =>
+                item.id === customerId
+                  ? {
+                      ...item,
+                      lastMessageAt: message.sentAt,
+                      latestMessage: buildCustomerLatestMessage(message),
+                    }
+                  : item
+              ))
+            )
+          );
+          debugStateLog("[customers-state] set", { source: "updateCustomerLatestMessage" });
+        },
+        {
+          excludeCustomerIdFromAnchor: customerId,
+        }
+      );
     },
     [applyReadProtectionToCustomers, preserveCustomerListViewport]
   );
@@ -1763,25 +2124,30 @@ function HomePageContent() {
       const previousCustomers = customersRef.current;
       const previousWorkspace = workspace;
 
-      preserveCustomerListViewport(() => {
-        setCustomers((prev) =>
-          sortCustomerList(
-            applyReadProtectionToCustomers(prev.map((item) => {
-              if (item.id !== customerId) return item;
-              return {
-                ...item,
-                ...(payload.remarkName !== undefined
-                  ? { remarkName: payload.remarkName?.trim() || null }
-                  : {}),
-                ...(payload.pinned !== undefined
-                  ? { pinnedAt: payload.pinned ? new Date().toISOString() : null }
-                  : {}),
-                ...(payload.markRead ? { unreadCount: 0 } : {}),
-              };
-            }))
-          )
-        );
-      });
+      preserveCustomerListViewport(
+        () => {
+          setCustomers((prev) =>
+            sortCustomerList(
+              applyReadProtectionToCustomers(prev.map((item) => {
+                if (item.id !== customerId) return item;
+                return {
+                  ...item,
+                  ...(payload.remarkName !== undefined
+                    ? { remarkName: payload.remarkName?.trim() || null }
+                    : {}),
+                  ...(payload.pinned !== undefined
+                    ? { pinnedAt: payload.pinned ? new Date().toISOString() : null }
+                    : {}),
+                  ...(payload.markRead ? { unreadCount: 0 } : {}),
+                };
+              }))
+            )
+          );
+        },
+        {
+          excludeCustomerIdFromAnchor: customerId,
+        }
+      );
       if (selectedCustomerIdRef.current === customerId) {
         setWorkspace((prev) => {
           if (!prev || prev.customer.id !== customerId) return prev;
@@ -1832,22 +2198,27 @@ function HomePageContent() {
       }
 
       const nextCustomer = data.customer;
-      preserveCustomerListViewport(() => {
-        setCustomers((prev) =>
-          sortCustomerList(
-            applyReadProtectionToCustomers(prev.map((item) =>
-              item.id === customerId
-                ? {
-                    ...item,
-                    remarkName: nextCustomer.remarkName,
-                    pinnedAt: nextCustomer.pinnedAt,
-                    unreadCount: nextCustomer.unreadCount,
-                  }
-                : item
-            ))
-          )
-        );
-      });
+      preserveCustomerListViewport(
+        () => {
+          setCustomers((prev) =>
+            sortCustomerList(
+              applyReadProtectionToCustomers(prev.map((item) =>
+                item.id === customerId
+                  ? {
+                      ...item,
+                      remarkName: nextCustomer.remarkName,
+                      pinnedAt: nextCustomer.pinnedAt,
+                      unreadCount: nextCustomer.unreadCount,
+                    }
+                  : item
+              ))
+            )
+          );
+        },
+        {
+          excludeCustomerIdFromAnchor: customerId,
+        }
+      );
       if (selectedCustomerIdRef.current === customerId) {
         setWorkspace((prev) => {
           if (!prev || prev.customer.id !== customerId) return prev;
@@ -1886,11 +2257,18 @@ function HomePageContent() {
   useEffect(() => {
     customerPageRef.current = customerPage;
     hasMoreCustomersRef.current = hasMoreCustomers;
+    regularNextCursorRef.current = regularNextCursor;
     searchKeywordRef.current = debouncedSearchText;
-  }, [customerPage, hasMoreCustomers, debouncedSearchText]);
+  }, [customerPage, hasMoreCustomers, regularNextCursor, debouncedSearchText]);
   useEffect(() => {
     void loadCustomers({ reset: true, search: debouncedSearchText });
   }, [debouncedSearchText, loadCustomers]);
+  useEffect(() => {
+    void loadCustomerStats();
+  }, [loadCustomerStats]);
+  useEffect(() => {
+    void loadAllTags();
+  }, [loadAllTags]);
   useEffect(() => {
     selectedCustomerIdRef.current = selectedCustomerId;
     void loadWorkspace(selectedCustomerId, {
@@ -1933,8 +2311,30 @@ function HomePageContent() {
     customerListLatestScrollTopRef.current = customerListScrollRef.current?.scrollTop ?? 0;
   }, [customers.length]);
   useEffect(() => {
-    resizeManualReplyTextarea();
-  }, [manualReply, resizeManualReplyTextarea]);
+    scheduleManualReplyTextareaResize();
+  }, [manualReply, scheduleManualReplyTextareaResize]);
+  useEffect(() => {
+    scheduleManualReplyTextareaResize();
+  }, [selectedCustomerId, scheduleManualReplyTextareaResize]);
+  useEffect(() => {
+    scheduleManualReplyTextareaResize();
+  }, [workspace, scheduleManualReplyTextareaResize]);
+  useEffect(() => {
+    const target = composerInputRowRef.current;
+    if (!target || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      scheduleManualReplyTextareaResize();
+    });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [scheduleManualReplyTextareaResize]);
+  useEffect(() => {
+    return () => {
+      if (manualReplyResizeFrameRef.current != null) {
+        window.cancelAnimationFrame(manualReplyResizeFrameRef.current);
+      }
+    };
+  }, []);
   useEffect(() => {
     const enableAudio = () => {
       audioEnabledRef.current = true;
@@ -1959,50 +2359,6 @@ function HomePageContent() {
       window.removeEventListener("keydown", enableAudio);
     };
   }, []);
-  useEffect(() => {
-    if (!customers.length) {
-      previousUnreadMapRef.current = {};
-      hasInitializedUnreadSnapshotRef.current = true;
-      return;
-    }
-    const protectedCustomers = applyReadProtectionToCustomers(customers);
-    const nextUnreadMap = Object.fromEntries(protectedCustomers.map((customer) => [customer.id, customer.unreadCount]));
-    if (!hasInitializedUnreadSnapshotRef.current) {
-      previousUnreadMapRef.current = nextUnreadMap;
-      hasInitializedUnreadSnapshotRef.current = true;
-      return;
-    }
-    const hasIncomingUnread = protectedCustomers.some((customer) => {
-      const previousUnread = previousUnreadMapRef.current[customer.id] ?? 0;
-      const latestPreviewFromCustomer = customer.latestMessage?.role === "CUSTOMER";
-      if (!latestPreviewFromCustomer || customer.unreadCount <= previousUnread) {
-        if (latestPreviewFromCustomer && customer.unreadCount > 0 && customer.unreadCount !== previousUnread) {
-          const reason = getUnreadProtectionReason(customer.id);
-          if (reason) {
-            debugStateLog("[sound] incoming-suppressed", {
-              customerId: customer.id,
-              reason,
-              unreadBefore: previousUnread,
-              unreadAfter: customer.unreadCount,
-              source: "customers-effect",
-            });
-          }
-        }
-        return false;
-      }
-      debugStateLog("[sound] incoming-play", {
-        customerId: customer.id,
-        unreadBefore: previousUnread,
-        unreadAfter: customer.unreadCount,
-        source: "customers-effect",
-      });
-      return latestPreviewFromCustomer && customer.unreadCount > previousUnread;
-    });
-    if (hasIncomingUnread) {
-      void playDingDongSound();
-    }
-    previousUnreadMapRef.current = nextUnreadMap;
-  }, [applyReadProtectionToCustomers, customers, getUnreadProtectionReason, playDingDongSound]);
   useEffect(() => {
     function handleDocumentClick(event: MouseEvent) {
       const target = event.target as Node;
@@ -2036,13 +2392,38 @@ function HomePageContent() {
   }, [customers, selectedCustomerId, markCustomerRead]);
   useEffect(() => {
     const handleCloseContextMenu = () => {
+      if (tagSubmenuCloseTimerRef.current != null) {
+        window.clearTimeout(tagSubmenuCloseTimerRef.current);
+        tagSubmenuCloseTimerRef.current = null;
+      }
       setCustomerContextMenu(null);
       setMessageContextMenu(null);
+      setIsTagSubmenuOpen(false);
+      setIsTagDeleteDialogOpen(false);
+      setTagDeleteTarget(null);
+      setTagDeleteTargetCustomerId("");
+      setTagDeleteError("");
+      setIsDeletingTag(false);
     };
     const handleEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (tagSubmenuCloseTimerRef.current != null) {
+        window.clearTimeout(tagSubmenuCloseTimerRef.current);
+        tagSubmenuCloseTimerRef.current = null;
+      }
       setCustomerContextMenu(null);
       setMessageContextMenu(null);
+      setIsTagSubmenuOpen(false);
+      setIsTagCreateDialogOpen(false);
+      setNewTagName("");
+      setTagCreateError("");
+      setTagDialogTargetCustomerId("");
+      setIsCreatingTag(false);
+      setIsTagDeleteDialogOpen(false);
+      setTagDeleteTarget(null);
+      setTagDeleteTargetCustomerId("");
+      setTagDeleteError("");
+      setIsDeletingTag(false);
     };
     const handleScrollClose = () => setMessageContextMenu(null);
     const chatContainer = chatScrollRef.current;
@@ -2133,17 +2514,90 @@ function HomePageContent() {
           message && typeof message === "object"
             ? ((message as { data?: Record<string, unknown> }).data || {})
             : {};
+        const reason = typeof payload.reason === "string" ? payload.reason.trim() : "";
+        const tagId = typeof payload.tagId === "string" ? payload.tagId.trim() : "";
+        const inboundMessageIdCandidate =
+          typeof payload.messageId === "string" && payload.messageId.trim()
+            ? payload.messageId.trim()
+            : typeof payload.inboundMessageId === "string" && payload.inboundMessageId.trim()
+              ? payload.inboundMessageId.trim()
+              : "";
         const targetCustomerId =
           payload && typeof payload.customerId === "string" && payload.customerId.trim()
             ? payload.customerId.trim()
             : null;
+        if (reason === "tags-updated") {
+          if (tagId) {
+            setAllTags((prev) => prev.filter((item) => item.id !== tagId));
+            setCustomers((prev) =>
+              prev.map((customer) => ({
+                ...customer,
+                tags: customer.tags.filter((item) => item.id !== tagId),
+              }))
+            );
+            setWorkspace((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    customer: {
+                      ...prev.customer,
+                      tags: prev.customer.tags.filter((item) => item.id !== tagId),
+                    },
+                  }
+                : prev
+            );
+          }
+          void loadAllTags();
+          void runRealtimeRefresh(null);
+          return;
+        }
+        if (
+          targetCustomerId &&
+          reason &&
+          inboundSoundReasonsRef.current.has(reason) &&
+          inboundMessageIdCandidate &&
+          !playedInboundMessageIdsRef.current.has(inboundMessageIdCandidate)
+        ) {
+          playedInboundMessageIdsRef.current.add(inboundMessageIdCandidate);
+          if (playedInboundMessageIdsRef.current.size > 3000) {
+            const iterator = playedInboundMessageIdsRef.current.values();
+            for (let i = 0; i < 1000; i += 1) {
+              const next = iterator.next();
+              if (next.done) break;
+              playedInboundMessageIdsRef.current.delete(next.value);
+            }
+          }
+          void playDingDongSound();
+        }
+        const isSearching = !!searchKeywordRef.current.trim();
         if (targetCustomerId) {
           const lastLocalRefreshAt = recentLocalRefreshAtRef.current[targetCustomerId] ?? 0;
           if (Date.now() - lastLocalRefreshAt < 1200) {
             return;
           }
         }
-        void runRealtimeRefresh(targetCustomerId);
+        if (!targetCustomerId) {
+          void runRealtimeRefresh(null);
+          return;
+        }
+        if (isSearching) {
+          void runRealtimeRefresh(targetCustomerId);
+          return;
+        }
+        if (!reason || customerSummaryPreferredReasonsRef.current.has(reason)) {
+          void refreshCustomerSummary(targetCustomerId, { preserveUi: true });
+          if (
+            selectedCustomerIdRef.current === targetCustomerId &&
+            (!reason || workspaceRefreshReasonsRef.current.has(reason))
+          ) {
+            void loadWorkspace(targetCustomerId, { preserveUi: true, source: "realtime-targeted" });
+          }
+          return;
+        }
+        void refreshCustomerSummary(targetCustomerId, { preserveUi: true });
+        if (selectedCustomerIdRef.current === targetCustomerId && workspaceRefreshReasonsRef.current.has(reason)) {
+          void loadWorkspace(targetCustomerId, { preserveUi: true, source: "realtime-targeted" });
+        }
       }, 250);
     };
     const handleConnectionStateChange = (stateChange: Ably.ConnectionStateChange) => {
@@ -2165,7 +2619,7 @@ function HomePageContent() {
       client.close();
       ablyClientRef.current = null;
     };
-  }, [runRealtimeRefresh]);
+  }, [loadAllTags, loadWorkspace, playDingDongSound, refreshCustomerSummary, runRealtimeRefresh]);
   const displayedCustomers = useMemo(() => {
     return sortCustomerList(
       customers.map((customer) => {
@@ -2230,14 +2684,6 @@ function HomePageContent() {
   const displayedSuggestion1Zh =
     customReply?.suggestion1Zh ||
     workspace?.latestReplyDraftSet?.stableChinese ||
-    "";
-  const displayedSuggestion2Ja =
-    customReply?.suggestion2Ja ||
-    workspace?.latestReplyDraftSet?.advancingJapanese ||
-    "";
-  const displayedSuggestion2Zh =
-    customReply?.suggestion2Zh ||
-    workspace?.latestReplyDraftSet?.advancingChinese ||
     "";
   const latestDraft = workspace?.latestReplyDraftSet || null;
   const hasLatestDraftTranslationFailure =
@@ -2596,8 +3042,6 @@ function HomePageContent() {
         setCustomReply({
           suggestion1Ja: String(data?.suggestion1Ja || ""),
           suggestion1Zh: String(data?.suggestion1Zh || ""),
-          suggestion2Ja: String(data?.suggestion2Ja || ""),
-          suggestion2Zh: String(data?.suggestion2Zh || ""),
           translationStatus:
             String(data?.translationStatus || "").trim() === "failed" ? "failed" : "succeeded",
           translationErrorCode: String(data?.translationErrorCode || "").trim(),
@@ -3094,6 +3538,205 @@ function HomePageContent() {
       window.alert("置顶状态更新失败");
     }
   }
+  function closeCustomerTagMenus() {
+    cancelTagSubmenuClose();
+    setCustomerContextMenu(null);
+    setIsTagSubmenuOpen(false);
+  }
+  function handleOpenTagCreateDialog() {
+    const customerId = contextMenuCustomer?.id || "";
+    if (!customerId) {
+      setTagCreateError("请先选择顾客");
+      return;
+    }
+    setTagDialogTargetCustomerId(customerId);
+    setTagCreateError("");
+    setNewTagName("");
+    closeCustomerTagMenus();
+    setIsTagCreateDialogOpen(true);
+  }
+  function handleCloseTagCreateDialog() {
+    if (isCreatingTag) return;
+    resetTagCreateDialogState();
+  }
+  function handleOpenTagDeleteDialog(tag: CustomerTagItem) {
+    const customerId = contextMenuCustomer?.id || "";
+    setTagDeleteTarget(tag);
+    setTagDeleteTargetCustomerId(customerId);
+    setTagDeleteError("");
+    closeCustomerTagMenus();
+    setIsTagDeleteDialogOpen(true);
+  }
+  function handleCloseTagDeleteDialog() {
+    if (isDeletingTag) return;
+    resetTagDeleteDialogState();
+  }
+  async function handleToggleCustomerTag(customer: CustomerListItem, tag: CustomerTagItem) {
+    const tagKey = `${customer.id}:${tag.id}`;
+    if (updatingCustomerTagKey) return;
+    setUpdatingCustomerTagKey(tagKey);
+    try {
+      const hasTag = customer.tags.some((item) => item.id === tag.id);
+      const response = await fetch(
+        hasTag
+          ? `/api/customers/${customer.id}/tags/${tag.id}`
+          : `/api/customers/${customer.id}/tags`,
+        hasTag
+          ? { method: "DELETE" }
+          : {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ tagId: tag.id }),
+            }
+      );
+      const data = await response.json();
+      if (!response.ok || !data?.ok) {
+        throw new Error(data?.error || "failed_to_update_customer_tags");
+      }
+      await refreshCustomerSummary(customer.id, { preserveUi: true });
+      closeCustomerTagMenus();
+    } catch (error) {
+      console.error("toggle customer tag error:", error);
+      showOpNotice("标签更新失败");
+    } finally {
+      setUpdatingCustomerTagKey("");
+    }
+  }
+  async function handleCreateTagAndAttach() {
+    const targetCustomerId = tagDialogTargetCustomerId.trim();
+    const trimmedName = newTagName.trim();
+    if (!trimmedName) {
+      setTagCreateError("请输入 1-20 个字符的标签名");
+      return;
+    }
+    if (trimmedName.length > 20) {
+      setTagCreateError("请输入 1-20 个字符的标签名");
+      return;
+    }
+    if (allTags.length >= 10) {
+      setTagCreateError("最多只能创建 10 个标签");
+      return;
+    }
+    setIsCreatingTag(true);
+    setTagCreateError("");
+    try {
+      const createResponse = await fetch("/api/tags", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ name: trimmedName }),
+      });
+      const createData = await createResponse.json();
+      if (!createResponse.ok || !createData?.ok || !createData?.tag?.id) {
+        const code = String(createData?.error || "");
+        if (code === "tag_limit_reached") {
+          setTagCreateError("最多只能创建 10 个标签");
+        } else if (code === "tag_name_exists") {
+          setTagCreateError("标签名已存在");
+        } else if (code === "invalid_tag_name") {
+          setTagCreateError("请输入 1-20 个字符的标签名");
+        } else {
+          setTagCreateError("创建标签失败");
+        }
+        return;
+      }
+      const createdTag: CustomerTagItem = {
+        id: String(createData.tag.id),
+        name: String(createData.tag.name || ""),
+        color: createData.tag.color == null ? null : String(createData.tag.color),
+        sortOrder: Number(createData.tag.sortOrder || 0),
+      };
+      setAllTags((prev) =>
+        [...prev.filter((item) => item.id !== createdTag.id), createdTag].sort(
+          (a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)
+        )
+      );
+
+      if (!targetCustomerId) {
+        setTagCreateError("标签已创建，但添加到顾客失败");
+        return;
+      }
+      const bindResponse = await fetch(`/api/customers/${targetCustomerId}/tags`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ tagId: createdTag.id }),
+      });
+      const bindData = await bindResponse.json();
+      if (!bindResponse.ok || !bindData?.ok) {
+        setTagCreateError("标签已创建，但添加到顾客失败");
+        return;
+      }
+      await refreshCustomerSummary(targetCustomerId, { preserveUi: true });
+      resetTagCreateDialogState();
+      closeCustomerTagMenus();
+    } catch (error) {
+      console.error("create tag error:", error);
+      setTagCreateError("创建标签失败");
+    } finally {
+      setIsCreatingTag(false);
+    }
+  }
+  async function handleDeleteTagGlobally() {
+    const targetTag = tagDeleteTarget;
+    const targetTagId = String(targetTag?.id || "").trim();
+    if (!targetTagId) {
+      setTagDeleteError("请选择要删除的标签");
+      return;
+    }
+    setIsDeletingTag(true);
+    setTagDeleteError("");
+    try {
+      const response = await fetch(`/api/tags/${targetTagId}`, {
+        method: "DELETE",
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.ok) {
+        const code = String(data?.error || "");
+        if (code === "tag_not_found") {
+          setTagDeleteError("标签不存在，可能已被删除");
+        } else if (code === "invalid_tag_id") {
+          setTagDeleteError("标签标识无效");
+        } else {
+          setTagDeleteError("删除标签失败");
+        }
+        return;
+      }
+      setAllTags((prev) => prev.filter((item) => item.id !== targetTagId));
+      setCustomers((prev) =>
+        prev.map((customer) => ({
+          ...customer,
+          tags: customer.tags.filter((item) => item.id !== targetTagId),
+        }))
+      );
+      if (workspace?.customer?.id) {
+        setWorkspace((prev) =>
+          prev
+            ? {
+                ...prev,
+                customer: {
+                  ...prev.customer,
+                  tags: prev.customer.tags.filter((item) => item.id !== targetTagId),
+                },
+              }
+            : prev
+        );
+      }
+      if (tagDeleteTargetCustomerId) {
+        await refreshCustomerSummary(tagDeleteTargetCustomerId, { preserveUi: true });
+      }
+      resetTagDeleteDialogState();
+    } catch (error) {
+      console.error("delete tag error:", error);
+      setTagDeleteError("删除标签失败");
+    } finally {
+      setIsDeletingTag(false);
+    }
+  }
   async function handleRenameCustomer(customer: CustomerListItem) {
     setCustomerContextMenu(null);
     const nextRemarkName = window.prompt(
@@ -3138,6 +3781,27 @@ function HomePageContent() {
     customerListLatestScrollTopRef.current = container.scrollTop;
   }
   const contextMenuCustomer = customerContextMenu?.customer || null;
+  const canCreateMoreTags = allTags.length < 10;
+  const customerTagMenuPosition = useMemo(() => {
+    if (!customerContextMenu) return null;
+    const menuWidth = 160;
+    const submenuWidth = 220;
+    const rowHeight = 36;
+    const menuHeight = rowHeight * 3 + 16;
+    const viewportWidth = typeof window !== "undefined" ? window.innerWidth : 1200;
+    const viewportHeight = typeof window !== "undefined" ? window.innerHeight : 800;
+    const baseLeft = Math.max(8, Math.min(customerContextMenu.x, viewportWidth - menuWidth - 8));
+    const baseTop = Math.max(8, Math.min(customerContextMenu.y, viewportHeight - menuHeight - 8));
+    const openSubmenuLeft = baseLeft + menuWidth + 8 <= viewportWidth - submenuWidth - 8;
+    const submenuLeft = openSubmenuLeft ? baseLeft + menuWidth + 8 : Math.max(8, baseLeft - submenuWidth - 8);
+    const submenuTop = Math.max(8, Math.min(baseTop, viewportHeight - 320));
+    return {
+      menuLeft: baseLeft,
+      menuTop: baseTop,
+      submenuLeft,
+      submenuTop,
+    };
+  }, [customerContextMenu]);
   const contextMenuMessage =
     messageContextMenu
       ? displayedWorkspaceMessages.find(
@@ -3155,7 +3819,12 @@ function HomePageContent() {
   const canScheduleManual = !!workspace && !isSchedulingManual && !isUploadingImage && pendingImages.length === 0 && !!manualReply.trim();
   return (
     <div className="h-screen bg-gray-100 flex">
-      <div ref={customerListScrollRef} onScroll={handleCustomerListScroll} className="w-[24%] bg-gray-50 border-r border-gray-200 p-4 overflow-y-auto">
+      <div
+        ref={customerListScrollRef}
+        onScroll={handleCustomerListScroll}
+        style={{ overflowAnchor: "none" }}
+        className="w-[24%] bg-gray-50 border-r border-gray-200 p-4 overflow-y-auto"
+      >
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <button onClick={handleCollapseChat} className="text-lg font-bold text-left text-gray-900 hover:text-emerald-700 transition">顾客列表</button>
@@ -3197,6 +3866,7 @@ function HomePageContent() {
               return (
                 <div
                   key={customer.id}
+                  data-customer-id={customer.id}
                   onClick={() => handleSelectCustomer(customer.id)}
                   onContextMenu={(event) => {
                     event.preventDefault();
@@ -3206,6 +3876,10 @@ function HomePageContent() {
                       x: event.clientX,
                       y: event.clientY,
                     });
+                    cancelTagSubmenuClose();
+                    setIsTagSubmenuOpen(false);
+                    setTagCreateError("");
+                    setNewTagName("");
                   }}
                   className={`group h-[76px] px-3 rounded-xl cursor-pointer border transition-all ${
                     isActive
@@ -3243,10 +3917,23 @@ function HomePageContent() {
                         <div className={`min-w-0 flex-1 truncate text-[12px] ${customer.unreadCount > 0 ? "text-slate-700" : "text-gray-500"}`}>
                           {latestPreview}
                         </div>
-                        {customer.followup ? (
-                          <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600 border border-slate-200">
-                            {getFollowupTierLabel(customer.followup.tier)}
-                          </span>
+                        {customer.tags.length > 0 ? (
+                          <div className="shrink-0 flex max-w-[140px] items-center gap-1 overflow-hidden whitespace-nowrap">
+                            {customer.tags.slice(0, 2).map((tag) => (
+                              <span
+                                key={tag.id}
+                                className="inline-block max-w-[56px] truncate rounded-full px-1.5 py-0.5 text-[10px] font-medium leading-none text-white"
+                                style={{ backgroundColor: tag.color || "#94A3B8" }}
+                              >
+                                {tag.name}
+                              </span>
+                            ))}
+                            {customer.tags.length > 2 ? (
+                              <span className="inline-block shrink-0 rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] font-medium leading-none text-slate-700">
+                                +{customer.tags.length - 2}
+                              </span>
+                            ) : null}
+                          </div>
                         ) : null}
                         {customer.isVip ? (
                           <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 border border-amber-200">
@@ -3525,7 +4212,7 @@ function HomePageContent() {
                 </div>
               </div>
             ) : null}
-            <div className="flex gap-2 items-end">
+            <div ref={composerInputRowRef} className="flex gap-2 items-end">
               <div className="relative" ref={composerMenuRef}>
                 <button
                   onClick={() => setIsComposerMenuOpen((prev) => !prev)}
@@ -3769,13 +4456,10 @@ function HomePageContent() {
         shouldDimDraft={shouldDimDraft}
         displayedSuggestion1Ja={displayedSuggestion1Ja}
         displayedSuggestion1Zh={displayedSuggestion1Zh}
-        displayedSuggestion2Ja={displayedSuggestion2Ja}
-        displayedSuggestion2Zh={displayedSuggestion2Zh}
         rewriteInput={rewriteInput}
         onRewriteInputChange={setRewriteInput}
         onRewrite={handleRewrite}
-        onSendStable={() => addAiReplyToChat(displayedSuggestion1Ja, displayedSuggestion1Zh, "stable")}
-        onSendAdvancing={() => addAiReplyToChat(displayedSuggestion2Ja, displayedSuggestion2Zh, "advancing")}
+        onSendReply={() => addAiReplyToChat(displayedSuggestion1Ja, displayedSuggestion1Zh, "stable")}
         isGenerating={isGeneratingCurrentCustomer}
         isSendingAi={isSendingAi}
         apiError={apiError}
@@ -3867,24 +4551,211 @@ function HomePageContent() {
           </button>
         </div>
       ) : null}
-      {customerContextMenu && contextMenuCustomer ? (
+      {customerContextMenu && contextMenuCustomer && customerTagMenuPosition ? (
+        <>
+          <div
+            className="fixed z-50 min-w-40 rounded-xl border border-gray-200 bg-white shadow-xl py-2"
+            style={{ top: customerTagMenuPosition.menuTop, left: customerTagMenuPosition.menuLeft }}
+            onClick={(event) => event.stopPropagation()}
+            onMouseEnter={cancelTagSubmenuClose}
+            onMouseLeave={scheduleTagSubmenuClose}
+          >
+            <button
+              onClick={() => handleTogglePin(contextMenuCustomer)}
+              className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50"
+            >
+              {contextMenuCustomer.pinnedAt ? "取消置顶" : "置顶到顶部"}
+            </button>
+            <button
+              onClick={() => handleRenameCustomer(contextMenuCustomer)}
+              className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50"
+            >
+              备注名字
+            </button>
+            <button
+              onMouseEnter={() => {
+                cancelTagSubmenuClose();
+                setIsTagSubmenuOpen(true);
+              }}
+              className="flex w-full items-center justify-between px-4 py-2 text-left text-sm hover:bg-gray-50"
+            >
+              <span>标签</span>
+              <span className="text-gray-400">&gt;</span>
+            </button>
+          </div>
+          {isTagSubmenuOpen ? (
+            <div
+              className="fixed z-[60] w-[220px] rounded-xl border border-gray-200 bg-white py-2 shadow-xl"
+              style={{ top: customerTagMenuPosition.submenuTop, left: customerTagMenuPosition.submenuLeft }}
+              onMouseEnter={() => {
+                cancelTagSubmenuClose();
+                setIsTagSubmenuOpen(true);
+              }}
+              onMouseLeave={scheduleTagSubmenuClose}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  if (!canCreateMoreTags) {
+                    showOpNotice("最多只能创建 10 个标签");
+                    return;
+                  }
+                  handleOpenTagCreateDialog();
+                }}
+                disabled={!canCreateMoreTags}
+                className="w-full border-b border-gray-100 px-4 py-2 text-left text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
+              >
+                + 添加标签
+              </button>
+              {isLoadingTags ? (
+                <div className="px-4 py-2 text-xs text-gray-400">加载标签中...</div>
+              ) : allTags.length === 0 ? (
+                <div className="px-4 py-2 text-xs text-gray-400">暂无标签</div>
+              ) : (
+                <div className="max-h-64 overflow-y-auto py-1">
+                  {allTags.map((tag) => {
+                    const hasTag = contextMenuCustomer.tags.some((item) => item.id === tag.id);
+                    const updatingKey = `${contextMenuCustomer.id}:${tag.id}`;
+                    const isUpdating = updatingCustomerTagKey === updatingKey;
+                    return (
+                      <div key={tag.id} className="flex items-center gap-1 px-2 py-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleToggleCustomerTag(contextMenuCustomer, tag);
+                          }}
+                          disabled={!!updatingCustomerTagKey || isDeletingTag}
+                          className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1 text-left text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <span
+                            className="h-2.5 w-2.5 shrink-0 rounded-full border border-black/10"
+                            style={{ backgroundColor: tag.color || "#94A3B8" }}
+                          />
+                          <span className="min-w-0 flex-1 truncate">{tag.name}</span>
+                          <span className="text-xs text-gray-500">{isUpdating ? "..." : hasTag ? "✓" : ""}</span>
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`删除标签 ${tag.name}`}
+                          title={`删除标签 ${tag.name}`}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            handleOpenTagDeleteDialog(tag);
+                          }}
+                          disabled={!!updatingCustomerTagKey || isDeletingTag}
+                          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-xs text-rose-500 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : null}
+        </>
+      ) : null}
+      {isTagCreateDialogOpen ? (
         <div
-          className="fixed z-50 min-w-40 rounded-xl border border-gray-200 bg-white shadow-xl py-2"
-          style={{ top: customerContextMenu.y, left: customerContextMenu.x }}
-          onClick={(event) => event.stopPropagation()}
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/20 px-4"
+          onClick={() => {
+            handleCloseTagCreateDialog();
+          }}
         >
-          <button
-            onClick={() => handleTogglePin(contextMenuCustomer)}
-            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50"
+          <div
+            className="w-full max-w-sm rounded-2xl border border-gray-200 bg-white p-4 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
           >
-            {contextMenuCustomer.pinnedAt ? "取消置顶" : "置顶到顶部"}
-          </button>
-          <button
-            onClick={() => handleRenameCustomer(contextMenuCustomer)}
-            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50"
+            <div className="text-sm font-semibold text-gray-900">添加标签</div>
+            <input
+              type="text"
+              value={newTagName}
+              onChange={(event) => setNewTagName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  handleCloseTagCreateDialog();
+                  return;
+                }
+                if (event.key === "Enter" && !isCreatingTag) {
+                  event.preventDefault();
+                  void handleCreateTagAndAttach();
+                }
+              }}
+              placeholder="请输入标签名称"
+              maxLength={20}
+              className="mt-3 w-full rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm outline-none focus:border-green-300 focus:ring-2 focus:ring-green-100"
+            />
+            {tagCreateError ? (
+              <div className="mt-2 text-xs text-rose-600">{tagCreateError}</div>
+            ) : null}
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  handleCloseTagCreateDialog();
+                }}
+                className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleCreateTagAndAttach();
+                }}
+                disabled={isCreatingTag}
+                className="rounded-xl bg-green-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isCreatingTag ? "保存中..." : "保存"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {isTagDeleteDialogOpen && tagDeleteTarget ? (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/20 px-4"
+          onClick={() => {
+            handleCloseTagDeleteDialog();
+          }}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border border-gray-200 bg-white p-4 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
           >
-            备注名字
-          </button>
+            <div className="text-sm font-semibold text-gray-900">删除标签</div>
+            <div className="mt-3 text-sm text-gray-700">
+              删除标签“{tagDeleteTarget.name}”？<br />
+              删除后会从所有顾客身上移除该标签。
+            </div>
+            {tagDeleteError ? (
+              <div className="mt-2 text-xs text-rose-600">{tagDeleteError}</div>
+            ) : null}
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  handleCloseTagDeleteDialog();
+                }}
+                className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleDeleteTagGlobally();
+                }}
+                disabled={isDeletingTag}
+                className="rounded-xl bg-rose-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isDeletingTag ? "删除中..." : "删除"}
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
       {opNotice ? (

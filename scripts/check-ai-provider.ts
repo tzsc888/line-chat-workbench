@@ -97,22 +97,20 @@ async function main() {
       schema: {
         type: "object",
         additionalProperties: false,
-        required: ["reply_a_ja", "reply_b_ja"],
+        required: ["reply_ja"],
         properties: {
-          reply_a_ja: { type: "string" },
-          reply_b_ja: { type: "string" },
+          reply_ja: { type: "string" },
         },
       },
       validateParsed: (raw) => {
         const normalized = normalizeGenerationReply(raw);
         const errors: string[] = [];
-        if (!normalized.reply_a_ja.trim()) errors.push("reply_a_ja is empty");
-        if (!normalized.reply_b_ja.trim()) errors.push("reply_b_ja is empty");
+        if (!normalized.reply_ja.trim()) errors.push("reply_ja is empty");
         return errors;
       },
       system:
         "You are a strict JSON responder. Return exactly one JSON object and nothing else.",
-      user: "Return exactly this JSON: {\"reply_a_ja\":\"はい\",\"reply_b_ja\":\"はい\"}",
+      user: "Return exactly this JSON: {\"reply_ja\":\"はい\"}",
       temperature: 0,
       maxTokens: 100,
     });
@@ -122,8 +120,7 @@ async function main() {
     console.log({
       line: result.line,
       mode: result.mode,
-      replyA: normalized.reply_a_ja,
-      replyB: normalized.reply_b_ja,
+      reply: normalized.reply_ja,
     });
     console.log("OK: provider returned usable OpenAI-compatible chat completion");
   } catch (error) {

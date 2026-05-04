@@ -10,6 +10,9 @@ const globalForAbly = globalThis as unknown as {
 export type RealtimeRefreshPayload = Record<string, unknown> & {
   customerId?: string | null;
   reason?: string | null;
+  tagId?: string | null;
+  messageId?: string | null;
+  inboundMessageId?: string | null;
   scopes?: string[];
 };
 
@@ -54,6 +57,24 @@ function sanitizePayload(data?: RealtimeRefreshPayload): Prisma.InputJsonObject 
     payload.reason = "refresh";
   } else {
     payload.reason = payload.reason.trim();
+  }
+
+  if (typeof payload.tagId !== "string" || !payload.tagId.trim()) {
+    delete payload.tagId;
+  } else {
+    payload.tagId = payload.tagId.trim();
+  }
+
+  if (typeof payload.messageId !== "string" || !payload.messageId.trim()) {
+    delete payload.messageId;
+  } else {
+    payload.messageId = payload.messageId.trim();
+  }
+
+  if (typeof payload.inboundMessageId !== "string" || !payload.inboundMessageId.trim()) {
+    delete payload.inboundMessageId;
+  } else {
+    payload.inboundMessageId = payload.inboundMessageId.trim();
   }
 
   const scopes = sanitizeScopes(payload.scopes);

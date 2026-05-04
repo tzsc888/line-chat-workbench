@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { constantTimeEqual } from "@/lib/security/secret";
 import { runDataRetentionCleanup } from "@/lib/maintenance/retention";
-import { isLegacyEndpointEnabled, legacyEndpointDisabledResponse } from "@/lib/legacy-endpoint-toggle";
+import { failExpiredOutboundTasks } from "@/lib/bridge-outbound";
 
 function isAuthorized(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
@@ -15,17 +15,39 @@ function isAuthorized(request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   try {
-    // Legacy cron entry: disabled by default to avoid accidental scheduler traffic and retention scans.
-    // To re-enable, set ENABLE_LEGACY_CRON_MAINTENANCE=true.
-    if (!isLegacyEndpointEnabled("ENABLE_LEGACY_CRON_MAINTENANCE")) {
-      return legacyEndpointDisabledResponse("cron_maintenance");
-    }
-
     if (!isAuthorized(request)) {
       return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
     }
-    const result = await runDataRetentionCleanup();
-    return NextResponse.json({ ok: true, ...result });
+    const [retentionResult, outboundTimeoutResult] = await Promise.allSettled([
+      runDataRetentionCleanup(),
+      failExpiredOutboundTasks({ limit: 50 }),
+    ]);
+
+    const retention =
+      retentionResult.status === "fulfilled"
+        ? { status: "fulfilled" as const, result: retentionResult.value }
+        : { status: "rejected" as const, error: retentionResult.reason instanceof Error ? retentionResult.reason.message : String(retentionResult.reason) };
+    const outboundTimeouts =
+      outboundTimeoutResult.status === "fulfilled"
+        ? { status: "fulfilled" as const, result: outboundTimeoutResult.value }
+        : { status: "rejected" as const, error: outboundTimeoutResult.reason instanceof Error ? outboundTimeoutResult.reason.message : String(outboundTimeoutResult.reason) };
+
+    if (retention.status === "rejected") {
+      console.error("cron maintenance retention error:", retention.error);
+    }
+    if (outboundTimeouts.status === "rejected") {
+      console.error("cron maintenance outbound timeout error:", outboundTimeouts.error);
+    }
+
+    const hasSuccess = retention.status === "fulfilled" || outboundTimeouts.status === "fulfilled";
+    return NextResponse.json(
+      {
+        ok: hasSuccess,
+        retention,
+        outboundTimeouts,
+      },
+      { status: hasSuccess ? 200 : 500 }
+    );
   } catch (error) {
     return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }

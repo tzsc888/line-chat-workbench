@@ -2,7 +2,7 @@
 import { publishRealtimeRefresh } from "@/lib/ably";
 import { buildMainBrainGenerationContext } from "@/lib/ai/context-builder";
 import { runReplyGeneration } from "@/lib/ai/reply-generation-service";
-import { translateCustomerJapaneseMessage, translateGeneratedReplies } from "@/lib/ai/translation-service";
+import { translateCustomerJapaneseMessage, translateGeneratedReply } from "@/lib/ai/translation-service";
 import { saveDraftBundle } from "@/lib/ai/draft-metadata-service";
 import { shouldReuseExistingDraft } from "@/lib/ai/workflow-policy";
 import {
@@ -18,7 +18,7 @@ const runtimeDeps: GenerateRepliesWorkflowDeps = {
     (await prisma.customer.findUnique({
       where: { id: customerId },
       include: {
-        messages: { orderBy: [{ sentAt: "desc" }, { id: "desc" }], take: 120 },
+        messages: { orderBy: [{ sentAt: "asc" }, { id: "asc" }] },
         replyDraftSets: { orderBy: { createdAt: "desc" }, take: 1 },
         tags: { include: { tag: true } },
       },
@@ -44,7 +44,7 @@ const runtimeDeps: GenerateRepliesWorkflowDeps = {
     buildMainBrainGenerationContext(input as Parameters<typeof buildMainBrainGenerationContext>[0]),
   runReplyGeneration: (context) => runReplyGeneration(context),
   translateCustomerJapaneseMessage,
-  translateGeneratedReplies,
+  translateGeneratedReply,
   saveDraftBundle: (input) => saveDraftBundle(input as Parameters<typeof saveDraftBundle>[0]),
   shouldReuseExistingDraft,
 };

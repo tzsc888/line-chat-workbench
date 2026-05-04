@@ -27,12 +27,10 @@ export async function saveDraftBundle(params: {
   translationPromptVersion?: string | null;
   generationPromptVersion?: string | null;
   generation: {
-    reply_a_ja: string;
-    reply_b_ja: string;
+    reply_ja: string;
   };
   replyTranslation: {
-    reply_a_zh: string;
-    reply_b_zh: string;
+    reply_zh: string;
   };
 }) {
   const {
@@ -56,10 +54,10 @@ export async function saveDraftBundle(params: {
       customerId,
       targetCustomerMessageId,
       extraRequirement: extraRequirement || null,
-      stableJapanese: generation.reply_a_ja,
-      stableChinese: replyTranslation.reply_a_zh,
-      advancingJapanese: generation.reply_b_ja,
-      advancingChinese: replyTranslation.reply_b_zh,
+      stableJapanese: generation.reply_ja,
+      stableChinese: replyTranslation.reply_zh || "",
+      advancingJapanese: generation.reply_ja,
+      advancingChinese: replyTranslation.reply_zh || "",
       modelName,
       translationPromptVersion: translationPromptVersion || null,
       generationPromptVersion: generationPromptVersion || null,

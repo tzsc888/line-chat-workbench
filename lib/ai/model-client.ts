@@ -178,6 +178,9 @@ const MIN_ATTEMPT_TIMEOUT_MS = 3_000;
 const BUDGET_HEADROOM_MS = 500;
 const DEFAULT_MAX_STRUCTURED_ATTEMPTS = 4;
 const DEFAULT_PROVIDER_MAX_RETRIES = 1;
+const DEFAULT_UPSTREAM_STREAM_CONCURRENCY = 1;
+let upstreamStreamInFlight = 0;
+const upstreamStreamQueue: Array<() => void> = [];
 
 const STAGE_LIMITS = {
   generation: {
@@ -222,6 +225,47 @@ function cleanJsonText(content: string) {
 
 function safeSnippet(value: string, max = 240) {
   return String(value || "").replace(/\s+/g, " ").slice(0, max);
+}
+
+function isDebugAiRawResponseEnabled() {
+  return process.env.DEBUG_AI_RAW_RESPONSE === "1";
+}
+
+function isDebugAiRawResponseFullEnabled() {
+  return process.env.DEBUG_AI_RAW_RESPONSE_FULL === "1";
+}
+
+function debugAiRawResponse(input: {
+  stage: string;
+  contentType?: string;
+  bodyText?: string;
+  eventCount?: number;
+  sseContent?: string;
+  assistantContent?: string;
+}) {
+  if (!isDebugAiRawResponseEnabled()) return;
+  const full = isDebugAiRawResponseFullEnabled();
+  const clip = (value: string) => (full ? value : value.slice(0, 2000));
+  const payload: Record<string, unknown> = {
+    stage: input.stage,
+    contentType: String(input.contentType || ""),
+  };
+  if (typeof input.bodyText === "string") {
+    payload.bodyTextLength = input.bodyText.length;
+    payload.bodyText = clip(input.bodyText);
+  }
+  if (typeof input.eventCount === "number") {
+    payload.eventCount = input.eventCount;
+  }
+  if (typeof input.sseContent === "string") {
+    payload.sseContentLength = input.sseContent.length;
+    payload.sseContent = clip(input.sseContent);
+  }
+  if (typeof input.assistantContent === "string") {
+    payload.assistantContentLength = input.assistantContent.length;
+    payload.assistantContent = clip(input.assistantContent);
+  }
+  console.info("[debug-ai-raw-response]", JSON.stringify(payload));
 }
 
 function extractFirstBalancedJsonObject(text: string) {
@@ -508,6 +552,66 @@ function shouldSendResponseFormat() {
   return process.env.AI_USE_RESPONSE_FORMAT === "1";
 }
 
+function isUpstreamStreamEnabled() {
+  return process.env.AI_UPSTREAM_STREAM === "1";
+}
+
+function resolveUpstreamStreamConcurrency() {
+  const raw = Number(process.env.AI_UPSTREAM_CONCURRENCY || "");
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_UPSTREAM_STREAM_CONCURRENCY;
+  return Math.max(1, Math.floor(raw));
+}
+
+function buildAbortError() {
+  const error = new Error("upstream_request_aborted_while_waiting_queue");
+  error.name = "AbortError";
+  return error;
+}
+
+async function withUpstreamStreamConcurrencyLimit<T>(action: () => Promise<T>, signal?: AbortSignal) {
+  if (!isUpstreamStreamEnabled()) return action();
+  const limit = resolveUpstreamStreamConcurrency();
+  if (limit <= 1 && signal?.aborted) throw buildAbortError();
+
+  const acquire = async () => {
+    if (upstreamStreamInFlight < limit) {
+      upstreamStreamInFlight += 1;
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(buildAbortError());
+        return;
+      }
+      const waiter = () => {
+        signal?.removeEventListener("abort", onAbort);
+        upstreamStreamInFlight += 1;
+        resolve();
+      };
+      const onAbort = () => {
+        const idx = upstreamStreamQueue.indexOf(waiter);
+        if (idx >= 0) upstreamStreamQueue.splice(idx, 1);
+        reject(buildAbortError());
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      upstreamStreamQueue.push(waiter);
+    });
+  };
+
+  const release = () => {
+    upstreamStreamInFlight = Math.max(0, upstreamStreamInFlight - 1);
+    const next = upstreamStreamQueue.shift();
+    if (next) next();
+  };
+
+  await acquire();
+  try {
+    return await action();
+  } finally {
+    release();
+  }
+}
+
 function resolveMaxTokens(options: ModelRequestOptions) {
   if (typeof options.maxTokens === "number" && options.maxTokens > 0) return Math.floor(options.maxTokens);
   return parsePositiveIntEnv("AI_MAX_TOKENS", 500, { min: 32, max: 8192 });
@@ -532,7 +636,7 @@ async function postChatCompletions(
     ? `${options.user}\n\n${extraUserInstruction}`
     : options.user;
 
-  const streamSent = false;
+  const streamSent = isUpstreamStreamEnabled();
   const responseFormatSent = shouldSendResponseFormat();
   const body: Record<string, unknown> = {
     model: options.model,
@@ -576,15 +680,19 @@ async function postChatCompletions(
     );
   }
 
-  return fetch(finalUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${options.apiKey}`,
-    },
-    body: JSON.stringify(body),
+  return withUpstreamStreamConcurrencyLimit(
+    () =>
+      fetch(finalUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${options.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal,
+      }),
     signal,
-  });
+  );
 }
 
 function logProviderAdapter(input: {
@@ -914,12 +1022,17 @@ async function parseUpstreamPayload(
   const finalUrlHostAndPath = toHostAndPath(finalUrl);
   const contentType = String(response.headers.get("content-type") || "");
   const text = await response.text();
+  debugAiRawResponse({
+    stage: "after-response-text",
+    contentType,
+    bodyText: text,
+  });
   const providerElapsedMs =
     typeof input?.requestStartedAt === "number"
       ? Math.max(0, Date.now() - input.requestStartedAt)
       : null;
   const responseFormatSent = shouldSendResponseFormat();
-  const streamSent = false;
+  const streamSent = isUpstreamStreamEnabled();
 
   if (!response.ok) {
     const parsedError = parseJsonSafe(text);
@@ -984,6 +1097,12 @@ async function parseUpstreamPayload(
 
   if (looksLikeSse(contentType, text)) {
     const sse = parseSseTextToContent(text);
+    debugAiRawResponse({
+      stage: "after-sse-parse",
+      contentType,
+      eventCount: sse.eventCount,
+      sseContent: sse.content,
+    });
     if (!sse.content) {
       throw new AiStructuredOutputError({
         code: "MODEL_RESPONSE_SHAPE_ERROR",
@@ -1127,6 +1246,11 @@ function parseWithMode<T>(
         try {
           return JSON.parse(extracted) as T;
         } catch (fallbackError) {
+          debugAiRawResponse({
+            stage: "before-assistant-content-json-extract-failed",
+            contentType: meta?.contentType,
+            assistantContent: content,
+          });
           throw new AiStructuredOutputError({
             code: "MODEL_JSON_PARSE_ERROR",
             stage,
@@ -1191,6 +1315,7 @@ function getMessageContent(data: any) {
   if (topContent) return topContent;
 
   const directReplyA =
+    typeof data?.reply_ja === "string" ||
     typeof data?.reply_a_ja === "string" ||
     typeof data?.replyAJa === "string" ||
     typeof data?.reply_a === "string";
@@ -1198,7 +1323,7 @@ function getMessageContent(data: any) {
     typeof data?.reply_b_ja === "string" ||
     typeof data?.replyBJa === "string" ||
     typeof data?.reply_b === "string";
-  if (directReplyA && directReplyB) {
+  if (directReplyA && (directReplyB || typeof data?.reply_ja === "string")) {
     return JSON.stringify(data);
   }
 
@@ -1329,7 +1454,7 @@ export async function requestStructuredJsonWithContract<T>(
           attempt: providerAttempt,
           maxAttempts: providerMaxAttempts,
           responseFormatSent: shouldSendResponseFormat(),
-          streamSent: false,
+          streamSent: isUpstreamStreamEnabled(),
           timeoutMs: attemptTimeoutMs,
         });
         const requestStartedAt = Date.now();
@@ -1389,7 +1514,7 @@ export async function requestStructuredJsonWithContract<T>(
               finalUrlHostAndPath: toHostAndPath(response.url || ""),
               contentType: String(response.headers.get("content-type") || ""),
               responseFormatSent: shouldSendResponseFormat(),
-              streamSent: false,
+              streamSent: isUpstreamStreamEnabled(),
               topLevelKeys:
                 data && typeof data === "object"
                   ? Object.keys(data as Record<string, unknown>).slice(0, 30)
@@ -1405,7 +1530,7 @@ export async function requestStructuredJsonWithContract<T>(
             finalUrl: response.url,
             contentType: String(response.headers.get("content-type") || ""),
             responseFormatSent: shouldSendResponseFormat(),
-            streamSent: false,
+            streamSent: isUpstreamStreamEnabled(),
             sseEventCount: sseMeta.eventCount,
             assembledContentLength: sseMeta.assembledContentLength,
             providerElapsedMs: Math.max(0, Date.now() - requestStartedAt),
@@ -1433,7 +1558,7 @@ export async function requestStructuredJsonWithContract<T>(
               finalUrlHostAndPath: toHostAndPath(response.url || ""),
               contentType: String(response.headers.get("content-type") || ""),
               responseFormatSent: shouldSendResponseFormat(),
-              streamSent: false,
+              streamSent: isUpstreamStreamEnabled(),
               modelContentSnippet: content,
             });
           }
@@ -1467,7 +1592,7 @@ export async function requestStructuredJsonWithContract<T>(
                 finalUrl,
                 finalUrlHostAndPath: toHostAndPath(finalUrl),
                 responseFormatSent: shouldSendResponseFormat(),
-                streamSent: false,
+                streamSent: isUpstreamStreamEnabled(),
                 snippet: classified.fetchErrorMessage || "fetch failed",
                 upstreamBodySnippet: classified.fetchErrorMessage || "fetch failed",
                 fetchErrorName: classified.fetchErrorName,
@@ -1495,7 +1620,7 @@ export async function requestStructuredJsonWithContract<T>(
                 finalUrl,
                 finalUrlHostAndPath: toHostAndPath(finalUrl),
                 responseFormatSent: shouldSendResponseFormat(),
-                streamSent: false,
+                streamSent: isUpstreamStreamEnabled(),
               });
             }
           }
@@ -1602,7 +1727,7 @@ export async function requestJsonObjectWithRetry<T>(
           attempt: attempts,
           maxAttempts,
           responseFormatSent: shouldSendResponseFormat(),
-          streamSent: false,
+          streamSent: isUpstreamStreamEnabled(),
           timeoutMs,
         });
         const requestStartedAt = Date.now();
@@ -1641,7 +1766,7 @@ export async function requestJsonObjectWithRetry<T>(
             finalUrlHostAndPath: toHostAndPath(response.url || ""),
             contentType: String(response.headers.get("content-type") || ""),
             responseFormatSent: shouldSendResponseFormat(),
-            streamSent: false,
+            streamSent: isUpstreamStreamEnabled(),
           });
         }
         const sseMeta = readSseMeta(data);
@@ -1649,7 +1774,7 @@ export async function requestJsonObjectWithRetry<T>(
           finalUrl: response.url,
           contentType: String(response.headers.get("content-type") || ""),
           responseFormatSent: shouldSendResponseFormat(),
-          streamSent: false,
+          streamSent: isUpstreamStreamEnabled(),
           sseEventCount: sseMeta.eventCount,
           assembledContentLength: sseMeta.assembledContentLength,
           providerElapsedMs: Math.max(0, Date.now() - requestStartedAt),

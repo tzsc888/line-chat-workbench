@@ -47,8 +47,7 @@ export type GenerateRepliesWorkflowDeps = {
     line: string;
     model: string;
     parsed: {
-      reply_a_ja: string;
-      reply_b_ja: string;
+      reply_ja: string;
     };
     promptVersion: string;
   }>;
@@ -64,15 +63,13 @@ export type GenerateRepliesWorkflowDeps = {
     };
     promptVersion: string;
   }>;
-  translateGeneratedReplies: (input: {
-    replyAJa: string;
-    replyBJa: string;
+  translateGeneratedReply: (input: {
+    replyJa: string;
   }) => Promise<{
     line: string;
     model: string;
     parsed: {
-      reply_a_zh: string;
-      reply_b_zh: string;
+      reply_zh: string;
     };
     promptVersion: string;
   }>;
@@ -256,7 +253,7 @@ export async function executeGenerateRepliesWorkflow(
     throw new Error("customer_not_found");
   }
 
-  const messages = [...customer.messages].reverse() as ContextMessage[];
+  const messages = [...customer.messages] as ContextMessage[];
   const latestCustomerMessage = resolveLatestCustomerMessageForTurn(messages, requestedTargetMessageId);
 
   if (!latestCustomerMessage) {
@@ -337,7 +334,7 @@ export async function executeGenerateRepliesWorkflow(
     latestCustomerTextMessage.chineseText = translation.parsed.translation;
   }
 
-  const generationContext = deps.buildMainBrainGenerationContext({
+  const diagnosticsContext = deps.buildMainBrainGenerationContext({
     customer: {
       id: customer.id,
       display_name: String(customer.remarkName || customer.originalName || "").trim(),
@@ -361,6 +358,16 @@ export async function executeGenerateRepliesWorkflow(
     timelineWindowSize: 12,
   });
 
+  // Conversation-first main model path:
+  // Only send concrete chat primitives required by FINAL_PROMPT placeholders.
+  // Keep legacy context-builder output for diagnostics/compat but never as model input.
+  const generationContext = {
+    latestMessage: latestCustomerMessage,
+    recentMessages: messages,
+    rewriteInput,
+    debugMeta: diagnosticsContext,
+  };
+
   const generationStartedAt = Date.now();
   console.info(`[generate-replies] generation started customer=${customerId}`);
   const generation = await deps
@@ -381,7 +388,7 @@ export async function executeGenerateRepliesWorkflow(
       }
       throw stageError;
     });
-  if (!generation.parsed.reply_a_ja.trim() || !generation.parsed.reply_b_ja.trim()) {
+  if (!generation.parsed.reply_ja.trim()) {
     throw new Error("generation_missing_japanese_reply");
   }
 
@@ -392,31 +399,25 @@ export async function executeGenerateRepliesWorkflow(
   let translationErrorMessage = "";
   let replyTranslation: {
     parsed: {
-      reply_a_zh: string;
-      reply_b_zh: string;
+      reply_zh: string;
     };
   } = {
     parsed: {
-      reply_a_zh: "",
-      reply_b_zh: "",
+      reply_zh: "",
     },
   };
   try {
-    const translated = await deps.translateGeneratedReplies({
-      replyAJa: generation.parsed.reply_a_ja,
-      replyBJa: generation.parsed.reply_b_ja,
+    const translated = await deps.translateGeneratedReply({
+      replyJa: generation.parsed.reply_ja,
     });
     replyTranslation = translated;
-    const hasReplyAZh = !!translated.parsed.reply_a_zh.trim();
-    const hasReplyBZh = !!translated.parsed.reply_b_zh.trim();
-    if (!hasReplyAZh || !hasReplyBZh) {
+    if (!translated.parsed.reply_zh.trim()) {
       translationStatus = "failed";
       translationErrorCode = "translation_missing_reply_meaning";
       translationErrorMessage = "translation returned empty reply meaning";
       replyTranslation = {
         parsed: {
-          reply_a_zh: "",
-          reply_b_zh: "",
+          reply_zh: "",
         },
       };
       console.warn(
@@ -434,8 +435,7 @@ export async function executeGenerateRepliesWorkflow(
     translationErrorMessage = stageError.message;
     replyTranslation = {
       parsed: {
-        reply_a_zh: "",
-        reply_b_zh: "",
+        reply_zh: "",
       },
     };
     console.error(
@@ -451,8 +451,7 @@ export async function executeGenerateRepliesWorkflow(
     translationPromptVersion: translation.promptVersion,
     generationPromptVersion: generation.promptVersion,
     generation: {
-      reply_a_ja: generation.parsed.reply_a_ja,
-      reply_b_ja: generation.parsed.reply_b_ja,
+      reply_ja: generation.parsed.reply_ja,
     },
     replyTranslation: replyTranslation.parsed,
   });
@@ -473,10 +472,10 @@ export async function executeGenerateRepliesWorkflow(
     ok: true,
     line: generation.line,
     model: generation.model,
-    suggestion1Ja: generation.parsed.reply_a_ja,
-    suggestion1Zh: replyTranslation.parsed.reply_a_zh,
-    suggestion2Ja: generation.parsed.reply_b_ja,
-    suggestion2Zh: replyTranslation.parsed.reply_b_zh,
+    suggestion1Ja: generation.parsed.reply_ja,
+    suggestion1Zh: replyTranslation.parsed.reply_zh,
+    suggestion2Ja: "",
+    suggestion2Zh: "",
     translationStatus,
     translationErrorCode,
     translationErrorMessage,

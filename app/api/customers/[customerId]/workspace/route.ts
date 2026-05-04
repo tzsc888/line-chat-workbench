@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { publishRealtimeRefresh } from "@/lib/ably";
 import { prisma } from "@/lib/prisma";
-import { failExpiredOutboundTasks } from "@/lib/bridge-outbound";
 import { buildMessagePipelineStatuses } from "@/lib/ai/pipeline-status";
 import { getActiveAiStrategyVersion } from "@/lib/ai/strategy";
 import { resolveFollowupView } from "@/lib/followup-rules";
@@ -12,8 +11,6 @@ type Props = {
 
 export async function GET(_: Request, { params }: Props) {
   try {
-    await failExpiredOutboundTasks();
-
     const { customerId } = await params;
 
     const customer = await prisma.customer.findUnique({

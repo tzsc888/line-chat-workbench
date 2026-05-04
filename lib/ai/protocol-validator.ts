@@ -9,8 +9,7 @@ function asBoolean(value: unknown, fallback = false) {
 }
 
 export type MainBrainGenerationResult = {
-  reply_a_ja: string;
-  reply_b_ja: string;
+  reply_ja: string;
 };
 
 function pickFirstNonEmptyString(root: Record<string, unknown>, keys: string[]) {
@@ -23,21 +22,9 @@ function pickFirstNonEmptyString(root: Record<string, unknown>, keys: string[]) 
 
 export function normalizeGenerationReply(raw: unknown): MainBrainGenerationResult {
   const value = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const replyAJa = pickFirstNonEmptyString(value, [
-    "reply_a_ja",
-    "replyAJa",
-    "reply_a_japanese",
-    "reply_a",
-  ]);
-  const replyBJa = pickFirstNonEmptyString(value, [
-    "reply_b_ja",
-    "replyBJa",
-    "reply_b_japanese",
-    "reply_b",
-  ]);
+  const replyJa = pickFirstNonEmptyString(value, ["reply_ja", "replyJa", "reply_japanese", "reply"]);
   return {
-    reply_a_ja: replyAJa,
-    reply_b_ja: replyBJa,
+    reply_ja: replyJa,
   };
 }
 
@@ -50,12 +37,12 @@ export function validateGenerationResult(raw: unknown): GenerationResult {
   const parsed = validateMainBrainGenerationResult(raw);
   return {
     reply_a: {
-      japanese: parsed.reply_a_ja,
+      japanese: parsed.reply_ja,
       chinese_meaning: "",
       positioning: "SAFER",
     },
     reply_b: {
-      japanese: parsed.reply_b_ja,
+      japanese: "",
       chinese_meaning: "",
       positioning: "MORE_FORWARD_HALF_STEP",
     },

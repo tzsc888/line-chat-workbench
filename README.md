@@ -37,7 +37,7 @@ Shared policy modules:
 
 - `/api/cron/automation-jobs`: inbound automation + outbox processing
 - `/api/cron/scheduled-messages`: scheduled message sending
-- `/api/cron/maintenance`: retention cleanup
+- `/api/cron/maintenance`: retention cleanup + outbound timeout maintenance
 - `/api/bridge/scheduled-messages/dispatch`: bridge-first scheduled dispatch (recommended primary path)
 
 Automation translation/reply jobs run through `/api/cron/automation-jobs` and require:
@@ -51,6 +51,12 @@ GitHub Actions fallback runner (`.github/workflows/dispatch-automation-jobs.yml`
 - `CRON_SECRET=<same value as Vercel>`
 
 Local note: GitHub Actions does not run in local dev. To test queued inbound auto translation locally, call `/api/cron/automation-jobs` manually with `CRON_SECRET`.
+
+Maintenance cron note:
+
+- `/api/cron/maintenance` requires `CRON_SECRET`.
+- Deployments should schedule this endpoint every 5 minutes (for Vercel, use `vercel.json` cron config).
+- This maintenance endpoint no longer depends on `ENABLE_LEGACY_CRON_MAINTENANCE`.
 
 ## Scheduled Dispatch (Bridge-First)
 

@@ -337,10 +337,16 @@ export async function POST(req: NextRequest) {
           }),
       });
 
-      try {
-        await publishRealtimeRefresh({ customerId, reason: "inbound-message" });
-      } catch (error) {
-        console.error("Ably publish inbound-message error:", error);
+      if (ingestResult.created) {
+        try {
+          await publishRealtimeRefresh({
+            customerId,
+            reason: "inbound-message",
+            messageId,
+          });
+        } catch (error) {
+          console.error("Ably publish inbound-message error:", error);
+        }
       }
 
       if (triggerDecision.shouldQueueTranslation) {

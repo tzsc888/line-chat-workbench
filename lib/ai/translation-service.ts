@@ -204,6 +204,27 @@ export async function translateGeneratedReplies(input: {
   };
 }
 
+export async function translateGeneratedReply(input: {
+  replyJa: string;
+}) {
+  const config = getDeepLXConfig();
+  const model = config.replyModel;
+  const translated = await requestDeepLXTranslation({
+    text: String(input.replyJa || ""),
+    model,
+    sourceLang: "JA",
+    targetLang: "ZH-HANS",
+  });
+  return {
+    line: "deeplx-translate-reply",
+    model,
+    promptVersion: `${TRANSLATION_PROMPT_VERSION}-reply`,
+    parsed: {
+      reply_zh: normalizeChineseReviewTone(translated.text),
+    },
+  };
+}
+
 export const __testOnly = {
   normalizeChineseReviewTone,
   normalizeBubbleSpacing,

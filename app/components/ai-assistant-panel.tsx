@@ -22,13 +22,10 @@ type AiAssistantPanelProps = {
   shouldDimDraft: boolean;
   displayedSuggestion1Ja: string;
   displayedSuggestion1Zh: string;
-  displayedSuggestion2Ja: string;
-  displayedSuggestion2Zh: string;
   rewriteInput: string;
   onRewriteInputChange: (value: string) => void;
   onRewrite: () => void;
-  onSendStable: () => void;
-  onSendAdvancing: () => void;
+  onSendReply: () => void;
   isGenerating: boolean;
   isSendingAi: string;
   apiError: string;
@@ -99,7 +96,7 @@ export function AiAssistantPanel(props: AiAssistantPanelProps) {
         {!props.hasDraft ? (
           <div className="space-y-3 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600">
             <div className="font-semibold text-gray-900">当前还没有建议</div>
-            <div>当前还没有建议，点击生成回复后会给出两种回复方案。</div>
+            <div>当前还没有建议，点击生成回复后会给出一条回复建议。</div>
           </div>
         ) : null}
         {props.aiNotice ? <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">{props.aiNotice}</div> : null}
@@ -126,27 +123,15 @@ export function AiAssistantPanel(props: AiAssistantPanelProps) {
         </div>
 
         <SuggestionCard
-          title="A 稳妥版"
+          title="AI 回复建议"
           shouldDimDraft={props.shouldDimDraft}
           japanese={props.displayedSuggestion1Ja}
           chinese={props.displayedSuggestion1Zh}
-          isSending={props.isSendingAi === "stable"}
+          isSending={props.isSendingAi !== ""}
           isUsed={props.isLatestDraftUsed}
           isStale={props.isLatestDraftStale}
           disabled={!props.displayedSuggestion1Ja || props.isSendingAi !== "" || props.shouldDimDraft}
-          onSend={props.onSendStable}
-        />
-
-        <SuggestionCard
-          title="B 推进版"
-          shouldDimDraft={props.shouldDimDraft}
-          japanese={props.displayedSuggestion2Ja}
-          chinese={props.displayedSuggestion2Zh}
-          isSending={props.isSendingAi === "advancing"}
-          isUsed={props.isLatestDraftUsed}
-          isStale={props.isLatestDraftStale}
-          disabled={!props.displayedSuggestion2Ja || props.isSendingAi !== "" || props.shouldDimDraft}
-          onSend={props.onSendAdvancing}
+          onSend={props.onSendReply}
         />
 
         <div className="rounded-xl border border-gray-200 bg-white p-4">

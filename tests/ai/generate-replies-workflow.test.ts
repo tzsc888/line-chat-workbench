@@ -4,8 +4,7 @@ import { executeGenerateRepliesWorkflow, type GenerateRepliesWorkflowDeps } from
 
 function buildGenerationParsed() {
   return {
-    reply_a_ja: "A-ja",
-    reply_b_ja: "B-ja",
+    reply_ja: "A-ja",
   };
 }
 
@@ -46,12 +45,11 @@ function createDeps(overrides?: Partial<GenerateRepliesWorkflowDeps>): GenerateR
       },
       promptVersion: "translation-v1",
     }),
-    translateGeneratedReplies: async () => ({
+    translateGeneratedReply: async () => ({
       line: "translation-ok",
       model: "trans-model",
       parsed: {
-        reply_a_zh: "A-zh",
-        reply_b_zh: "B-zh",
+        reply_zh: "A-zh",
       },
       promptVersion: "translation-v1-reply",
     }),
@@ -62,7 +60,7 @@ function createDeps(overrides?: Partial<GenerateRepliesWorkflowDeps>): GenerateR
   return { ...base, ...overrides };
 }
 
-test("manual generate should run generation and return two suggestions", async () => {
+test("manual generate should run generation and return one suggestion", async () => {
   let generationCalled = false;
   let replyTranslationCalled = false;
   let saveCalled = false;
@@ -76,14 +74,13 @@ test("manual generate should run generation and return two suggestions", async (
         promptVersion: "gen-v2",
       };
     },
-    translateGeneratedReplies: async () => {
+    translateGeneratedReply: async () => {
       replyTranslationCalled = true;
       return {
         line: "translation-ok",
         model: "trans-model",
         parsed: {
-          reply_a_zh: "A-zh",
-          reply_b_zh: "B-zh",
+          reply_zh: "A-zh",
         },
         promptVersion: "translation-v1-reply",
       };
@@ -107,8 +104,8 @@ test("manual generate should run generation and return two suggestions", async (
   assert.equal(result.ok, true);
   assert.equal(result.suggestion1Ja, "A-ja");
   assert.equal(result.suggestion1Zh, "A-zh");
-  assert.equal(result.suggestion2Ja, "B-ja");
-  assert.equal(result.suggestion2Zh, "B-zh");
+  assert.equal(result.suggestion2Ja, "");
+  assert.equal(result.suggestion2Zh, "");
   assert.equal(result.triggerSource, "MANUAL_GENERATE");
   assert.equal(generationCalled, true);
   assert.equal(replyTranslationCalled, true);
@@ -176,7 +173,7 @@ test("workflow should throw generation_missing_japanese_reply when generation ja
       model: "gen-model",
       parsed: {
         ...buildGenerationParsed(),
-        reply_a_ja: "   ",
+        reply_ja: "   ",
       },
       promptVersion: "gen-v2",
     }),
@@ -199,12 +196,11 @@ test("workflow should throw generation_missing_japanese_reply when generation ja
 
 test("workflow should keep success when reply translation is empty", async () => {
   const deps = createDeps({
-    translateGeneratedReplies: async () => ({
+    translateGeneratedReply: async () => ({
       line: "translation-empty",
       model: "trans-model",
       parsed: {
-        reply_a_zh: " ",
-        reply_b_zh: "B-zh",
+        reply_zh: " ",
       },
       promptVersion: "translation-v1-reply",
     }),
@@ -235,13 +231,13 @@ test("workflow should expand requested target to latest message in same customer
       stage: "NEW_LEAD",
       messages: [
         {
-          id: "m-2",
-          role: "CUSTOMER",
+          id: "m-op",
+          role: "OPERATOR",
           type: "TEXT",
-          source: "LINE",
-          japaneseText: "会話の写真とか送ったほーがいいですか？",
+          source: "MANUAL",
+          japaneseText: "前回返信",
           chineseText: null,
-          sentAt: new Date("2026-04-20T00:02:00.000Z"),
+          sentAt: new Date("2026-04-20T00:00:00.000Z"),
         },
         {
           id: "m-1",
@@ -253,13 +249,13 @@ test("workflow should expand requested target to latest message in same customer
           sentAt: new Date("2026-04-20T00:01:00.000Z"),
         },
         {
-          id: "m-op",
-          role: "OPERATOR",
+          id: "m-2",
+          role: "CUSTOMER",
           type: "TEXT",
-          source: "MANUAL",
-          japaneseText: "前回返信",
+          source: "LINE",
+          japaneseText: "会話の写真とか送ったほーがいいですか？",
           chineseText: null,
-          sentAt: new Date("2026-04-20T00:00:00.000Z"),
+          sentAt: new Date("2026-04-20T00:02:00.000Z"),
         },
       ],
       replyDraftSets: [],
@@ -282,4 +278,66 @@ test("workflow should expand requested target to latest message in same customer
   );
 
   assert.equal(savedTargetId, "m-2");
+});
+
+test("workflow should pass conversation-first primitives to runReplyGeneration", async () => {
+  let capturedContext: Record<string, unknown> | null = null;
+  const deps = createDeps({
+    findCustomerById: async () => ({
+      id: "c-1",
+      remarkName: "customer-1",
+      originalName: "customer-1",
+      stage: "NEW_LEAD",
+      messages: [
+        {
+          id: "m-op",
+          role: "OPERATOR",
+          type: "TEXT",
+          source: "MANUAL",
+          japaneseText: "前回返信",
+          chineseText: null,
+          sentAt: new Date("2026-04-20T00:00:00.000Z"),
+        },
+        {
+          id: "m-1",
+          role: "CUSTOMER",
+          type: "TEXT",
+          source: "LINE",
+          japaneseText: "補足指示チェックです",
+          chineseText: null,
+          sentAt: new Date("2026-04-20T00:01:00.000Z"),
+        },
+      ],
+      replyDraftSets: [],
+    }),
+    runReplyGeneration: async (context) => {
+      capturedContext = context;
+      return {
+        line: "generation-ok",
+        model: "gen-model",
+        parsed: buildGenerationParsed(),
+        promptVersion: "gen-v2",
+      };
+    },
+  });
+
+  await executeGenerateRepliesWorkflow(
+    {
+      customerId: "c-1",
+      rewriteInput: "请更温柔一点\nでも短く",
+      triggerSource: "MANUAL_GENERATE",
+      autoMode: false,
+      publishRefresh: false,
+    },
+    deps,
+  );
+
+  assert.ok(capturedContext);
+  assert.equal(typeof capturedContext?.rewriteInput, "string");
+  assert.equal(capturedContext?.rewriteInput, "请更温柔一点\nでも短く");
+  assert.equal(Array.isArray(capturedContext?.recentMessages), true);
+  assert.equal(typeof (capturedContext?.latestMessage as { id?: unknown })?.id, "string");
+  assert.equal(capturedContext?.hasOwnProperty("simple_context"), false);
+  assert.equal(capturedContext?.hasOwnProperty("stage"), false);
+  assert.equal(capturedContext?.hasOwnProperty("selected_cta_option"), false);
 });

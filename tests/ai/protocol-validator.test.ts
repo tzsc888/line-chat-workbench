@@ -19,29 +19,26 @@ test("validateAnalysisResult fills safe defaults", () => {
 });
 
 test("validateMainBrainGenerationResult accepts flat JA shape", () => {
-  const parsed = validateMainBrainGenerationResult({ reply_a_ja: "A", reply_b_ja: "B" });
-  assert.equal(parsed.reply_a_ja, "A");
-  assert.equal(parsed.reply_b_ja, "B");
+  const parsed = validateMainBrainGenerationResult({ reply_ja: "A" });
+  assert.equal(parsed.reply_ja, "A");
 });
 
 test("normalizeGenerationReply accepts alias keys and normalizes shape", () => {
   const parsed = normalizeGenerationReply({
-    replyAJa: "A-1",
-    reply_b: "B-1",
+    replyJa: "A-1",
     internal: "ignored",
   });
   assert.deepEqual(parsed, {
-    reply_a_ja: "A-1",
-    reply_b_ja: "B-1",
+    reply_ja: "A-1",
   });
 });
 
 test("validateGenerationResult keeps compatibility shape for legacy tests", () => {
-  const parsed = validateGenerationResult({ reply_a_ja: "A", reply_b_ja: "B" });
+  const parsed = validateGenerationResult({ reply_ja: "A" });
   assert.equal(parsed.reply_a.positioning, "SAFER");
   assert.equal(parsed.reply_b.positioning, "MORE_FORWARD_HALF_STEP");
   assert.equal(parsed.reply_a.japanese, "A");
-  assert.equal(parsed.reply_b.japanese, "B");
+  assert.equal(parsed.reply_b.japanese, "");
 });
 
 test("validateAiReviewResult normalizes invalid values", () => {

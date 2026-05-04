@@ -16,6 +16,14 @@ type QueueParams = {
 };
 
 const OUTBOUND_SUCCESS_TIMEOUT_MS = 120_000;
+const DEFAULT_FAIL_EXPIRED_OUTBOUND_TASKS_LIMIT = 50;
+
+export type FailExpiredOutboundTasksResult = {
+  scanned: number;
+  processed: number;
+  failed: number;
+  errors: Array<{ taskId: string; error: string }>;
+};
 
 export async function queueOutboundMessageTask(params: QueueParams) {
   const existing = await prisma.outboundTask.findUnique({
@@ -48,7 +56,12 @@ export async function queueOutboundMessageTask(params: QueueParams) {
   });
 }
 
-export async function failExpiredOutboundTasks(now = new Date()) {
+export async function failExpiredOutboundTasks(options?: { now?: Date; limit?: number }): Promise<FailExpiredOutboundTasksResult> {
+  const now = options?.now ?? new Date();
+  const requestedLimit = Number(options?.limit ?? DEFAULT_FAIL_EXPIRED_OUTBOUND_TASKS_LIMIT);
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(200, Math.floor(requestedLimit)))
+    : DEFAULT_FAIL_EXPIRED_OUTBOUND_TASKS_LIMIT;
   const timeoutBefore = new Date(now.getTime() - OUTBOUND_SUCCESS_TIMEOUT_MS);
 
   const expiredTasks = await prisma.outboundTask.findMany({
@@ -69,49 +82,72 @@ export async function failExpiredOutboundTasks(now = new Date()) {
       customerId: true,
       messageId: true,
     },
+    take: limit,
+    orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
   });
 
+  let processed = 0;
+  let failed = 0;
+  const errors: Array<{ taskId: string; error: string }> = [];
+
   for (const task of expiredTasks) {
-    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      await tx.outboundTask.update({
-        where: { id: task.id },
-        data: {
-          status: OutboundTaskStatus.FAILED,
-          claimedAt: null,
-          failedAt: now,
-          completedAt: null,
-          nextRetryAt: null,
-          lastError: "发送超时，未收到抓取平台成功回执",
-        },
+    try {
+      await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        await tx.outboundTask.update({
+          where: { id: task.id },
+          data: {
+            status: OutboundTaskStatus.FAILED,
+            claimedAt: null,
+            failedAt: now,
+            completedAt: null,
+            nextRetryAt: null,
+            lastError: "发送超时，未收到抓取平台成功回执",
+          },
+        });
+
+        await tx.message.update({
+          where: { id: task.messageId },
+          data: {
+            deliveryStatus: MessageSendStatus.FAILED,
+            sendError: "发送超时，未收到抓取平台成功回执",
+            failedAt: now,
+            lastAttemptAt: now,
+          },
+        });
+
+        await tx.scheduledMessage.updateMany({
+          where: {
+            deliveredMessageId: task.messageId,
+          },
+          data: {
+            status: ScheduledMessageStatus.FAILED,
+            failedAt: now,
+            sendError: "发送超时，未收到抓取平台成功回执",
+            lastAttemptAt: now,
+          },
+        });
       });
 
-      await tx.message.update({
-        where: { id: task.messageId },
-        data: {
-          deliveryStatus: MessageSendStatus.FAILED,
-          sendError: "发送超时，未收到抓取平台成功回执",
-          failedAt: now,
-          lastAttemptAt: now,
-        },
+      await publishCustomerRefresh(task.customerId, "bridge-outbound-timeout");
+      processed += 1;
+    } catch (error) {
+      failed += 1;
+      const errorText = error instanceof Error ? error.message : String(error);
+      errors.push({ taskId: task.id, error: errorText });
+      console.error("failExpiredOutboundTasks task error:", {
+        taskId: task.id,
+        customerId: task.customerId,
+        error: errorText,
       });
-
-      await tx.scheduledMessage.updateMany({
-        where: {
-          deliveredMessageId: task.messageId,
-        },
-        data: {
-          status: ScheduledMessageStatus.FAILED,
-          failedAt: now,
-          sendError: "发送超时，未收到抓取平台成功回执",
-          lastAttemptAt: now,
-        },
-      });
-    });
-
-    await publishCustomerRefresh(task.customerId, "bridge-outbound-timeout-failed");
+    }
   }
 
-  return expiredTasks.length;
+  return {
+    scanned: expiredTasks.length,
+    processed,
+    failed,
+    errors,
+  };
 }
 
 export async function claimNextOutboundTask() {

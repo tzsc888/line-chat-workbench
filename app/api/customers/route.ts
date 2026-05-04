@@ -1,155 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { resolveFollowupView } from "@/lib/followup-rules";
-import { failExpiredOutboundTasks } from "@/lib/bridge-outbound";
+import { customerListSelect, mapCustomerListItem, type CustomerListRow } from "./customer-list-shared";
 
 const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 100;
+const MAX_LIMIT = 500;
+
+type RegularCursor = {
+  lastMessageAt: string | null;
+  id: string;
+};
+type RegularCursorParseResult =
+  | { ok: true; cursor: RegularCursor | null }
+  | { ok: false };
 
 function parsePositiveInt(value: string | null, fallback: number) {
   const parsed = Number.parseInt(value || "", 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return parsed;
-}
-
-function getLatestPreview(message: {
-  role: "CUSTOMER" | "OPERATOR";
-  type: "TEXT" | "IMAGE" | "STICKER";
-  japaneseText: string;
-}) {
-  const baseText =
-    message.type === "IMAGE"
-      ? "[图片]"
-      : message.type === "STICKER"
-        ? "[贴图]"
-        : message.japaneseText.trim() || "[空消息]";
-  return `${message.role === "OPERATOR" ? "我：" : ""}${baseText}`;
-}
-
-const customerSelect = {
-  id: true,
-  lineUserId: true,
-  bridgeThreadId: true,
-  remarkName: true,
-  originalName: true,
-  avatarUrl: true,
-  stage: true,
-  isVip: true,
-  pinnedAt: true,
-  unreadCount: true,
-  lineRelationshipStatus: true,
-  lineRefollowedAt: true,
-  lastMessageAt: true,
-  lastInboundMessageAt: true,
-  lastOutboundMessageAt: true,
-  followupBucket: true,
-  followupTier: true,
-  followupState: true,
-  nextFollowupBucket: true,
-  followupReason: true,
-  nextFollowupAt: true,
-  updatedAt: true,
-  tags: {
-    select: {
-      tag: {
-        select: {
-          id: true,
-          name: true,
-          color: true,
-        },
-      },
-    },
-  },
-  messages: {
-    orderBy: { sentAt: "desc" as const },
-    take: 1,
-    select: {
-      id: true,
-      role: true,
-      type: true,
-      source: true,
-      japaneseText: true,
-      chineseText: true,
-      sentAt: true,
-    },
-  },
-};
-
-type CustomerListRow = Prisma.CustomerGetPayload<{
-  select: typeof customerSelect;
-}>;
-
-function mapCustomer(customer: CustomerListRow, now: number) {
-  const latestMessage = customer.messages[0] || null;
-  const tagNames = customer.tags.map((item) => item.tag.name);
-  const followup = resolveFollowupView({
-    isVip: customer.isVip,
-    stage: customer.stage,
-    unreadCount: customer.unreadCount,
-    lineRelationshipStatus: customer.lineRelationshipStatus,
-    lineRefollowedAt: customer.lineRefollowedAt,
-    remarkName: customer.remarkName,
-    tags: tagNames,
-    followupBucket: customer.followupBucket,
-    followupTier: customer.followupTier,
-    followupState: customer.followupState,
-    nextFollowupBucket: customer.nextFollowupBucket,
-    nextFollowupAt: customer.nextFollowupAt,
-    followupReason: customer.followupReason,
-    lastMessageAt: customer.lastMessageAt,
-    lastInboundMessageAt: customer.lastInboundMessageAt,
-    lastOutboundMessageAt: customer.lastOutboundMessageAt,
-  });
-
-  return {
-    id: customer.id,
-    lineUserId: customer.lineUserId,
-    bridgeThreadId: customer.bridgeThreadId,
-    remarkName: customer.remarkName,
-    originalName: customer.originalName,
-    avatarUrl: customer.avatarUrl,
-    stage: customer.stage,
-    isVip: customer.isVip,
-    pinnedAt: customer.pinnedAt,
-    unreadCount: customer.unreadCount,
-    lineRelationshipStatus: customer.lineRelationshipStatus,
-    lineRefollowedAt: customer.lineRefollowedAt,
-    lastMessageAt: customer.lastMessageAt,
-    followup: {
-      bucket: followup.bucket,
-      tier: followup.tier,
-      state: followup.state,
-      reason: followup.reason,
-      nextFollowupBucket: customer.nextFollowupBucket,
-      nextFollowupAt: followup.nextFollowupAt ? followup.nextFollowupAt.toISOString() : null,
-      isOverdue:
-        !!followup.nextFollowupAt &&
-        followup.state === "ACTIVE" &&
-        followup.nextFollowupAt.getTime() <= now,
-    },
-    tags: customer.tags.map((item) => ({
-      id: item.tag.id,
-      name: item.tag.name,
-      color: item.tag.color,
-    })),
-    latestMessage: latestMessage
-      ? {
-          id: latestMessage.id,
-          role: latestMessage.role,
-          type: latestMessage.type,
-          source: latestMessage.source,
-          japaneseText: latestMessage.japaneseText,
-          chineseText: latestMessage.chineseText,
-          sentAt: latestMessage.sentAt,
-          previewText: getLatestPreview({
-            role: latestMessage.role,
-            type: latestMessage.type,
-            japaneseText: latestMessage.japaneseText,
-          }),
-        }
-      : null,
-  };
 }
 
 function buildSearchWhere(keyword: string) {
@@ -180,40 +48,90 @@ function buildSearchWhere(keyword: string) {
   };
 }
 
+function encodeRegularCursor(cursor: RegularCursor | null) {
+  if (!cursor) return null;
+  return `${cursor.lastMessageAt ?? "null"}|${cursor.id}`;
+}
+
+function isIsoUtcDateString(value: string) {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value);
+}
+
+function decodeRegularCursor(raw: string | null): RegularCursorParseResult {
+  if (!raw) return { ok: true, cursor: null };
+  if (!raw.includes("|")) return { ok: false };
+  const parts = raw.split("|");
+  if (parts.length !== 2) return { ok: false };
+  const [rawLastMessageAt, rawId] = parts;
+  const id = (rawId || "").trim();
+  if (!id) return { ok: false };
+  if ((rawLastMessageAt || "").trim().toLowerCase() === "null") {
+    return { ok: true, cursor: { lastMessageAt: null, id } };
+  }
+  const lastMessageAt = (rawLastMessageAt || "").trim();
+  if (!lastMessageAt) return { ok: false };
+  if (!isIsoUtcDateString(lastMessageAt)) return { ok: false };
+  const parsed = new Date(lastMessageAt);
+  if (!Number.isFinite(parsed.getTime())) return { ok: false };
+  return { ok: true, cursor: { lastMessageAt: parsed.toISOString(), id } };
+}
+
+function buildRegularCursorWhere(cursor: RegularCursor | null): Prisma.CustomerWhereInput {
+  if (!cursor) return { pinnedAt: null };
+  if (!cursor.lastMessageAt) {
+    return {
+      pinnedAt: null,
+      AND: [
+        { lastMessageAt: null },
+        { id: { lt: cursor.id } },
+      ],
+    };
+  }
+  return {
+    pinnedAt: null,
+    OR: [
+      { lastMessageAt: { lt: new Date(cursor.lastMessageAt) } },
+      {
+        AND: [
+          { lastMessageAt: new Date(cursor.lastMessageAt) },
+          { id: { lt: cursor.id } },
+        ],
+      },
+      { lastMessageAt: null },
+    ],
+  };
+}
+
 export async function GET(req: NextRequest) {
   try {
-    await failExpiredOutboundTasks();
-
     const page = parsePositiveInt(req.nextUrl.searchParams.get("page"), 1);
     const limit = Math.min(parsePositiveInt(req.nextUrl.searchParams.get("limit"), DEFAULT_LIMIT), MAX_LIMIT);
     const keyword = req.nextUrl.searchParams.get("q")?.trim() || "";
     const debugCustomerIdQuery = req.nextUrl.searchParams.get("debugCustomerId")?.trim() || "";
     const debugCustomerIdEnv = process.env.DEBUG_CUSTOMER_ID?.trim() || "";
     const debugCustomerId = debugCustomerIdQuery || debugCustomerIdEnv;
+    const rawCursor = req.nextUrl.searchParams.get("cursor");
+    const cursorParsed = decodeRegularCursor(rawCursor);
+    const isSearching = !!keyword;
+    if (!isSearching && !cursorParsed.ok) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "invalid_cursor",
+        },
+        { status: 400 }
+      );
+    }
+    const cursor = cursorParsed.ok ? cursorParsed.cursor : null;
+    const hasCursor = !!cursor;
     const skip = Math.max(0, (page - 1) * limit);
     const now = Date.now();
 
-    const [overdueFollowupCount, unreadAggregate] = await Promise.all([
-      prisma.customer.count({
-        where: {
-          followupState: "ACTIVE",
-          nextFollowupAt: {
-            lte: new Date(),
-          },
-        },
-      }),
-      prisma.customer.aggregate({
-        _sum: {
-          unreadCount: true,
-        },
-      }),
-    ]);
-    const totalUnreadCount = unreadAggregate._sum.unreadCount ?? 0;
-
     let customers: CustomerListRow[] = [];
     let hasMore = false;
+    let nextCursor: string | null = null;
 
-    if (keyword) {
+    if (isSearching) {
       const items = await prisma.customer.findMany({
         where: buildSearchWhere(keyword),
         orderBy: [
@@ -223,13 +141,13 @@ export async function GET(req: NextRequest) {
         ],
         skip,
         take: limit + 1,
-        select: customerSelect,
+        select: customerListSelect,
       });
       hasMore = items.length > limit;
       customers = items.slice(0, limit);
     } else {
       const pinnedCustomers =
-        page === 1
+        !hasCursor
           ? await prisma.customer.findMany({
               where: {
                 pinnedAt: {
@@ -241,28 +159,33 @@ export async function GET(req: NextRequest) {
                 { lastMessageAt: { sort: "desc", nulls: "last" } },
                 { id: "desc" },
               ],
-              select: customerSelect,
+              select: customerListSelect,
             })
           : [];
 
-      const regularCustomers = await prisma.customer.findMany({
-        where: {
-          pinnedAt: null,
-        },
+      const regularRows = await prisma.customer.findMany({
+        where: buildRegularCursorWhere(cursor),
         orderBy: [
           { lastMessageAt: { sort: "desc", nulls: "last" } },
           { id: "desc" },
         ],
-        skip,
         take: limit + 1,
-        select: customerSelect,
+        select: customerListSelect,
       });
 
-      hasMore = regularCustomers.length > limit;
-      customers = [...pinnedCustomers, ...regularCustomers.slice(0, limit)];
+      hasMore = regularRows.length > limit;
+      const regularCustomers = regularRows.slice(0, limit);
+      const lastRegular = regularCustomers[regularCustomers.length - 1] || null;
+      nextCursor = hasMore && lastRegular
+        ? encodeRegularCursor({
+            lastMessageAt: lastRegular.lastMessageAt ? lastRegular.lastMessageAt.toISOString() : null,
+            id: lastRegular.id,
+          })
+        : null;
+      customers = [...pinnedCustomers, ...regularCustomers];
     }
 
-    const mappedCustomers = customers.map((customer) => mapCustomer(customer, now));
+    const mappedCustomers = customers.map((customer) => mapCustomerListItem(customer, now));
     if (process.env.NODE_ENV !== "production" && debugCustomerId) {
       for (const customer of mappedCustomers) {
         if (customer.id === debugCustomerId) {
@@ -279,12 +202,10 @@ export async function GET(req: NextRequest) {
       ok: true,
       customers: mappedCustomers,
       hasMore,
+      nextCursor,
       page,
       pageSize: limit,
-      stats: {
-        overdueFollowupCount,
-        totalUnreadCount,
-      },
+      stats: null,
     });
   } catch (error) {
     console.error("GET /api/customers error:", error);

@@ -21,6 +21,7 @@ import {
   normalizeBridgeThreadId,
   sanitizeBridgeDisplayName,
 } from "@/lib/bridge/identity";
+import { normalizeBridgeInboundMode, resolveBridgeInboundNotifyPolicy } from "@/lib/bridge/inbound-notify-policy";
 import { isLegacyEndpointEnabled, legacyEndpointDisabledResponse } from "@/lib/legacy-endpoint-toggle";
 
 type BridgePreviewCard = {
@@ -48,6 +49,7 @@ type BridgeMessage = {
 
 type BridgePayload = {
   mode: string;
+  notify?: boolean;
   threadId: string;
   contact: {
     name?: string;
@@ -266,7 +268,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "缺少 threadId" }, { status: 400 });
     }
 
-    const mode = cleanBridgeText(body.mode || "live") || "live";
+    const mode = normalizeBridgeInboundMode(cleanBridgeText(body.mode || "live") || "live");
+    const notify = typeof body.notify === "boolean" ? body.notify : undefined;
+    const inboundNotifyPolicy = resolveBridgeInboundNotifyPolicy({
+      mode,
+      notify,
+    });
     const incomingName = sanitizeBridgeDisplayName(body.contact?.name || "");
     const avatarUrl = cleanBridgeText(body.contact?.avatarUrl || "");
     const relationshipStatus =
@@ -291,6 +298,7 @@ export async function POST(req: NextRequest) {
 
     let importedCount = 0;
     let latestLiveTextMessageId = "";
+    let latestCreatedInboundMessageId = "";
     const translationQueuedMessageIds: string[] = [];
 
     for (const msg of normalizedMessages) {
@@ -335,7 +343,7 @@ export async function POST(req: NextRequest) {
           sentAt: createdMessageSentAt,
         });
       const triggerDecision = decideInboundTriggerPolicy({
-        mode: mode === "live" ? "live" : "non_live",
+        mode,
         messageType,
         created,
         isFirstInboundText,
@@ -344,6 +352,9 @@ export async function POST(req: NextRequest) {
       if (!created) continue;
 
       importedCount += 1;
+      if (createdMessageId) {
+        latestCreatedInboundMessageId = createdMessageId;
+      }
       if (
         !triggerDecision.shouldQueueTranslation &&
         !triggerDecision.shouldQueueWorkflow &&
@@ -370,10 +381,13 @@ export async function POST(req: NextRequest) {
         customerId: customer.id,
         reason:
           importedCount > 0
-            ? "bridge-inbound-message"
+            ? inboundNotifyPolicy.inboundRefreshReason
             : customerUpsert.relationshipChanged
               ? "bridge-thread-status"
               : "bridge-customer-updated",
+        ...(importedCount > 0 && inboundNotifyPolicy.shouldNotifyInboundSound && latestCreatedInboundMessageId
+          ? { messageId: latestCreatedInboundMessageId }
+          : {}),
         scopes: ["workspace", "list"],
       });
     }
