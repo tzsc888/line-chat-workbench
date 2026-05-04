@@ -55,7 +55,15 @@ Local note: GitHub Actions does not run in local dev. To test queued inbound aut
 Maintenance cron note:
 
 - `/api/cron/maintenance` requires `CRON_SECRET`.
-- Deployments should schedule this endpoint every 5 minutes (for Vercel, use `vercel.json` cron config).
+- Vercel Hobby does not support high-frequency built-in Cron schedules.
+- For Hobby deployments, do not configure high-frequency `vercel.json` crons; use an external scheduler instead.
+- External scheduler recommendation:
+  - `POST https://<your-domain>/api/bridge/scheduled-messages/dispatch`
+  - Header: `x-bridge-secret: <BRIDGE_SHARED_SECRET>`
+  - Frequency: every 1-2 minutes
+  - `GET https://<your-domain>/api/cron/maintenance`
+  - Header: `Authorization: Bearer <CRON_SECRET>`
+  - Frequency: every 5-10 minutes
 - This maintenance endpoint no longer depends on `ENABLE_LEGACY_CRON_MAINTENANCE`.
 
 ## Scheduled Dispatch (Bridge-First)

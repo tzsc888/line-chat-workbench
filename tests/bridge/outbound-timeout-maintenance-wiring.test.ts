@@ -39,17 +39,22 @@ test("failExpiredOutboundTasks should apply bounded batch size and timeout reaso
   assert.match(outboundLib, /publishCustomerRefresh\(task\.customerId,\s*"bridge-outbound-timeout"\)/);
 });
 
-test("vercel cron and maintenance auth should stay configured", () => {
+test("hobby external scheduler docs and maintenance auth should stay configured", () => {
   const vercelConfigRaw = read("vercel.json");
   const vercelConfig = JSON.parse(vercelConfigRaw) as {
     crons?: Array<{ path?: string; schedule?: string }>;
   };
+  const readme = read("README.md");
   const maintenanceRoute = read("app/api/cron/maintenance/route.ts");
 
-  const maintenanceCron = vercelConfig.crons?.find((cron) => cron.path === "/api/cron/maintenance");
-  assert.ok(maintenanceCron, "vercel.json must configure /api/cron/maintenance cron");
-  assert.equal(maintenanceCron?.schedule, "*/5 * * * *");
-  assert.notEqual(maintenanceCron?.schedule, "* * * * *");
+  assert.equal(typeof vercelConfigRaw, "string");
+  assert.equal(vercelConfigRaw.includes("\"$schema\""), true);
+  assert.equal(Array.isArray(vercelConfig.crons), false, "vercel.json should not define built-in crons on Hobby strategy");
+
+  assert.match(readme, /\/api\/cron\/maintenance/);
+  assert.match(readme, /\/api\/bridge\/scheduled-messages\/dispatch/);
+  assert.match(readme, /CRON_SECRET|Authorization:\s*Bearer/i);
+  assert.match(readme, /BRIDGE_SHARED_SECRET|x-bridge-secret/i);
 
   assert.match(maintenanceRoute, /process\.env\.CRON_SECRET/);
   assert.match(maintenanceRoute, /authorization/);
