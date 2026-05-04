@@ -17,6 +17,7 @@ const PUBLIC_API_PATHS = [
   "/api/auth/login",
   "/api/auth/logout",
   "/api/bridge/inbound",
+  "/api/bridge/scheduled-messages/dispatch",
   "/api/bridge/outbound-tasks/claim",
 ];
 
