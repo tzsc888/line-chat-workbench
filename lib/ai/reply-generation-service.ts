@@ -70,7 +70,7 @@ function buildCurrentTurnMessages(messagesAsc: ContextMessage[], latestCustomerI
   return out;
 }
 
-function buildPromptPayload(context: Record<string, unknown>) {
+export function buildPromptPayload(context: Record<string, unknown>) {
   const latestMessage = (context.latestMessage || {}) as ContextMessage;
   const recentMessages = (Array.isArray(context.recentMessages) ? context.recentMessages : []) as ContextMessage[];
   const rewriteInput = String(context.rewriteInput || "").trim();

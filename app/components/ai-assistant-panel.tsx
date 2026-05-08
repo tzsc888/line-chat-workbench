@@ -5,6 +5,9 @@ type SuggestionCardProps = {
   shouldDimDraft: boolean;
   japanese: string;
   chinese: string;
+  canCopyPrompt: boolean;
+  copyPromptStatus: "idle" | "copying" | "copied" | "failed";
+  onCopyPrompt: () => void;
   isSending: boolean;
   isUsed: boolean;
   isStale: boolean;
@@ -30,13 +33,23 @@ type AiAssistantPanelProps = {
   isSendingAi: string;
   apiError: string;
   aiNotice: string;
+  copyPromptStatus: "idle" | "copying" | "copied" | "failed";
+  onCopyPrompt: () => void;
   onLogout: () => void;
   loggingOut: boolean;
   isPostGenerateSyncing?: boolean;
   postGenerateSyncMessage?: string;
 };
 
+function getCopyPromptLabel(status: "idle" | "copying" | "copied" | "failed") {
+  if (status === "copying") return "复制中...";
+  if (status === "copied") return "已复制";
+  if (status === "failed") return "复制失败";
+  return "复制全文";
+}
+
 function SuggestionCard(props: SuggestionCardProps) {
+  const isCopyDisabled = !props.canCopyPrompt || props.copyPromptStatus === "copying" || props.copyPromptStatus === "copied";
   return (
     <div
       className={`rounded-xl border p-4 ${
@@ -45,7 +58,23 @@ function SuggestionCard(props: SuggestionCardProps) {
           : "border-gray-200 bg-white"
       }`}
     >
-      <div className="mb-2 font-semibold">{props.title}</div>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div className="font-semibold">{props.title}</div>
+        <button
+          type="button"
+          onClick={props.onCopyPrompt}
+          disabled={isCopyDisabled}
+          className={`shrink-0 whitespace-nowrap rounded-lg px-3 py-2 text-sm leading-none text-white disabled:cursor-not-allowed ${
+            props.copyPromptStatus === "copied" || props.copyPromptStatus === "copying"
+              ? "bg-amber-300 text-amber-900"
+              : props.copyPromptStatus === "failed"
+                ? "bg-amber-500"
+                : "bg-amber-600 hover:bg-amber-700"
+          }`}
+        >
+          {getCopyPromptLabel(props.copyPromptStatus)}
+        </button>
+      </div>
       <div className={`min-h-[72px] whitespace-pre-wrap rounded-lg p-3 text-sm ${props.shouldDimDraft ? "bg-gray-200 text-gray-600" : "bg-gray-100"}`}>
         {props.japanese}
       </div>
@@ -127,6 +156,9 @@ export function AiAssistantPanel(props: AiAssistantPanelProps) {
           shouldDimDraft={props.shouldDimDraft}
           japanese={props.displayedSuggestion1Ja}
           chinese={props.displayedSuggestion1Zh}
+          canCopyPrompt={props.hasCustomer}
+          copyPromptStatus={props.copyPromptStatus}
+          onCopyPrompt={props.onCopyPrompt}
           isSending={props.isSendingAi !== ""}
           isUsed={props.isLatestDraftUsed}
           isStale={props.isLatestDraftStale}

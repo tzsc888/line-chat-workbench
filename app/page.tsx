@@ -128,6 +128,7 @@ type RewriteResult = {
   translationStatus?: "succeeded" | "failed";
   translationErrorCode?: string;
 };
+type CopyPromptStatus = "idle" | "copying" | "copied" | "failed";
 type GenerationTaskView = {
   id: string;
   customerId: string;
@@ -541,6 +542,7 @@ function HomePageContent() {
   const [pageError, setPageError] = useState("");
   const [apiError, setApiError] = useState("");
   const [aiNotice, setAiNotice] = useState("");
+  const [copyPromptStatus, setCopyPromptStatus] = useState<CopyPromptStatus>("idle");
   const [opNotice, setOpNotice] = useState("");
   const [translatingMessageIds, setTranslatingMessageIds] = useState<Record<string, boolean>>({});
   const messageContextMenuRef = useRef<HTMLDivElement | null>(null);
@@ -559,6 +561,19 @@ function HomePageContent() {
       opNoticeTimerRef.current = null;
     }, 1800);
   }, []);
+  const clearCopyPromptResetTimer = useCallback(() => {
+    if (copyPromptResetTimerRef.current != null) {
+      window.clearTimeout(copyPromptResetTimerRef.current);
+      copyPromptResetTimerRef.current = null;
+    }
+  }, []);
+  const scheduleCopyPromptStatusReset = useCallback((delayMs = 2000) => {
+    clearCopyPromptResetTimer();
+    copyPromptResetTimerRef.current = window.setTimeout(() => {
+      setCopyPromptStatus("idle");
+      copyPromptResetTimerRef.current = null;
+    }, delayMs);
+  }, [clearCopyPromptResetTimer]);
   const closeMessageContextMenu = useCallback(() => {
     setMessageContextMenu(null);
   }, []);
@@ -723,6 +738,9 @@ function HomePageContent() {
   const pendingRealtimeRefreshRef = useRef(false);
   const pendingRealtimeRefreshCustomerIdRef = useRef<string | null>(null);
   const selectedCustomerIdRef = useRef("");
+  const copyPromptRequestSeqRef = useRef(0);
+  const copyPromptActiveRef = useRef<{ requestId: number; customerId: string } | null>(null);
+  const copyPromptResetTimerRef = useRef<number | null>(null);
   const realtimeRefreshTimerRef = useRef<number | null>(null);
   const ablyClientRef = useRef<Ably.Realtime | null>(null);
   const markReadInFlightRef = useRef(new Set<string>());
@@ -807,6 +825,9 @@ function HomePageContent() {
       generationPollersRef.current = {};
       if (opNoticeTimerRef.current != null) {
         window.clearTimeout(opNoticeTimerRef.current);
+      }
+      if (copyPromptResetTimerRef.current != null) {
+        window.clearTimeout(copyPromptResetTimerRef.current);
       }
       if (customerStatsRefreshTimerRef.current != null) {
         window.clearTimeout(customerStatsRefreshTimerRef.current);
@@ -2714,7 +2735,10 @@ function HomePageContent() {
     setAiNotice("");
     setIsPostGenerateSyncing(false);
     setPostGenerateSyncMessage("");
-  }, [selectedCustomerId]);
+    copyPromptActiveRef.current = null;
+    clearCopyPromptResetTimer();
+    setCopyPromptStatus("idle");
+  }, [clearCopyPromptResetTimer, selectedCustomerId]);
   const runPostGenerateRefresh = useCallback((customerId: string) => {
     setIsPostGenerateSyncing(true);
     setPostGenerateSyncMessage("");
@@ -2899,6 +2923,62 @@ function HomePageContent() {
       });
     }
   }, [getMessageSourceText, playSoftTickSound, showOpNotice, translatingMessageIds, updateWorkspaceMessage]);
+  const handleCopyFullPrompt = useCallback(async () => {
+    if (!workspace) {
+      showOpNotice("请先选择顾客。");
+      return;
+    }
+    const customerId = String(workspace.customer.id || "").trim();
+    if (!customerId) {
+      showOpNotice("请先选择顾客。");
+      return;
+    }
+
+    const requestId = copyPromptRequestSeqRef.current + 1;
+    copyPromptRequestSeqRef.current = requestId;
+    copyPromptActiveRef.current = { requestId, customerId };
+    clearCopyPromptResetTimer();
+    setCopyPromptStatus("copying");
+
+    const isLatestRequest = () => {
+      const active = copyPromptActiveRef.current;
+      return (
+        !!active &&
+        active.requestId === requestId &&
+        active.customerId === customerId &&
+        selectedCustomerIdRef.current === customerId
+      );
+    };
+
+    try {
+      const response = await fetch("/api/copy-reply-prompt", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          customerId,
+          rewriteInput,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!isLatestRequest()) return;
+      if (!response.ok || !data?.ok || typeof data?.copyText !== "string" || !data.copyText.trim()) {
+        throw new Error(String(data?.error || "copy_prompt_failed"));
+      }
+      await navigator.clipboard.writeText(data.copyText);
+      if (!isLatestRequest()) return;
+      setCopyPromptStatus("copied");
+      void playSoftTickSound("success");
+      scheduleCopyPromptStatusReset(2000);
+    } catch (error) {
+      if (!isLatestRequest()) return;
+      setCopyPromptStatus("failed");
+      showOpNotice("复制失败，请稍后重试。");
+      scheduleCopyPromptStatusReset(1200);
+      console.error("copy full prompt failed:", error instanceof Error ? error.message : String(error));
+    }
+  }, [clearCopyPromptResetTimer, playSoftTickSound, rewriteInput, scheduleCopyPromptStatusReset, showOpNotice, workspace]);
   const formatGenerationTaskError = useCallback((task: GenerationTaskView) => {
     const code = String(task.errorCode || "").trim();
     const message = String(task.errorMessage || "").trim();
@@ -4464,6 +4544,8 @@ function HomePageContent() {
         isSendingAi={isSendingAi}
         apiError={apiError}
         aiNotice={effectiveAiNotice}
+        copyPromptStatus={copyPromptStatus}
+        onCopyPrompt={handleCopyFullPrompt}
         onLogout={handleLogout}
         loggingOut={loggingOut}
         isPostGenerateSyncing={isPostGenerateSyncing}

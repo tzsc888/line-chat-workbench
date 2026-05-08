@@ -94,7 +94,10 @@ function safeSnippet(value: unknown, max = 700) {
   return String(value || "").replace(/\s+/g, " ").slice(0, max);
 }
 
-function resolveLatestCustomerMessageForTurn(messagesAsc: ContextMessage[], requestedTargetMessageId: string | null) {
+export function resolveLatestCustomerMessageForTurn<T extends { id: string; role: "CUSTOMER" | "OPERATOR" }>(
+  messagesAsc: T[],
+  requestedTargetMessageId: string | null,
+) {
   const latestCustomerAny = [...messagesAsc].reverse().find((message) => message.role === "CUSTOMER") || null;
   if (!requestedTargetMessageId) return latestCustomerAny;
   const requested = messagesAsc.find((message) => message.id === requestedTargetMessageId);
