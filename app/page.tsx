@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 import * as Ably from "ably";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -40,6 +40,8 @@ type CustomerListItem = {
     source: "LINE" | "MANUAL" | "AI_SUGGESTION";
     japaneseText: string;
     chineseText: string | null;
+    deliveryStatus: "PENDING" | "SENT" | "FAILED" | null;
+    sendError: string | null;
     sentAt: string;
     previewText: string;
   } | null;
@@ -218,16 +220,21 @@ const WORKSPACE_PREFETCH_TOP_MAX = 12;
 const WORKSPACE_PREFETCH_NEAR_MAX = 12;
 const WORKSPACE_PREFETCH_QUEUE_MAX = 20;
 const WORKSPACE_PREFETCH_CONCURRENCY = 1;
+const DEBUG_CUSTOMER_SCROLL_DEFER_STATS =
+  process.env.NODE_ENV !== "production" &&
+  String(process.env.NEXT_PUBLIC_DEBUG_CUSTOMER_SCROLL_DEFER || "").trim() === "1";
 const WORKSPACE_PREFETCH_IDLE_DELAY_MS = 300;
-const DEBUG_STATE_LOGS = process.env.NODE_ENV !== "production";
+const DEBUG_STATE_LOGS =
+  process.env.NODE_ENV !== "production" &&
+  String(process.env.NEXT_PUBLIC_DEBUG_STATE_LOGS || "").trim() === "1";
 
 function isAbortError(error: unknown) {
   return (error instanceof DOMException && error.name === "AbortError") ||
     (error instanceof Error && error.name === "AbortError");
 }
 function getDisplayName(customer: Pick<CustomerListItem, "remarkName" | "originalName"> | null | undefined) {
-  if (!customer) return "未选择顾客";
-  return customer.remarkName?.trim() || customer.originalName || "未命名顾客";
+  if (!customer) return "鏈€夋嫨椤惧";
+  return customer.remarkName?.trim() || customer.originalName || "鏈懡鍚嶉【瀹?;
 }
 function getAvatarText(customer: Pick<CustomerListItem, "remarkName" | "originalName" | "followup"> | null) {
   if (customer?.followup?.tier) return customer.followup.tier;
@@ -247,13 +254,13 @@ function getAvatarTone(tier?: FollowupSummary["tier"] | null) {
   return "bg-pink-100 text-pink-700";
 }
 function getFollowupBucketLabel(bucket?: FollowupSummary["bucket"] | null) {
-  return bucket === "VIP" ? "VIP已成交" : "未成交";
+  return bucket === "VIP" ? "VIP宸叉垚浜? : "鏈垚浜?;
 }
 function getFollowupTierLabel(tier?: FollowupSummary["tier"] | null) {
-  return tier ? `${tier}类` : "未分层";
+  return tier ? `${tier}绫籤 : "鏈垎灞?;
 }
 function formatFollowupTime(dateString: string | null) {
-  if (!dateString) return "未设置";
+  if (!dateString) return "鏈缃?;
   const date = new Date(dateString);
   return date.toLocaleString("zh-CN", {
     month: "2-digit",
@@ -271,7 +278,7 @@ function shouldShowRefollowNotice(dateString: string | null, status?: "ACTIVE" |
 }
 function getRelationshipBadge(status?: "ACTIVE" | "UNFOLLOWED") {
   if (status === "UNFOLLOWED") {
-    return { text: "已取消关注", className: "bg-rose-50 text-rose-700 border border-rose-200" };
+    return { text: "宸插彇娑堝叧娉?, className: "bg-rose-50 text-rose-700 border border-rose-200" };
   }
   return null;
 }
@@ -321,11 +328,11 @@ function getDeliveryStatusMeta(message: WorkspaceMessage) {
   }
   switch (message.deliveryStatus) {
     case "FAILED":
-      return { label: "发送失败", className: "text-red-500" };
+      return { label: "鍙戦€佸け璐?, className: "text-red-500" };
     case "PENDING":
-      return { label: "发送中", className: "text-amber-500" };
+      return { label: "鍙戦€佷腑", className: "text-amber-500" };
     case "SENT":
-      return { label: "已发送", className: "text-gray-400" };
+      return { label: "宸插彂閫?, className: "text-gray-400" };
     default:
       return null;
   }
@@ -333,11 +340,11 @@ function getDeliveryStatusMeta(message: WorkspaceMessage) {
 function buildPreviewTextFromMessage(message: Pick<WorkspaceMessage, "role" | "type" | "japaneseText">) {
   const baseText =
     message.type === "IMAGE"
-      ? "[图片]"
+      ? "[鍥剧墖]"
       : message.type === "STICKER"
-        ? "[贴图]"
-        : message.japaneseText.trim() || "[空消息]";
-  return `${message.role === "OPERATOR" ? "我：" : ""}${baseText}`;
+        ? "[璐村浘]"
+        : message.japaneseText.trim() || "[绌烘秷鎭痌";
+  return `${message.role === "OPERATOR" ? "鎴戯細" : ""}${baseText}`;
 }
 function buildCustomerLatestMessage(message: WorkspaceMessage | OptimisticWorkspaceMessage): CustomerListItem["latestMessage"] {
   return {
@@ -347,6 +354,8 @@ function buildCustomerLatestMessage(message: WorkspaceMessage | OptimisticWorksp
     source: message.source,
     japaneseText: message.japaneseText,
     chineseText: message.chineseText,
+    deliveryStatus: message.deliveryStatus,
+    sendError: message.sendError,
     sentAt: message.sentAt,
     previewText: buildPreviewTextFromMessage(message),
   };
@@ -437,7 +446,7 @@ function buildDefaultScheduledInputValue() {
 }
 function formatScheduledTime(dateString: string) {
   const date = new Date(dateString);
-  if (!Number.isFinite(date.getTime())) return "时间格式错误";
+  if (!Number.isFinite(date.getTime())) return "鏃堕棿鏍煎紡閿欒";
   return date.toLocaleString("ja-JP", {
     month: "numeric",
     day: "numeric",
@@ -449,11 +458,11 @@ function formatScheduledTime(dateString: string) {
 function getScheduledMessageStatusMeta(status: ScheduledMessageItem["status"]) {
   switch (status) {
     case "PENDING":
-      return { label: "待发送", className: "bg-amber-50 text-amber-700 border border-amber-200" };
+      return { label: "寰呭彂閫?, className: "bg-amber-50 text-amber-700 border border-amber-200" };
     case "PROCESSING":
-      return { label: "发送中", className: "bg-sky-50 text-sky-700 border border-sky-200" };
+      return { label: "鍙戦€佷腑", className: "bg-sky-50 text-sky-700 border border-sky-200" };
     case "FAILED":
-      return { label: "发送失败", className: "bg-rose-50 text-rose-700 border border-rose-200" };
+      return { label: "鍙戦€佸け璐?, className: "bg-rose-50 text-rose-700 border border-rose-200" };
     default:
       return { label: status, className: "bg-slate-50 text-slate-700 border border-slate-200" };
   }
@@ -729,6 +738,7 @@ function HomePageContent() {
   const requestedRegularCursorsRef = useRef<Set<string>>(new Set());
   const searchKeywordRef = useRef("");
   const isCustomerListRequestInFlightRef = useRef(false);
+  const customerListInFlightKindRef = useRef<"loadMore" | "refresh" | "initial" | null>(null);
   const customerListRequestIdRef = useRef(0);
   const customerListAbortControllerRef = useRef<AbortController | null>(null);
   const isSilentRefreshingRef = useRef(false);
@@ -750,6 +760,7 @@ function HomePageContent() {
   const composerMenuRef = useRef<HTMLDivElement | null>(null);
   const schedulePanelRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const manualSendInFlightKeysRef = useRef<Set<string>>(new Set());
   const openChatToBottomRef = useRef(false);
   const shouldStickToBottomRef = useRef(true);
   const lastOpenedCustomerIdRef = useRef("");
@@ -764,6 +775,10 @@ function HomePageContent() {
     abortController: AbortController | null;
   }>>({});
   const customerListLatestScrollTopRef = useRef(0);
+  const customerListUserScrollUntilRef = useRef(0);
+  const customerSummaryDeferredTimerRef = useRef<number | null>(null);
+  const customerSummaryDeferredCountRef = useRef(0);
+  const customerSummaryDeferredDelayTotalMsRef = useRef(0);
   const recentLocalRefreshAtRef = useRef<Record<string, number>>({});
   const workspaceCacheRef = useRef<Map<string, WorkspaceCacheEntry>>(new Map());
   const workspacePrefetchQueueRef = useRef<string[]>([]);
@@ -831,6 +846,9 @@ function HomePageContent() {
       }
       if (customerStatsRefreshTimerRef.current != null) {
         window.clearTimeout(customerStatsRefreshTimerRef.current);
+      }
+      if (customerSummaryDeferredTimerRef.current != null) {
+        window.clearTimeout(customerSummaryDeferredTimerRef.current);
       }
     };
   }, []);
@@ -1195,13 +1213,13 @@ function HomePageContent() {
       setIsPresetLoading(true);
       const response = await fetch("/api/preset-messages", { cache: "no-store" });
       const data = await response.json();
-        if (!response.ok || !data.ok) {
+      if (!response.ok || !data.ok) {
         throw new Error(data?.error || "读取预设信息失败");
       }
       setPresetSnippets(data.items || []);
     } catch (error) {
       console.error(error);
-      window.alert("读取预设信息失败，请看终端报错");
+      window.alert("读取预设信息失败，请查看终端报错");
     } finally {
       setIsPresetLoading(false);
     }
@@ -1226,12 +1244,20 @@ function HomePageContent() {
       const isLoadMore = !!options?.loadMore;
       const activeSearch = options?.search ?? searchKeywordRef.current;
       const isSearching = !!activeSearch.trim();
+      const isPreserveUiRefresh = !isLoadMore && shouldPreserveListUi;
       const useCursorLoadMore = isLoadMore && !isSearching;
       const limit = Math.max(options?.limitOverride ?? CUSTOMER_PAGE_SIZE, CUSTOMER_PAGE_SIZE);
       const page = isLoadMore ? customerPageRef.current + 1 : 1;
       const cursorToUse = useCursorLoadMore ? regularNextCursorRef.current : null;
 
       if (isCustomerListRequestInFlightRef.current && isLoadMore) {
+        return;
+      }
+      if (
+        isPreserveUiRefresh &&
+        isCustomerListRequestInFlightRef.current &&
+        customerListInFlightKindRef.current === "loadMore"
+      ) {
         return;
       }
       if (useCursorLoadMore) {
@@ -1249,12 +1275,15 @@ function HomePageContent() {
         console.info("[customers-load] start", { requestId });
       }
       const abortController = new AbortController();
-      customerListAbortControllerRef.current?.abort();
+      if (!(isPreserveUiRefresh && customerListInFlightKindRef.current === "loadMore")) {
+        customerListAbortControllerRef.current?.abort();
+      }
       customerListAbortControllerRef.current = abortController;
       let requestSucceeded = false;
 
       try {
         isCustomerListRequestInFlightRef.current = true;
+        customerListInFlightKindRef.current = isLoadMore ? "loadMore" : shouldPreserveListUi ? "refresh" : "initial";
         if (isLoadMore) {
           setIsLoadingMoreCustomers(true);
         } else if (!options?.silent && !shouldPreserveListUi) {
@@ -1294,7 +1323,7 @@ function HomePageContent() {
           return;
         }
         if (!response.ok || !data.ok) {
-          throw new Error(data?.error || "读取顾客列表失败");
+          throw new Error(data?.error || "璇诲彇椤惧鍒楄〃澶辫触");
         }
 
         if (requestId !== customerListRequestIdRef.current) {
@@ -1418,6 +1447,7 @@ function HomePageContent() {
         }
         if (requestId === customerListRequestIdRef.current) {
           isCustomerListRequestInFlightRef.current = false;
+          customerListInFlightKindRef.current = null;
           if (customerListAbortControllerRef.current === abortController) {
             customerListAbortControllerRef.current = null;
           }
@@ -1441,7 +1471,7 @@ function HomePageContent() {
         });
         const data = await response.json();
         if (!response.ok || !data?.ok || !data?.stats) {
-          throw new Error(data?.error || "读取顾客统计失败");
+          throw new Error(data?.error || "璇诲彇椤惧缁熻澶辫触");
         }
         if (requestId !== customerStatsRequestIdRef.current) {
           return;
@@ -1844,18 +1874,59 @@ function HomePageContent() {
         }
         const nextCustomer = data.customer as CustomerListItem;
         const applySummary = () => {
+          const latestSeq = customerSummaryRequestSeqRef.current.get(normalizedId) ?? 0;
+          if (latestSeq !== localSeq) return;
           setCustomers((prev) => {
-            const exists = prev.some((item) => item.id === normalizedId);
-            const merged = exists
-              ? prev.map((item) => (item.id === normalizedId ? nextCustomer : item))
-              : [...prev, nextCustomer];
-            return sortCustomerList(applyReadProtectionToCustomers(merged));
+            const targetIndex = prev.findIndex((item) => item.id === normalizedId);
+            if (targetIndex < 0) {
+              return sortCustomerList(applyReadProtectionToCustomers([...prev, nextCustomer]));
+            }
+
+            const target = prev[targetIndex];
+            const sortKeyUnchanged =
+              target.pinnedAt === nextCustomer.pinnedAt &&
+              target.lastMessageAt === nextCustomer.lastMessageAt &&
+              target.originalName === nextCustomer.originalName;
+
+            const next = [...prev];
+            next[targetIndex] = nextCustomer;
+            if (sortKeyUnchanged) {
+              return applyReadProtectionToCustomers(next);
+            }
+            return sortCustomerList(applyReadProtectionToCustomers(next));
           });
         };
+        const shouldDeferForUserScroll =
+          !!options?.preserveUi && Date.now() < customerListUserScrollUntilRef.current;
         if (options?.preserveUi) {
-          preserveCustomerListViewport(applySummary, {
-            excludeCustomerIdFromAnchor: normalizedId,
-          });
+          const applyWithViewport = () =>
+            preserveCustomerListViewport(applySummary, {
+              excludeCustomerIdFromAnchor: normalizedId,
+            });
+          if (shouldDeferForUserScroll) {
+            if (customerSummaryDeferredTimerRef.current != null) {
+              window.clearTimeout(customerSummaryDeferredTimerRef.current);
+            }
+            const delayMs = Math.max(80, customerListUserScrollUntilRef.current - Date.now());
+            if (DEBUG_CUSTOMER_SCROLL_DEFER_STATS) {
+              customerSummaryDeferredCountRef.current += 1;
+              customerSummaryDeferredDelayTotalMsRef.current += delayMs;
+              const count = customerSummaryDeferredCountRef.current;
+              if (count === 1 || count % 10 === 0) {
+                console.info("[customer-summary] deferred-during-scroll", {
+                  count,
+                  avgDelayMs: Math.round(customerSummaryDeferredDelayTotalMsRef.current / count),
+                  latestDelayMs: delayMs,
+                });
+              }
+            }
+            customerSummaryDeferredTimerRef.current = window.setTimeout(() => {
+              customerSummaryDeferredTimerRef.current = null;
+              applyWithViewport();
+            }, delayMs);
+          } else {
+            applyWithViewport();
+          }
         } else {
           applySummary();
         }
@@ -2093,7 +2164,7 @@ function HomePageContent() {
             updateCustomerLatestMessage(params.customerId, serverMessage);
             removeOptimisticMessage(params.customerId, optimisticId);
           } else {
-            const errorMessage = data?.error || "消息发送失败";
+            const errorMessage = data?.error || "娑堟伅鍙戦€佸け璐?;
             updateOptimisticMessage(params.customerId, optimisticId, (message) => ({
               ...message,
               deliveryStatus: "FAILED",
@@ -2215,7 +2286,7 @@ function HomePageContent() {
         if (previousWorkspace?.customer?.id === customerId) {
           setCachedWorkspace(customerId, previousWorkspace);
         }
-        throw new Error(data?.error || "更新顾客信息失败");
+        throw new Error(data?.error || "鏇存柊椤惧淇℃伅澶辫触");
       }
 
       const nextCustomer = data.customer;
@@ -2714,7 +2785,7 @@ function HomePageContent() {
   const effectiveAiNotice =
     aiNotice ||
     (hasLatestDraftTranslationFailure
-      ? "日语建议已生成，中文释义暂不可用。"
+      ? "鏃ヨ寤鸿宸茬敓鎴愶紝涓枃閲婁箟鏆備笉鍙敤銆?
       : "");
   const isLatestDraftUsed = !!latestDraft?.selectedVariant;
   const isLatestDraftStale =
@@ -2724,12 +2795,12 @@ function HomePageContent() {
       !!latestDraft.targetCustomerMessageId &&
       latestDraft.targetCustomerMessageId !== workspace.latestCustomerMessageId);
   const shouldDimDraft = isLatestDraftUsed || isLatestDraftStale;
-  const latestDraftPrimaryActionLabel = "生成回复";
+  const latestDraftPrimaryActionLabel = "鐢熸垚鍥炲";
   const latestDraftPrimaryActionHint = !latestDraft
-    ? "当前还没有建议，点击生成回复后会给出两种回复方案。"
+    ? "褰撳墠杩樻病鏈夊缓璁紝鐐瑰嚮鐢熸垚鍥炲鍚庝細缁欏嚭涓ょ鍥炲鏂规銆?
     : isLatestDraftStale
-      ? "当前建议可能不是基于最新对话生成，请重新生成回复。"
-      : "可重新生成回复，调整语气、推进力度或约束。";
+      ? "褰撳墠寤鸿鍙兘涓嶆槸鍩轰簬鏈€鏂板璇濈敓鎴愶紝璇烽噸鏂扮敓鎴愬洖澶嶃€?
+      : "鍙噸鏂扮敓鎴愬洖澶嶏紝璋冩暣璇皵銆佹帹杩涘姏搴︽垨绾︽潫銆?;
   useEffect(() => {
     setCustomReply(null);
     setAiNotice("");
@@ -2759,7 +2830,7 @@ function HomePageContent() {
           return !isAbortError(reason);
         });
         if (hasNonAbortFailure) {
-          setPostGenerateSyncMessage("建议已可用，后台同步失败；稍后会自动重试。");
+          setPostGenerateSyncMessage("寤鸿宸插彲鐢紝鍚庡彴鍚屾澶辫触锛涚◢鍚庝細鑷姩閲嶈瘯銆?);
         }
       } else {
         setPostGenerateSyncMessage("");
@@ -2925,12 +2996,12 @@ function HomePageContent() {
   }, [getMessageSourceText, playSoftTickSound, showOpNotice, translatingMessageIds, updateWorkspaceMessage]);
   const handleCopyFullPrompt = useCallback(async () => {
     if (!workspace) {
-      showOpNotice("请先选择顾客。");
+      showOpNotice("璇峰厛閫夋嫨椤惧銆?);
       return;
     }
     const customerId = String(workspace.customer.id || "").trim();
     if (!customerId) {
-      showOpNotice("请先选择顾客。");
+      showOpNotice("璇峰厛閫夋嫨椤惧銆?);
       return;
     }
 
@@ -2974,7 +3045,7 @@ function HomePageContent() {
     } catch (error) {
       if (!isLatestRequest()) return;
       setCopyPromptStatus("failed");
-      showOpNotice("复制失败，请稍后重试。");
+      showOpNotice("澶嶅埗澶辫触锛岃绋嶅悗閲嶈瘯銆?);
       scheduleCopyPromptStatusReset(1200);
       console.error("copy full prompt failed:", error instanceof Error ? error.message : String(error));
     }
@@ -2982,18 +3053,18 @@ function HomePageContent() {
   const formatGenerationTaskError = useCallback((task: GenerationTaskView) => {
     const code = String(task.errorCode || "").trim();
     const message = String(task.errorMessage || "").trim();
-    if (code === "generation_structured_timeout") return "生成失败：日语 A/B 回复生成超时。";
-    if (code === "translation_structured_timeout") return "生成失败：中文释义翻译超时。";
-    if (code === "generation_structured_failed") return "生成失败：日语 A/B 结构化输出失败。";
-    if (code === "translation_structured_failed") return "生成失败：中文释义结构化输出失败。";
-    if (code === "MODEL_TIMEOUT") return "生成失败：模型响应超时。";
-    if (code === "MODEL_JSON_PARSE_ERROR") return "生成失败：模型 JSON 输出格式错误。";
-    if (code === "MODEL_SCHEMA_INVALID") return "生成失败：模型输出未通过结构校验。";
-    if (code === "generation_missing_japanese_reply") return "生成失败：缺少日语回复内容。";
-    if (code === "translation_missing_reply_meaning") return "生成失败：缺少中文释义。";
-    if (code === "TASK_STALE_TIMEOUT") return "生成失败：任务轮询超时并达到重试上限。";
+    if (code === "generation_structured_timeout") return "鐢熸垚澶辫触锛氭棩璇?A/B 鍥炲鐢熸垚瓒呮椂銆?;
+    if (code === "translation_structured_timeout") return "鐢熸垚澶辫触锛氫腑鏂囬噴涔夌炕璇戣秴鏃躲€?;
+    if (code === "generation_structured_failed") return "鐢熸垚澶辫触锛氭棩璇?A/B 缁撴瀯鍖栬緭鍑哄け璐ャ€?;
+    if (code === "translation_structured_failed") return "鐢熸垚澶辫触锛氫腑鏂囬噴涔夌粨鏋勫寲杈撳嚭澶辫触銆?;
+    if (code === "MODEL_TIMEOUT") return "鐢熸垚澶辫触锛氭ā鍨嬪搷搴旇秴鏃躲€?;
+    if (code === "MODEL_JSON_PARSE_ERROR") return "鐢熸垚澶辫触锛氭ā鍨?JSON 杈撳嚭鏍煎紡閿欒銆?;
+    if (code === "MODEL_SCHEMA_INVALID") return "鐢熸垚澶辫触锛氭ā鍨嬭緭鍑烘湭閫氳繃缁撴瀯鏍￠獙銆?;
+    if (code === "generation_missing_japanese_reply") return "鐢熸垚澶辫触锛氱己灏戞棩璇洖澶嶅唴瀹广€?;
+    if (code === "translation_missing_reply_meaning") return "鐢熸垚澶辫触锛氱己灏戜腑鏂囬噴涔夈€?;
+    if (code === "TASK_STALE_TIMEOUT") return "鐢熸垚澶辫触锛氫换鍔¤疆璇㈣秴鏃跺苟杈惧埌閲嶈瘯涓婇檺銆?;
     if (message) return message;
-    return code ? ("生成失败：" + code) : "生成失败：未知错误。";
+    return code ? ("鐢熸垚澶辫触锛? + code) : "鐢熸垚澶辫触锛氭湭鐭ラ敊璇€?;
   }, []);
   const startGenerationPolling = useCallback((taskId: string, customerId: string) => {
     stopGenerationPollingByCustomer(customerId);
@@ -3032,8 +3103,8 @@ function HomePageContent() {
             setApiError("");
             setAiNotice(
               translationFailed
-                ? "日语建议已生成，中文释义暂不可用。"
-                : "建议已生成。",
+                ? "鏃ヨ寤鸿宸茬敓鎴愶紝涓枃閲婁箟鏆備笉鍙敤銆?
+                : "寤鸿宸茬敓鎴愩€?,
             );
             setRewriteInput("");
           }
@@ -3048,12 +3119,12 @@ function HomePageContent() {
             setApiError(errorText);
             setAiNotice("");
           }
-          showOpNotice("生成失败，请稍后重试。");
+          showOpNotice("鐢熸垚澶辫触锛岃绋嶅悗閲嶈瘯銆?);
           return;
         }
 
         if (selectedCustomerIdRef.current === customerId) {
-          setAiNotice("正在生成回复...");
+          setAiNotice("姝ｅ湪鐢熸垚鍥炲...");
         }
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
@@ -3079,7 +3150,7 @@ function HomePageContent() {
   }, [formatGenerationTaskError, runPostGenerateRefresh, showOpNotice, stopGenerationPollingByCustomer]);
   async function handleRewrite() {
     if (!workspace) {
-      showOpNotice("请先选择顾客。");
+      showOpNotice("璇峰厛閫夋嫨椤惧銆?);
       return;
     }
     const customerId = workspace.customer.id;
@@ -3134,14 +3205,14 @@ function HomePageContent() {
         setApiError("");
         setAiNotice(
           String(data?.translationStatus || "").trim() === "failed"
-            ? "日语建议已生成，中文释义暂不可用。"
-            : "建议已生成。",
+            ? "鏃ヨ寤鸿宸茬敓鎴愶紝涓枃閲婁箟鏆備笉鍙敤銆?
+            : "寤鸿宸茬敓鎴愩€?,
         );
         setRewriteInput("");
         void runPostGenerateRefresh(customerId);
         return;
       }
-      setAiNotice("正在生成回复...");
+      setAiNotice("姝ｅ湪鐢熸垚鍥炲...");
       startGenerationPolling(taskId, customerId);
     } catch (error) {
       console.error(error);
@@ -3151,7 +3222,7 @@ function HomePageContent() {
         return next;
       });
       setApiError(String(error));
-      showOpNotice("生成失败，请稍后重试。");
+      showOpNotice("鐢熸垚澶辫触锛岃绋嶅悗閲嶈瘯銆?);
     }
   }
   async function addAiReplyToChat(
@@ -3160,11 +3231,11 @@ function HomePageContent() {
     variant: "stable" | "advancing"
   ) {
     if (!workspace) {
-      window.alert("当前没有选中的顾客");
+      window.alert("褰撳墠娌℃湁閫変腑鐨勯【瀹?);
       return;
     }
     if (!replyJa.trim()) {
-      window.alert("当前没有可发送的建议回复");
+      window.alert("褰撳墠娌℃湁鍙彂閫佺殑寤鸿鍥炲");
       return;
     }
     try {
@@ -3210,11 +3281,11 @@ function HomePageContent() {
   }
   async function handleSavePreset() {
     if (!presetTitle.trim()) {
-      window.alert("预设名称不能为空");
+      window.alert("棰勮鍚嶇О涓嶈兘涓虹┖");
       return;
     }
     if (!presetContent.trim()) {
-      window.alert("预设内容不能为空");
+      window.alert("棰勮鍐呭涓嶈兘涓虹┖");
       return;
     }
     try {
@@ -3238,13 +3309,13 @@ function HomePageContent() {
       await loadPresetSnippets();
     } catch (error) {
       console.error(error);
-      window.alert("保存预设信息失败，请看终端报错");
+      window.alert("保存预设信息失败，请查看终端报错");
     } finally {
       setIsPresetSaving(false);
     }
   }
   async function handleDeletePreset(id: string) {
-    if (!window.confirm("确认删除这条预设信息吗？")) return;
+    if (!window.confirm("纭鍒犻櫎杩欐潯棰勮淇℃伅鍚楋紵")) return;
     try {
       const response = await fetch(`/api/preset-messages/${id}`, {
         method: "DELETE",
@@ -3259,7 +3330,7 @@ function HomePageContent() {
       await loadPresetSnippets();
     } catch (error) {
       console.error(error);
-      window.alert("删除预设信息失败，请看终端报错");
+      window.alert("删除预设信息失败，请查看终端报错");
     }
   }
   function handleAddImage() {
@@ -3270,11 +3341,11 @@ function HomePageContent() {
   async function uploadImageFiles(files: File[]) {
     const validFiles = files.filter((file) => file.type.startsWith("image/"));
     if (!validFiles.length) {
-      window.alert("只能上传图片文件");
+      window.alert("鍙兘涓婁紶鍥剧墖鏂囦欢");
       return;
     }
     if (validFiles.length !== files.length) {
-      window.alert("已自动忽略非图片文件");
+      window.alert("宸茶嚜鍔ㄥ拷鐣ラ潪鍥剧墖鏂囦欢");
     }
 
     try {
@@ -3289,7 +3360,7 @@ function HomePageContent() {
         });
         const data = await response.json();
         if (!response.ok || !data.ok || !data.image?.url) {
-          throw new Error(data?.error || `上传图片失败：${file.name}`);
+          throw new Error(data?.error || `涓婁紶鍥剧墖澶辫触锛?{file.name}`);
         }
         uploaded.push({
           url: data.image.url,
@@ -3345,84 +3416,95 @@ function HomePageContent() {
   }
   async function handleManualSend() {
     if (!workspace) {
-      window.alert("当前没有选中的顾客");
+      window.alert("褰撳墠娌℃湁閫変腑鐨勯【瀹?");
       return;
     }
     if (!manualReply.trim() && pendingImages.length === 0) {
-      window.alert("请先输入文本或选择图片");
+      window.alert("璇峰厛杈撳叆鏂囨湰鎴栭€夋嫨鍥剧墖");
       return;
     }
     const japaneseText = manualReply.replace(/\r\n/g, "\n").trim();
     const nextImages = [...pendingImages];
+    const dedupeKey = JSON.stringify({
+      customerId: workspace.customer.id,
+      japaneseText,
+      imageUrls: nextImages.map((item) => item.url),
+    });
+    if (manualSendInFlightKeysRef.current.has(dedupeKey)) return;
+    manualSendInFlightKeysRef.current.add(dedupeKey);
     setManualReply("");
     setPendingImages([]);
 
-    if (nextImages.length > 0) {
-      for (let index = 0; index < nextImages.length; index += 1) {
-        const imageItem = nextImages[index];
-        const imageResult = await submitOutboundMessage({
-          customerId: workspace.customer.id,
-          japaneseText: "",
-          imageUrl: imageItem.url,
-          source: "MANUAL",
-          type: "IMAGE",
-        });
-        if (!imageResult.ok) {
-          const remainingImages = nextImages.slice(index);
-          if (japaneseText) {
-            setManualReply(japaneseText);
+    try {
+      if (nextImages.length > 0) {
+        for (let index = 0; index < nextImages.length; index += 1) {
+          const imageItem = nextImages[index];
+          const imageResult = await submitOutboundMessage({
+            customerId: workspace.customer.id,
+            japaneseText: "",
+            imageUrl: imageItem.url,
+            source: "MANUAL",
+            type: "IMAGE",
+          });
+          if (!imageResult.ok) {
+            const remainingImages = nextImages.slice(index);
+            if (japaneseText) {
+              setManualReply(japaneseText);
+            }
+            setPendingImages(remainingImages);
+            window.alert(remainingImages.length > 1 ? "閮ㄥ垎鍥剧墖鍙戦€佸け璐ワ紝鍓╀綑鍥剧墖宸蹭繚鐣欙紝璇烽噸璇?" : "鍥剧墖鍙戦€佸け璐ワ紝璇烽噸璇?");
+            return;
           }
-          setPendingImages(remainingImages);
-          window.alert(remainingImages.length > 1 ? "部分图片发送失败，剩余图片已保留，请重试" : "图片发送失败，请重试");
-          return;
         }
+
+        if (japaneseText) {
+          const textResult = await submitOutboundMessage({
+            customerId: workspace.customer.id,
+            japaneseText,
+            source: "MANUAL",
+            type: "TEXT",
+          });
+          if (!textResult.ok) {
+            setManualReply(japaneseText);
+            window.alert("鍥剧墖宸叉帓闃熷彂閫侊紝浣嗚ˉ鍏呮枃瀛楀彂閫佸け璐ワ紝璇烽噸璇曟枃瀛楁秷鎭?");
+          }
+        }
+        return;
       }
 
-      if (japaneseText) {
-        const textResult = await submitOutboundMessage({
-          customerId: workspace.customer.id,
-          japaneseText,
-          source: "MANUAL",
-          type: "TEXT",
-        });
-        if (!textResult.ok) {
-          setManualReply(japaneseText);
-          window.alert("图片已排队发送，但补充文字发送失败，请重试文字消息");
-        }
-      }
-      return;
+      await submitOutboundMessage({
+        customerId: workspace.customer.id,
+        japaneseText,
+        source: "MANUAL",
+        type: "TEXT",
+      });
+    } finally {
+      manualSendInFlightKeysRef.current.delete(dedupeKey);
     }
-
-    void submitOutboundMessage({
-      customerId: workspace.customer.id,
-      japaneseText,
-      source: "MANUAL",
-      type: "TEXT",
-    });
   }
   async function handleSendSticker() {
     if (!workspace) {
-      window.alert("当前没有选中的顾客");
+      window.alert("褰撳墠娌℃湁閫変腑鐨勯【瀹?);
       return;
     }
 
-    const packageIdInput = window.prompt("请输入 LINE 贴图 packageId", "11537");
+    const packageIdInput = window.prompt("璇疯緭鍏?LINE 璐村浘 packageId", "11537");
     if (packageIdInput === null) return;
-    const stickerIdInput = window.prompt("请输入 LINE 贴图 stickerId", "52002734");
+    const stickerIdInput = window.prompt("璇疯緭鍏?LINE 璐村浘 stickerId", "52002734");
     if (stickerIdInput === null) return;
 
     const stickerPackageId = packageIdInput.trim();
     const stickerId = stickerIdInput.trim();
 
     if (!stickerPackageId || !stickerId) {
-      window.alert("packageId 和 stickerId 都不能为空");
+      window.alert("packageId 鍜?stickerId 閮戒笉鑳戒负绌?);
       return;
     }
 
     setIsComposerMenuOpen(false);
     const result = await submitOutboundMessage({
       customerId: workspace.customer.id,
-      japaneseText: "[贴图]",
+      japaneseText: "[璐村浘]",
       source: "MANUAL",
       type: "STICKER",
       stickerPackageId,
@@ -3430,38 +3512,38 @@ function HomePageContent() {
     });
 
     if (!result.ok) {
-      window.alert("贴图发送失败，请重试");
+      window.alert("璐村浘鍙戦€佸け璐ワ紝璇烽噸璇?);
     }
   }
   async function handleScheduleManualSend() {
     if (!workspace) {
-      window.alert("当前没有选中的顾客");
+      window.alert("褰撳墠娌℃湁閫変腑鐨勯【瀹?);
       return;
     }
     if (pendingImages.length > 0) {
-      window.alert("定时发送当前只支持文字。图片请直接发送，不要加入定时发送。");
+      window.alert("瀹氭椂鍙戦€佸綋鍓嶅彧鏀寔鏂囧瓧銆傚浘鐗囪鐩存帴鍙戦€侊紝涓嶈鍔犲叆瀹氭椂鍙戦€併€?);
       return;
     }
     if (!manualReply.trim()) {
-      window.alert("请先输入要定时发送的文字内容");
+      window.alert("璇峰厛杈撳叆瑕佸畾鏃跺彂閫佺殑鏂囧瓧鍐呭");
       return;
     }
     if (!scheduleAtInput) {
-      window.alert("请选择定时发送时间");
+      window.alert("璇烽€夋嫨瀹氭椂鍙戦€佹椂闂?);
       return;
     }
     const scheduledFor = new Date(scheduleAtInput);
     if (!Number.isFinite(scheduledFor.getTime())) {
-      window.alert("定时发送时间格式不正确");
+      window.alert("瀹氭椂鍙戦€佹椂闂存牸寮忎笉姝ｇ‘");
       return;
     }
     const diffMs = scheduledFor.getTime() - Date.now();
     if (diffMs < 5 * 60 * 1000) {
-      window.alert("请至少提前 5 分钟设置定时发送。");
+      window.alert("璇疯嚦灏戞彁鍓?5 鍒嗛挓璁剧疆瀹氭椂鍙戦€併€?);
       return;
     }
     if (diffMs > 24 * 60 * 60 * 1000) {
-      window.alert("当前定时发送最多支持 24 小时以内。");
+      window.alert("褰撳墠瀹氭椂鍙戦€佹渶澶氭敮鎸?24 灏忔椂浠ュ唴銆?);
       return;
     }
     const japaneseText = manualReply.replace(/\r\n/g, "\n");
@@ -3482,7 +3564,7 @@ function HomePageContent() {
       });
       const data = await response.json();
       if (!response.ok || !data.ok) {
-        throw new Error(data?.error || "创建定时发送失败");
+        throw new Error(data?.error || "鍒涘缓瀹氭椂鍙戦€佸け璐?);
       }
       setManualReply("");
       setPendingImages([]);
@@ -3492,27 +3574,27 @@ function HomePageContent() {
       await loadCustomers({ preserveUi: true });
     } catch (error) {
       console.error(error);
-      window.alert(error instanceof Error ? error.message : "创建定时发送失败");
+      window.alert(error instanceof Error ? error.message : "鍒涘缓瀹氭椂鍙戦€佸け璐?);
     } finally {
       setIsSchedulingManual(false);
     }
   }
   async function handleCancelScheduledMessage(scheduledMessageId: string) {
     if (!workspace) return;
-    if (!window.confirm("确认取消这条定时发送吗？")) return;
+    if (!window.confirm("纭鍙栨秷杩欐潯瀹氭椂鍙戦€佸悧锛?)) return;
     try {
       const response = await fetch(`/api/scheduled-messages/${scheduledMessageId}`, {
         method: "DELETE",
       });
       const data = await response.json();
       if (!response.ok || !data.ok) {
-        throw new Error(data?.error || "取消定时发送失败");
+        throw new Error(data?.error || "鍙栨秷瀹氭椂鍙戦€佸け璐?);
       }
       await loadWorkspace(workspace.customer.id, { preserveUi: true, source: "schedule-refresh" });
       await loadCustomers({ preserveUi: true });
     } catch (error) {
       console.error(error);
-      window.alert(error instanceof Error ? error.message : "取消定时发送失败");
+      window.alert(error instanceof Error ? error.message : "鍙栨秷瀹氭椂鍙戦€佸け璐?);
     }
   }
   async function handleRetryMessage(messageId: string) {
@@ -3561,7 +3643,7 @@ function HomePageContent() {
         updateCustomerLatestMessage(workspace.customer.id, serverMessage);
       }
       if (!response.ok || !data.ok) {
-        throw new Error(data?.error || "重发失败");
+        throw new Error(data?.error || "閲嶅彂澶辫触");
       }
     } catch (error) {
       console.error(error);
@@ -3615,7 +3697,7 @@ function HomePageContent() {
       });
     } catch (error) {
       console.error(error);
-      window.alert("置顶状态更新失败");
+      window.alert("缃《鐘舵€佹洿鏂板け璐?);
     }
   }
   function closeCustomerTagMenus() {
@@ -3626,7 +3708,7 @@ function HomePageContent() {
   function handleOpenTagCreateDialog() {
     const customerId = contextMenuCustomer?.id || "";
     if (!customerId) {
-      setTagCreateError("请先选择顾客");
+      setTagCreateError("璇峰厛閫夋嫨椤惧");
       return;
     }
     setTagDialogTargetCustomerId(customerId);
@@ -3679,7 +3761,7 @@ function HomePageContent() {
       closeCustomerTagMenus();
     } catch (error) {
       console.error("toggle customer tag error:", error);
-      showOpNotice("标签更新失败");
+      showOpNotice("鏍囩鏇存柊澶辫触");
     } finally {
       setUpdatingCustomerTagKey("");
     }
@@ -3688,15 +3770,15 @@ function HomePageContent() {
     const targetCustomerId = tagDialogTargetCustomerId.trim();
     const trimmedName = newTagName.trim();
     if (!trimmedName) {
-      setTagCreateError("请输入 1-20 个字符的标签名");
+      setTagCreateError("璇疯緭鍏?1-20 涓瓧绗︾殑鏍囩鍚?);
       return;
     }
     if (trimmedName.length > 20) {
-      setTagCreateError("请输入 1-20 个字符的标签名");
+      setTagCreateError("璇疯緭鍏?1-20 涓瓧绗︾殑鏍囩鍚?);
       return;
     }
     if (allTags.length >= 10) {
-      setTagCreateError("最多只能创建 10 个标签");
+      setTagCreateError("鏈€澶氬彧鑳藉垱寤?10 涓爣绛?);
       return;
     }
     setIsCreatingTag(true);
@@ -3765,7 +3847,7 @@ function HomePageContent() {
     const targetTag = tagDeleteTarget;
     const targetTagId = String(targetTag?.id || "").trim();
     if (!targetTagId) {
-      setTagDeleteError("请选择要删除的标签");
+      setTagDeleteError("璇烽€夋嫨瑕佸垹闄ょ殑鏍囩");
       return;
     }
     setIsDeletingTag(true);
@@ -3778,11 +3860,11 @@ function HomePageContent() {
       if (!response.ok || !data?.ok) {
         const code = String(data?.error || "");
         if (code === "tag_not_found") {
-          setTagDeleteError("标签不存在，可能已被删除");
+          setTagDeleteError("鏍囩涓嶅瓨鍦紝鍙兘宸茶鍒犻櫎");
         } else if (code === "invalid_tag_id") {
-          setTagDeleteError("标签标识无效");
+          setTagDeleteError("鏍囩鏍囪瘑鏃犳晥");
         } else {
-          setTagDeleteError("删除标签失败");
+          setTagDeleteError("鍒犻櫎鏍囩澶辫触");
         }
         return;
       }
@@ -3812,7 +3894,7 @@ function HomePageContent() {
       resetTagDeleteDialogState();
     } catch (error) {
       console.error("delete tag error:", error);
-      setTagDeleteError("删除标签失败");
+      setTagDeleteError("鍒犻櫎鏍囩澶辫触");
     } finally {
       setIsDeletingTag(false);
     }
@@ -3820,7 +3902,7 @@ function HomePageContent() {
   async function handleRenameCustomer(customer: CustomerListItem) {
     setCustomerContextMenu(null);
     const nextRemarkName = window.prompt(
-      "请输入备注名（留空会清除备注）",
+      "璇疯緭鍏ュ娉ㄥ悕锛堢暀绌轰細娓呴櫎澶囨敞锛?,
       customer.remarkName || ""
     );
     if (nextRemarkName === null) return;
@@ -3830,7 +3912,7 @@ function HomePageContent() {
       });
     } catch (error) {
       console.error(error);
-      window.alert("备注名更新失败");
+      window.alert("澶囨敞鍚嶆洿鏂板け璐?);
     }
   }
   async function handleLogout() {
@@ -3859,6 +3941,7 @@ function HomePageContent() {
     const container = customerListScrollRef.current;
     if (!container) return;
     customerListLatestScrollTopRef.current = container.scrollTop;
+    customerListUserScrollUntilRef.current = Date.now() + 320;
   }
   const contextMenuCustomer = customerContextMenu?.customer || null;
   const canCreateMoreTags = allTags.length < 10;
@@ -3907,7 +3990,7 @@ function HomePageContent() {
       >
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <button onClick={handleCollapseChat} className="text-lg font-bold text-left text-gray-900 hover:text-emerald-700 transition">顾客列表</button>
+            <button onClick={handleCollapseChat} className="text-lg font-bold text-left text-gray-900 hover:text-emerald-700 transition">椤惧鍒楄〃</button>
             {totalUnreadCount > 0 ? (
               <span className="inline-flex min-w-6 items-center justify-center rounded-full bg-emerald-600 px-2 py-0.5 text-[11px] font-semibold text-white">
                 {totalUnreadCount > 99 ? "99+" : totalUnreadCount}
@@ -3918,7 +4001,7 @@ function HomePageContent() {
             href="/followups"
             className="inline-flex shrink-0 items-center gap-2 rounded-full border border-neutral-300 bg-white px-3 py-1 text-xs font-medium text-neutral-700 shadow-sm transition hover:bg-neutral-50"
           >
-            <span>跟进列表</span>
+            <span>璺熻繘鍒楄〃</span>
             {overdueFollowupCount > 0 ? (
               <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-red-500 px-1.5 py-0.5 text-[10px] font-semibold text-white">
                 {overdueFollowupCount > 99 ? "99+" : overdueFollowupCount}
@@ -3930,19 +4013,22 @@ function HomePageContent() {
           type="text"
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
-          placeholder="搜索备注、昵称、标签、最后一条消息"
+          placeholder="鎼滅储澶囨敞銆佹樀绉般€佹爣绛俱€佹渶鍚庝竴鏉℃秷鎭?
           className="w-full border border-gray-200 bg-white rounded-xl px-3 py-2 text-sm mb-4 shadow-sm outline-none focus:border-green-300"
         />
         {pageError ? (
           <div className="mb-3 text-xs text-red-500 break-all">{pageError}</div>
         ) : null}
         {isListLoading ? (
-          <div className="text-sm text-gray-500">顾客列表加载中...</div>
+          <div className="text-sm text-gray-500">椤惧鍒楄〃鍔犺浇涓?..</div>
         ) : (
           <div className="space-y-2">
             {displayedCustomers.map((customer) => {
               const isActive = customer.id === selectedCustomerId;
-              const latestPreview = customer.latestMessage?.previewText || "暂时还没有消息";
+              const latestPreview = customer.latestMessage?.previewText || "鏆傛椂杩樻病鏈夋秷鎭?;
+              const latestDeliveryFailed =
+                customer.latestMessage?.role === "OPERATOR" && customer.latestMessage?.deliveryStatus === "FAILED";
+              const latestSendError = latestDeliveryFailed ? customer.latestMessage?.sendError?.trim() || "" : "";
               return (
                 <div
                   key={customer.id}
@@ -3980,10 +4066,10 @@ function HomePageContent() {
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0 flex items-center gap-1.5">
                           {customer.pinnedAt ? (
-                            <span className="text-[12px] leading-none" title="已置顶">📌</span>
+                            <span className="text-[12px] leading-none" title="宸茬疆椤?>馃搶</span>
                           ) : null}
                           {customer.followup?.isOverdue ? (
-                            <span className="h-2 w-2 shrink-0 rounded-full bg-red-500" title="跟进已到期" />
+                            <span className="h-2 w-2 shrink-0 rounded-full bg-red-500" title="璺熻繘宸插埌鏈? />
                           ) : null}
                         <div className={`truncate text-[14px] font-semibold ${customer.unreadCount > 0 ? "text-slate-950" : "text-gray-900"}`}>
                           {getDisplayName(customer)}
@@ -3997,6 +4083,13 @@ function HomePageContent() {
                         <div className={`min-w-0 flex-1 truncate text-[12px] ${customer.unreadCount > 0 ? "text-slate-700" : "text-gray-500"}`}>
                           {latestPreview}
                         </div>
+                        {latestDeliveryFailed ? (
+                          <span
+                            className="shrink-0 rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[10px] font-medium text-rose-600"
+                            title={latestSendError || "鍙戦€佸け璐?}
+                          >
+                            鍙戦€佸け璐?                          </span>
+                        ) : null}
                         {customer.tags.length > 0 ? (
                           <div className="shrink-0 flex max-w-[140px] items-center gap-1 overflow-hidden whitespace-nowrap">
                             {customer.tags.slice(0, 2).map((tag) => (
@@ -4032,17 +4125,17 @@ function HomePageContent() {
               );
             })}
             {displayedCustomers.length === 0 && (
-              <div className="text-sm text-gray-500 p-3">没有搜索到相关顾客</div>
+              <div className="text-sm text-gray-500 p-3">娌℃湁鎼滅储鍒扮浉鍏抽【瀹?/div>
             )}
             <div ref={customerListLoadMoreRef} className="h-6 flex items-center justify-center text-xs text-gray-400">
-              {isLoadingMoreCustomers ? "正在加载更多顾客..." : hasMoreCustomers ? "下滑继续加载更多" : displayedCustomers.length > 0 ? "已经到底了" : ""}
+              {isLoadingMoreCustomers ? "姝ｅ湪鍔犺浇鏇村椤惧..." : hasMoreCustomers ? "涓嬫粦缁х画鍔犺浇鏇村" : displayedCustomers.length > 0 ? "宸茬粡鍒板簳浜? : ""}
             </div>
           </div>
         )}
       </div>
       <div className="w-[46%] flex flex-col bg-gray-50">
         <div className="border-b bg-white px-4 py-3 flex flex-wrap items-center gap-2">
-          <div className="font-bold">{selectedCustomerId ? getDisplayName(workspace?.customer || null) : "未打开顾客会话"}</div>
+          <div className="font-bold">{selectedCustomerId ? getDisplayName(workspace?.customer || null) : "鏈墦寮€椤惧浼氳瘽"}</div>
           {workspace?.customer && getSecondaryName(workspace.customer) ? (
             <div className="order-3 w-full text-xs text-gray-500">
               {getSecondaryName(workspace.customer)}
@@ -4050,11 +4143,11 @@ function HomePageContent() {
           ) : null}
           {workspace?.customer?.lineRelationshipStatus === "UNFOLLOWED" ? (
             <div className="order-2 inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-[11px] font-medium text-rose-700">
-              顾客已取消关注
+              椤惧宸插彇娑堝叧娉?
             </div>
           ) : workspace?.customer && shouldShowRefollowNotice(workspace.customer.lineRefollowedAt, workspace.customer.lineRelationshipStatus) ? (
             <div className="order-2 inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[11px] font-medium text-emerald-700">
-              顾客重新加为好友
+              椤惧閲嶆柊鍔犱负濂藉弸
             </div>
           ) : null}
           {workspace?.customer?.followup ? (
@@ -4066,14 +4159,14 @@ function HomePageContent() {
                 {getFollowupTierLabel(workspace.customer.followup.tier)}
               </span>
               <span className={workspace.customer.followup.isOverdue ? "text-red-600 font-medium" : "text-gray-600"}>
-                下次跟进：{formatFollowupTime(workspace.customer.followup.nextFollowupAt)}
+                涓嬫璺熻繘锛歿formatFollowupTime(workspace.customer.followup.nextFollowupAt)}
               </span>
-              <span className="truncate">原因：{workspace.customer.followup.reason}</span>
+              <span className="truncate">鍘熷洜锛歿workspace.customer.followup.reason}</span>
               <Link
                 href={`/followups?customerId=${workspace.customer.id}`}
                 className="rounded-full border border-gray-200 bg-white px-2.5 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50 sm:ml-auto"
               >
-                编辑跟进
+                缂栬緫璺熻繘
               </Link>
             </div>
           ) : null}
@@ -4084,17 +4177,17 @@ function HomePageContent() {
           className="flex-1 p-4 space-y-4 overflow-y-auto"
         >
           {isWorkspaceLoading ? (
-            <div className="text-sm text-gray-500">聊天内容加载中...</div>
+            <div className="text-sm text-gray-500">鑱婂ぉ鍐呭鍔犺浇涓?..</div>
           ) : !selectedCustomerId ? (
             <div className="flex h-full items-center justify-center">
               <div className="rounded-2xl border border-dashed border-gray-300 bg-white/70 px-6 py-8 text-center text-sm text-gray-500 shadow-sm">
-                请先从左侧顾客列表中手动选择一位顾客
+                璇峰厛浠庡乏渚ч【瀹㈠垪琛ㄤ腑鎵嬪姩閫夋嫨涓€浣嶉【瀹?
               </div>
             </div>
           ) : !workspace ? (
-            <div className="text-sm text-gray-500">当前没有顾客数据</div>
+            <div className="text-sm text-gray-500">褰撳墠娌℃湁椤惧鏁版嵁</div>
           ) : displayedWorkspaceMessages.length === 0 ? (
-            <div className="text-sm text-gray-500">当前顾客还没有聊天记录</div>
+            <div className="text-sm text-gray-500">褰撳墠椤惧杩樻病鏈夎亰澶╄褰?/div>
           ) : (
             displayedWorkspaceMessages.map((msg, index) => {
               const previousMessage = index > 0 ? displayedWorkspaceMessages[index - 1] : null;
@@ -4164,13 +4257,13 @@ function HomePageContent() {
                               <a href={msg.imageUrl} target="_blank" rel="noreferrer" className="block">
                                 <img
                                   src={msg.imageUrl}
-                                  alt="聊天图片"
+                                  alt="鑱婂ぉ鍥剧墖"
                                   className="rounded-xl max-h-72 w-auto max-w-[240px] object-cover border border-black/5"
                                 />
                               </a>
                             ) : (
                               <div className="rounded-lg bg-gray-200 h-36 w-56 flex items-center justify-center text-gray-600">
-                                图片不可用
+                                鍥剧墖涓嶅彲鐢?
                               </div>
                             )}
                             {msg.japaneseText ? (
@@ -4191,11 +4284,11 @@ function HomePageContent() {
                         ) : (
                           <>
                             <div className={`rounded-xl border px-3 py-2 ${msg.role === "CUSTOMER" ? "border-gray-200 bg-gray-50 text-gray-700" : "border-white/20 bg-white/15 text-white"}`}>
-                              <div className="text-xs font-semibold tracking-wide">LINE贴图</div>
+                              <div className="text-xs font-semibold tracking-wide">LINE璐村浘</div>
                               <div className="mt-1 text-xs opacity-80">packageId: {msg.stickerPackageId || "-"}</div>
                               <div className="text-xs opacity-80">stickerId: {msg.stickerId || "-"}</div>
                             </div>
-                            {msg.japaneseText && msg.japaneseText !== "[贴图]" ? (
+                            {msg.japaneseText && msg.japaneseText !== "[璐村浘]" ? (
                               <div className="mt-2 whitespace-pre-wrap">{msg.japaneseText}</div>
                             ) : null}
                           </>
@@ -4225,7 +4318,7 @@ function HomePageContent() {
                             disabled={retryingMessageId === msg.id}
                             className="rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-600 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
                           >
-                            {retryingMessageId === msg.id ? "重发中..." : "重发"}
+                            {retryingMessageId === msg.id ? "閲嶅彂涓?.." : "閲嶅彂"}
                           </button>
                         ) : null}
                       </div>
@@ -4262,14 +4355,14 @@ function HomePageContent() {
               <div className="mb-3 rounded-2xl border border-gray-200 bg-gray-50 p-3">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <div className="text-sm font-medium text-gray-900">已上传 {pendingImages.length} 张图片</div>
-                    <div className="mt-1 text-xs text-gray-500">发送时会按顺序逐张发送；你也可以补充一条文字，系统会拆成“多张图片 + 文字”消息。</div>
+                    <div className="text-sm font-medium text-gray-900">宸蹭笂浼?{pendingImages.length} 寮犲浘鐗?/div>
+                    <div className="mt-1 text-xs text-gray-500">鍙戦€佹椂浼氭寜椤哄簭閫愬紶鍙戦€侊紱浣犱篃鍙互琛ュ厖涓€鏉℃枃瀛楋紝绯荤粺浼氭媶鎴愨€滃寮犲浘鐗?+ 鏂囧瓧鈥濇秷鎭€?/div>
                   </div>
                   <button
                     onClick={clearPendingImages}
                     className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 hover:bg-gray-50"
                   >
-                    清空
+                    娓呯┖
                   </button>
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -4285,7 +4378,7 @@ function HomePageContent() {
                         onClick={() => removePendingImage(image.url)}
                         className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
                       >
-                        移除
+                        绉婚櫎
                       </button>
                     </div>
                   ))}
@@ -4297,7 +4390,7 @@ function HomePageContent() {
                 <button
                   onClick={() => setIsComposerMenuOpen((prev) => !prev)}
                   className="h-10 w-10 rounded-full border border-gray-300 bg-white text-xl text-gray-700 hover:bg-gray-50"
-                  title="更多操作"
+                  title="鏇村鎿嶄綔"
                 >
                   +
                 </button>
@@ -4307,15 +4400,15 @@ function HomePageContent() {
                       onClick={handleAddImage}
                       className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50"
                     >
-                      添加图片
-                      <div className="text-[11px] text-gray-400 mt-1">支持点击选择，也支持把图片拖到输入区</div>
+                      娣诲姞鍥剧墖
+                      <div className="text-[11px] text-gray-400 mt-1">鏀寔鐐瑰嚮閫夋嫨锛屼篃鏀寔鎶婂浘鐗囨嫋鍒拌緭鍏ュ尯</div>
                     </button>
                     <button
                       onClick={openPresetPanel}
                       className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50 border-t border-gray-100"
                     >
-                      预设信息
-                      <div className="text-[11px] text-gray-400 mt-1">点一下填入输入框</div>
+                      棰勮淇℃伅
+                      <div className="text-[11px] text-gray-400 mt-1">鐐逛竴涓嬪～鍏ヨ緭鍏ユ</div>
                     </button>
                   </div>
                 ) : null}
@@ -4326,7 +4419,7 @@ function HomePageContent() {
                 onChange={(e) => setManualReply(e.target.value)}
                 onKeyDown={handleManualReplyKeyDown}
                 rows={1}
-                placeholder={pendingImages.length > 0 ? "可选填写补充文字；发送时会拆成“多张图片 + 文字”多条消息…" : "输入要发送给顾客的日语内容…"}
+                placeholder={pendingImages.length > 0 ? "鍙€夊～鍐欒ˉ鍏呮枃瀛楋紱鍙戦€佹椂浼氭媶鎴愨€滃寮犲浘鐗?+ 鏂囧瓧鈥濆鏉℃秷鎭€? : "杈撳叆瑕佸彂閫佺粰椤惧鐨勬棩璇唴瀹光€?}
                 className="min-h-[44px] max-h-44 flex-1 rounded-xl border border-gray-300 bg-white px-4 py-[10px] leading-6 resize-none whitespace-pre-wrap break-words outline-none focus:border-green-300 focus:ring-2 focus:ring-green-100"
               />
               <div className="relative" ref={schedulePanelRef}>
@@ -4339,12 +4432,12 @@ function HomePageContent() {
                   disabled={!workspace}
                   className="rounded-xl border border-gray-300 bg-white px-3 py-2.5 text-sm text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  定时发送
+                  瀹氭椂鍙戦€?
                 </button>
                 {isSchedulePanelOpen ? (
                   <div className="absolute bottom-14 right-0 z-20 w-[320px] rounded-2xl border border-gray-200 bg-white p-4 shadow-2xl">
-                    <div className="text-sm font-semibold text-gray-900">定时发送</div>
-                    <div className="mt-1 text-xs text-gray-500">请至少提前 5 分钟，且不超过 24 小时。到点后系统会自动发送，就算你关掉页面也照样会发。当前定时发送只支持文字。</div>
+                    <div className="text-sm font-semibold text-gray-900">瀹氭椂鍙戦€?/div>
+                    <div className="mt-1 text-xs text-gray-500">璇疯嚦灏戞彁鍓?5 鍒嗛挓锛屼笖涓嶈秴杩?24 灏忔椂銆傚埌鐐瑰悗绯荤粺浼氳嚜鍔ㄥ彂閫侊紝灏辩畻浣犲叧鎺夐〉闈篃鐓ф牱浼氬彂銆傚綋鍓嶅畾鏃跺彂閫佸彧鏀寔鏂囧瓧銆?/div>
                     <input
                       type="datetime-local"
                       step={1800}
@@ -4359,7 +4452,7 @@ function HomePageContent() {
                         onClick={() => setIsSchedulePanelOpen(false)}
                         className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 hover:bg-gray-50"
                       >
-                        取消
+                        鍙栨秷
                       </button>
                       <button
                         type="button"
@@ -4367,7 +4460,7 @@ function HomePageContent() {
                         disabled={!canScheduleManual}
                         className="rounded-xl bg-green-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-60"
                       >
-                        {isSchedulingManual ? "加入中..." : "加入定时发送"}
+                        {isSchedulingManual ? "鍔犲叆涓?.." : "鍔犲叆瀹氭椂鍙戦€?}
                       </button>
                     </div>
                   </div>
@@ -4378,18 +4471,18 @@ function HomePageContent() {
                 disabled={!canManualSend}
                 className="bg-green-600 text-white px-4 py-2.5 rounded-xl disabled:opacity-60"
               >
-                {isUploadingImage ? "上传中..." : pendingImages.length > 0 ? `发送${pendingImages.length}张图片` : "发送"}
+                {isUploadingImage ? "涓婁紶涓?.." : pendingImages.length > 0 ? `鍙戦€?{pendingImages.length}寮犲浘鐗嘸 : "鍙戦€?}
               </button>
             </div>
             {workspace?.scheduledMessages?.length ? (
               <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-3">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <div className="text-sm font-semibold text-gray-900">已排队的定时发送</div>
-                    <div className="mt-1 text-[11px] text-gray-500">这里只显示还没完成的任务。发出去后，它会正常出现在聊天记录里。</div>
+                    <div className="text-sm font-semibold text-gray-900">宸叉帓闃熺殑瀹氭椂鍙戦€?/div>
+                    <div className="mt-1 text-[11px] text-gray-500">杩欓噷鍙樉绀鸿繕娌″畬鎴愮殑浠诲姟銆傚彂鍑哄幓鍚庯紝瀹冧細姝ｅ父鍑虹幇鍦ㄨ亰澶╄褰曢噷銆?/div>
                   </div>
                   <span className="rounded-full bg-white px-2 py-1 text-[11px] text-gray-500 border border-gray-200">
-                    {workspace.scheduledMessages.length} 条
+                    {workspace.scheduledMessages.length} 鏉?
                   </span>
                 </div>
                 <div className="mt-3 space-y-2">
@@ -4405,10 +4498,10 @@ function HomePageContent() {
                               </span>
                               <span className="text-[11px] text-gray-500">{formatScheduledTime(item.scheduledFor)}</span>
                               {item.type === "IMAGE" ? (
-                                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600 border border-slate-200">图片</span>
+                                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600 border border-slate-200">鍥剧墖</span>
                               ) : null}
                             </div>
-                            <div className="mt-2 whitespace-pre-wrap break-words text-sm text-gray-900">{item.japaneseText || "（仅图片，无补充文字）"}</div>
+                            <div className="mt-2 whitespace-pre-wrap break-words text-sm text-gray-900">{item.japaneseText || "锛堜粎鍥剧墖锛屾棤琛ュ厖鏂囧瓧锛?}</div>
                             {item.sendError ? (
                               <div className="mt-2 text-[11px] text-rose-500 break-all">{item.sendError}</div>
                             ) : null}
@@ -4419,7 +4512,7 @@ function HomePageContent() {
                               onClick={() => handleCancelScheduledMessage(item.id)}
                               className="shrink-0 rounded-xl border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
                             >
-                              取消
+                              鍙栨秷
                             </button>
                           ) : null}
                         </div>
@@ -4434,8 +4527,8 @@ function HomePageContent() {
             <div className="absolute bottom-20 left-4 z-30 w-[420px] max-w-[calc(100%-2rem)] rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3 border-b bg-gray-50">
                 <div>
-                  <div className="font-semibold text-gray-900">预设信息</div>
-                  <div className="text-xs text-gray-500 mt-1">点击左侧预设，可直接填入输入框</div>
+                  <div className="font-semibold text-gray-900">棰勮淇℃伅</div>
+                  <div className="text-xs text-gray-500 mt-1">鐐瑰嚮宸︿晶棰勮锛屽彲鐩存帴濉叆杈撳叆妗?/div>
                 </div>
                 <button
                   onClick={() => {
@@ -4444,15 +4537,15 @@ function HomePageContent() {
                   }}
                   className="text-sm text-gray-500 hover:text-gray-800"
                 >
-                  关闭
+                  鍏抽棴
                 </button>
               </div>
               <div className="grid grid-cols-[1.2fr_1fr] max-h-[440px]">
                 <div className="border-r border-gray-100 overflow-y-auto p-3 space-y-2">
                   {isPresetLoading ? (
-                    <div className="text-sm text-gray-500 px-2 py-3">读取中...</div>
+                    <div className="text-sm text-gray-500 px-2 py-3">璇诲彇涓?..</div>
                   ) : presetSnippets.length === 0 ? (
-                    <div className="text-sm text-gray-500 px-2 py-3">还没有预设信息，右侧先新增一条。</div>
+                    <div className="text-sm text-gray-500 px-2 py-3">杩樻病鏈夐璁句俊鎭紝鍙充晶鍏堟柊澧炰竴鏉°€?/div>
                   ) : (
                     presetSnippets.map((item) => (
                       <div key={item.id} className="rounded-xl border border-gray-200 bg-white p-3 hover:border-gray-300">
@@ -4468,13 +4561,13 @@ function HomePageContent() {
                             onClick={() => startEditPreset(item)}
                             className="text-xs px-2 py-1 rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100"
                           >
-                            编辑
+                            缂栬緫
                           </button>
                           <button
                             onClick={() => handleDeletePreset(item.id)}
                             className="text-xs px-2 py-1 rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100"
                           >
-                            删除
+                            鍒犻櫎
                           </button>
                         </div>
                       </div>
@@ -4483,25 +4576,25 @@ function HomePageContent() {
                 </div>
                 <div className="p-3 space-y-3 bg-gray-50/60">
                   <div className="text-sm font-medium text-gray-900">
-                    {editingPresetId ? "编辑预设" : "新增预设"}
+                    {editingPresetId ? "缂栬緫棰勮" : "鏂板棰勮"}
                   </div>
                   <div>
-                    <div className="text-xs text-gray-500 mb-1">名称（只给你自己看）</div>
+                    <div className="text-xs text-gray-500 mb-1">鍚嶇О锛堝彧缁欎綘鑷繁鐪嬶級</div>
                     <input
                       type="text"
                       value={presetTitle}
                       onChange={(e) => setPresetTitle(e.target.value)}
                       className="w-full rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm"
-                      placeholder="例如：报价链接"
+                      placeholder="渚嬪锛氭姤浠烽摼鎺?
                     />
                   </div>
                   <div>
-                    <div className="text-xs text-gray-500 mb-1">内容（点击预设会填入输入框）</div>
+                    <div className="text-xs text-gray-500 mb-1">鍐呭锛堢偣鍑婚璁句細濉叆杈撳叆妗嗭級</div>
                     <textarea
                       value={presetContent}
                       onChange={(e) => setPresetContent(e.target.value)}
                       className="w-full min-h-[160px] rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm resize-none"
-                      placeholder="例如：这里填写固定报价说明或链接"
+                      placeholder="渚嬪锛氳繖閲屽～鍐欏浐瀹氭姤浠疯鏄庢垨閾炬帴"
                     />
                   </div>
                   <div className="flex gap-2">
@@ -4510,13 +4603,13 @@ function HomePageContent() {
                       disabled={isPresetSaving}
                       className="flex-1 rounded-xl bg-gray-900 px-3 py-2 text-sm text-white disabled:opacity-60"
                     >
-                      {isPresetSaving ? "保存中..." : editingPresetId ? "保存修改" : "新增预设"}
+                      {isPresetSaving ? "淇濆瓨涓?.." : editingPresetId ? "淇濆瓨淇敼" : "鏂板棰勮"}
                     </button>
                     <button
                       onClick={resetPresetForm}
                       className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700"
                     >
-                      清空
+                      娓呯┖
                     </button>
                   </div>
                 </div>
@@ -4575,7 +4668,7 @@ function HomePageContent() {
             }}
             className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50"
           >
-            复制此消息
+            澶嶅埗姝ゆ秷鎭?
           </button>
           <button
             type="button"
@@ -4629,7 +4722,7 @@ function HomePageContent() {
               canTranslateContextMenuMessage ? "hover:bg-gray-50" : "cursor-not-allowed text-gray-400"
             }`}
           >
-            翻译此消息
+            缈昏瘧姝ゆ秷鎭?
           </button>
         </div>
       ) : null}
@@ -4646,13 +4739,13 @@ function HomePageContent() {
               onClick={() => handleTogglePin(contextMenuCustomer)}
               className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50"
             >
-              {contextMenuCustomer.pinnedAt ? "取消置顶" : "置顶到顶部"}
+              {contextMenuCustomer.pinnedAt ? "鍙栨秷缃《" : "缃《鍒伴《閮?}
             </button>
             <button
               onClick={() => handleRenameCustomer(contextMenuCustomer)}
               className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50"
             >
-              备注名字
+              澶囨敞鍚嶅瓧
             </button>
             <button
               onMouseEnter={() => {
@@ -4661,7 +4754,7 @@ function HomePageContent() {
               }}
               className="flex w-full items-center justify-between px-4 py-2 text-left text-sm hover:bg-gray-50"
             >
-              <span>标签</span>
+              <span>鏍囩</span>
               <span className="text-gray-400">&gt;</span>
             </button>
           </div>
@@ -4680,7 +4773,7 @@ function HomePageContent() {
                 type="button"
                 onClick={() => {
                   if (!canCreateMoreTags) {
-                    showOpNotice("最多只能创建 10 个标签");
+                    showOpNotice("鏈€澶氬彧鑳藉垱寤?10 涓爣绛?);
                     return;
                   }
                   handleOpenTagCreateDialog();
@@ -4688,12 +4781,12 @@ function HomePageContent() {
                 disabled={!canCreateMoreTags}
                 className="w-full border-b border-gray-100 px-4 py-2 text-left text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-400"
               >
-                + 添加标签
+                + 娣诲姞鏍囩
               </button>
               {isLoadingTags ? (
-                <div className="px-4 py-2 text-xs text-gray-400">加载标签中...</div>
+                <div className="px-4 py-2 text-xs text-gray-400">鍔犺浇鏍囩涓?..</div>
               ) : allTags.length === 0 ? (
-                <div className="px-4 py-2 text-xs text-gray-400">暂无标签</div>
+                <div className="px-4 py-2 text-xs text-gray-400">鏆傛棤鏍囩</div>
               ) : (
                 <div className="max-h-64 overflow-y-auto py-1">
                   {allTags.map((tag) => {
@@ -4715,7 +4808,7 @@ function HomePageContent() {
                             style={{ backgroundColor: tag.color || "#94A3B8" }}
                           />
                           <span className="min-w-0 flex-1 truncate">{tag.name}</span>
-                          <span className="text-xs text-gray-500">{isUpdating ? "..." : hasTag ? "✓" : ""}</span>
+                          <span className="text-xs text-gray-500">{isUpdating ? "..." : hasTag ? "鉁? : ""}</span>
                         </button>
                         <button
                           type="button"
@@ -4729,7 +4822,7 @@ function HomePageContent() {
                           disabled={!!updatingCustomerTagKey || isDeletingTag}
                           className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-xs text-rose-500 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                          ×
+                          脳
                         </button>
                       </div>
                     );
@@ -4751,7 +4844,7 @@ function HomePageContent() {
             className="w-full max-w-sm rounded-2xl border border-gray-200 bg-white p-4 shadow-2xl"
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="text-sm font-semibold text-gray-900">添加标签</div>
+            <div className="text-sm font-semibold text-gray-900">娣诲姞鏍囩</div>
             <input
               type="text"
               value={newTagName}
@@ -4766,7 +4859,7 @@ function HomePageContent() {
                   void handleCreateTagAndAttach();
                 }
               }}
-              placeholder="请输入标签名称"
+              placeholder="璇疯緭鍏ユ爣绛惧悕绉?
               maxLength={20}
               className="mt-3 w-full rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm outline-none focus:border-green-300 focus:ring-2 focus:ring-green-100"
             />
@@ -4781,7 +4874,7 @@ function HomePageContent() {
                 }}
                 className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 hover:bg-gray-50"
               >
-                取消
+                鍙栨秷
               </button>
               <button
                 type="button"
@@ -4791,7 +4884,7 @@ function HomePageContent() {
                 disabled={isCreatingTag}
                 className="rounded-xl bg-green-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isCreatingTag ? "保存中..." : "保存"}
+                {isCreatingTag ? "淇濆瓨涓?.." : "淇濆瓨"}
               </button>
             </div>
           </div>
@@ -4808,11 +4901,10 @@ function HomePageContent() {
             className="w-full max-w-sm rounded-2xl border border-gray-200 bg-white p-4 shadow-2xl"
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="text-sm font-semibold text-gray-900">删除标签</div>
+            <div className="text-sm font-semibold text-gray-900">鍒犻櫎鏍囩</div>
             <div className="mt-3 text-sm text-gray-700">
-              删除标签“{tagDeleteTarget.name}”？<br />
-              删除后会从所有顾客身上移除该标签。
-            </div>
+              鍒犻櫎鏍囩鈥渰tagDeleteTarget.name}鈥濓紵<br />
+              鍒犻櫎鍚庝細浠庢墍鏈夐【瀹㈣韩涓婄Щ闄よ鏍囩銆?            </div>
             {tagDeleteError ? (
               <div className="mt-2 text-xs text-rose-600">{tagDeleteError}</div>
             ) : null}
@@ -4824,7 +4916,7 @@ function HomePageContent() {
                 }}
                 className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 hover:bg-gray-50"
               >
-                取消
+                鍙栨秷
               </button>
               <button
                 type="button"
@@ -4834,7 +4926,7 @@ function HomePageContent() {
                 disabled={isDeletingTag}
                 className="rounded-xl bg-rose-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isDeletingTag ? "删除中..." : "删除"}
+                {isDeletingTag ? "鍒犻櫎涓?.." : "鍒犻櫎"}
               </button>
             </div>
           </div>
@@ -4854,7 +4946,7 @@ export default function Home() {
       fallback={
         <div className="h-screen bg-gray-100 flex items-center justify-center">
           <div className="rounded-2xl border border-gray-200 bg-white px-6 py-4 text-sm text-gray-500 shadow-sm">
-            页面加载中...
+            椤甸潰鍔犺浇涓?..
           </div>
         </div>
       }
@@ -4863,3 +4955,4 @@ export default function Home() {
     </Suspense>
   );
 }
+

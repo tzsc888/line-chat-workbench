@@ -4,7 +4,11 @@ import { Prisma } from "@prisma/client";
 import { put } from "@vercel/blob";
 import { prisma } from "@/lib/prisma";
 import { publishRealtimeRefresh } from "@/lib/ably";
-import { queueInboundTranslation, runInboundAutomation } from "@/lib/inbound-automation";
+import {
+  queueInboundTranslation,
+  runInboundAutomation,
+  tryProcessInboundJobsImmediately,
+} from "@/lib/inbound-automation";
 import { buildDefaultRemarkName } from "@/lib/customers/default-remark-name";
 import { computeLineRefollowedAt } from "@/lib/customers/relationship-transition";
 import { decideInboundTriggerPolicy } from "@/lib/inbound/trigger-policy";
@@ -353,6 +357,19 @@ export async function POST(req: NextRequest) {
         await queueInboundTranslation({
           customerId,
           targetMessageId: messageId,
+        });
+        after(async () => {
+          try {
+            await tryProcessInboundJobsImmediately({
+              customerId,
+              targetMessageId: messageId,
+              includeTranslation: true,
+              includeWorkflow: false,
+              maxWaitMs: 900,
+            });
+          } catch (error) {
+            console.error("line webhook immediate translation attempt error:", error);
+          }
         });
       }
 

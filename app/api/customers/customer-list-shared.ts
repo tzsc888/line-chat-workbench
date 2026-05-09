@@ -59,6 +59,8 @@ export const customerListSelect = {
       source: true,
       japaneseText: true,
       chineseText: true,
+      deliveryStatus: true,
+      sendError: true,
       sentAt: true,
     },
   },
@@ -129,6 +131,8 @@ export function mapCustomerListItem(customer: CustomerListRow, now: number) {
           source: latestMessage.source,
           japaneseText: latestMessage.japaneseText,
           chineseText: latestMessage.chineseText,
+          deliveryStatus: latestMessage.deliveryStatus,
+          sendError: latestMessage.sendError,
           sentAt: latestMessage.sentAt,
           previewText: getLatestPreview({
             role: latestMessage.role,
@@ -139,4 +143,3 @@ export function mapCustomerListItem(customer: CustomerListRow, now: number) {
       : null,
   };
 }
-
