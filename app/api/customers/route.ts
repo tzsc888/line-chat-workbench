@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { translateInboundMessageImmediately } from "@/lib/inbound-automation";
 import { customerListSelect, mapCustomerListItem, type CustomerListRow } from "./customer-list-shared";
 
 const DEFAULT_LIMIT = 50;
@@ -186,6 +187,28 @@ export async function GET(req: NextRequest) {
     }
 
     const mappedCustomers = customers.map((customer) => mapCustomerListItem(customer, now));
+    const inboundTranslationCandidates = mappedCustomers
+      .filter((customer) => {
+        const latest = customer.latestMessage;
+        if (!latest) return false;
+        if (latest.role !== "CUSTOMER" || latest.type !== "TEXT") return false;
+        if (latest.chineseText && latest.chineseText.trim()) return false;
+        return !!latest.japaneseText.trim();
+      })
+      .slice(0, 3);
+    if (inboundTranslationCandidates.length > 0) {
+      void Promise.allSettled(
+        inboundTranslationCandidates.map((customer) => {
+          const latest = customer.latestMessage;
+          if (!latest) return Promise.resolve({ ok: true } as const);
+          return translateInboundMessageImmediately({
+            customerId: customer.id,
+            messageId: latest.id,
+            reason: "customers-list-fallback",
+          });
+        })
+      );
+    }
     if (process.env.NODE_ENV !== "production" && debugCustomerId) {
       for (const customer of mappedCustomers) {
         if (customer.id === debugCustomerId) {
