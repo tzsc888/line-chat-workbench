@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { publishRealtimeRefresh } from "@/lib/ably";
 import {
   queueInboundTranslation,
   runInboundAutomation,
@@ -30,6 +31,18 @@ export async function POST(req: NextRequest) {
           sentAt: result.message.sentAt,
         }),
     });
+
+    if (result?.created && result?.customer?.id && result?.message?.id) {
+      try {
+        await publishRealtimeRefresh({
+          customerId: result.customer.id,
+          reason: "inbound-message",
+          messageId: result.message.id,
+        });
+      } catch (error) {
+        console.error("Ably publish inbound-message error:", error);
+      }
+    }
 
     if (
       triggerDecision.shouldQueueTranslation &&
