@@ -7,7 +7,7 @@ import { publishRealtimeRefresh } from "@/lib/ably";
 import {
   queueInboundTranslation,
   runInboundAutomation,
-  tryProcessInboundJobsImmediately,
+  translateInboundMessageImmediately,
 } from "@/lib/inbound-automation";
 import { buildDefaultRemarkName } from "@/lib/customers/default-remark-name";
 import { computeLineRefollowedAt } from "@/lib/customers/relationship-transition";
@@ -354,23 +354,22 @@ export async function POST(req: NextRequest) {
       }
 
       if (triggerDecision.shouldQueueTranslation) {
-        await queueInboundTranslation({
+        const immediate = await translateInboundMessageImmediately({
           customerId,
-          targetMessageId: messageId,
+          messageId,
+          reason: "line-webhook",
         });
-        after(async () => {
-          try {
-            await tryProcessInboundJobsImmediately({
-              customerId,
-              targetMessageId: messageId,
-              includeTranslation: true,
-              includeWorkflow: false,
-              maxWaitMs: 900,
-            });
-          } catch (error) {
-            console.error("line webhook immediate translation attempt error:", error);
-          }
-        });
+        if (!immediate.ok) {
+          console.error("line webhook immediate translation failed:", {
+            customerId,
+            messageId,
+            error: immediate.error,
+          });
+          await queueInboundTranslation({
+            customerId,
+            targetMessageId: messageId,
+          });
+        }
       }
 
       if (triggerDecision.shouldQueueWorkflow) {

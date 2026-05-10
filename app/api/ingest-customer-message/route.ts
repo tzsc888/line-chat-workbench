@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   queueInboundTranslation,
   runInboundAutomation,
-  tryProcessInboundJobsImmediately,
+  translateInboundMessageImmediately,
 } from "@/lib/inbound-automation";
 import { isFirstInboundTextMessage } from "@/lib/inbound/first-inbound";
 import { decideInboundTriggerPolicy } from "@/lib/inbound/trigger-policy";
@@ -37,20 +37,21 @@ export async function POST(req: NextRequest) {
       result?.customer?.id &&
       body?.queueTranslate !== false
     ) {
-      await queueInboundTranslation({
+      const immediate = await translateInboundMessageImmediately({
         customerId: result.customer.id,
-        targetMessageId: result.message.id,
+        messageId: result.message.id,
+        reason: "ingest-customer-message",
       });
-      try {
-        await tryProcessInboundJobsImmediately({
+      if (!immediate.ok) {
+        console.error("ingest immediate translation failed:", {
+          customerId: result.customer.id,
+          messageId: result.message.id,
+          error: immediate.error,
+        });
+        await queueInboundTranslation({
           customerId: result.customer.id,
           targetMessageId: result.message.id,
-          includeTranslation: true,
-          includeWorkflow: false,
-          maxWaitMs: 900,
         });
-      } catch (error) {
-        console.error("ingest immediate translation attempt error:", error);
       }
     }
 

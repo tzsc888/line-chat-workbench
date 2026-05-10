@@ -218,6 +218,11 @@ const WORKSPACE_CACHE_MAX = 30;
 const WORKSPACE_CACHE_TTL_MS = 30 * 60 * 1000;
 const WORKSPACE_PREFETCH_TOP_MAX = 12;
 const WORKSPACE_PREFETCH_NEAR_MAX = 12;
+const MANUAL_MESSAGE_MAX_CHARS = 4500;
+
+function countManualMessageChars(value: string) {
+  return Array.from(value.replace(/\r\n/g, "\n")).length;
+}
 const WORKSPACE_PREFETCH_QUEUE_MAX = 20;
 const WORKSPACE_PREFETCH_CONCURRENCY = 1;
 const DEBUG_CUSTOMER_SCROLL_DEFER_STATS =
@@ -3424,6 +3429,13 @@ function HomePageContent() {
       return;
     }
     const japaneseText = manualReply.replace(/\r\n/g, "\n").trim();
+    const manualMessageChars = countManualMessageChars(japaneseText);
+    if (manualMessageChars > MANUAL_MESSAGE_MAX_CHARS) {
+      window.alert(
+        `消息内容过长，当前约 ${manualMessageChars} 个字，最多可发送 ${MANUAL_MESSAGE_MAX_CHARS} 个字。请删减后再发送。`
+      );
+      return;
+    }
     const nextImages = [...pendingImages];
     const dedupeKey = JSON.stringify({
       customerId: workspace.customer.id,

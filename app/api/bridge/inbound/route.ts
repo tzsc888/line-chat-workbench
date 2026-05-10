@@ -6,6 +6,7 @@ import {
   markInboundMessageJobsSkipped,
   queueInboundAutomation,
   queueInboundTranslation,
+  translateInboundMessageImmediately,
   tryProcessInboundJobsImmediately,
 } from "@/lib/inbound-automation";
 import { PIPELINE_REASON_CODES } from "@/lib/ai/pipeline-reason";
@@ -392,11 +393,25 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    let translationFallbackQueuedCount = 0;
     for (const messageId of translationQueuedMessageIds) {
+      const immediate = await translateInboundMessageImmediately({
+        customerId: customer.id,
+        messageId,
+        reason: "bridge-inbound",
+      });
+      if (immediate.ok) continue;
+
+      console.error("bridge inbound immediate translation failed:", {
+        customerId: customer.id,
+        messageId,
+        error: immediate.error,
+      });
       await queueInboundTranslation({
         customerId: customer.id,
         targetMessageId: messageId,
       });
+      translationFallbackQueuedCount += 1;
     }
 
     if (mode === "live" && latestLiveTextMessageId) {
@@ -409,7 +424,7 @@ export async function POST(req: NextRequest) {
         await tryProcessInboundJobsImmediately({
           customerId: customer.id,
           targetMessageId: latestLiveTextMessageId,
-          includeTranslation: true,
+          includeTranslation: false,
           includeWorkflow: true,
           maxWaitMs: 1200,
         });
@@ -431,6 +446,7 @@ export async function POST(req: NextRequest) {
       },
       importedCount,
       translationQueuedCount: translationQueuedMessageIds.length,
+      translationFallbackQueuedCount,
       aiQueued: mode === "live" && !!latestLiveTextMessageId,
     });
   } catch (error) {

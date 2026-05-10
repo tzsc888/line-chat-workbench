@@ -112,56 +112,94 @@ async function executeInboundTranslationJob(job: {
   customerId: string;
   targetMessageId: string;
 }) {
-  const message = await prisma.message.findUnique({
-    where: { id: job.targetMessageId },
-    select: {
-      id: true,
-      customerId: true,
-      role: true,
-      type: true,
-      japaneseText: true,
-      chineseText: true,
-    },
-  });
-
-  if (!message || message.customerId !== job.customerId || message.role !== "CUSTOMER" || message.type !== MessageType.TEXT) {
-    await finishJob(job.id, AutomationJobStatus.SKIPPED, PIPELINE_REASON_CODES.MESSAGE_NOT_FOUND);
-    return { ok: true, skipped: true } as const;
-  }
-
-  if (message.chineseText?.trim()) {
-    await finishJob(job.id, AutomationJobStatus.SKIPPED, PIPELINE_REASON_CODES.ALREADY_TRANSLATED);
-    return { ok: true, skipped: true } as const;
-  }
-
-  const translation = await translateCustomerJapaneseMessage({ japaneseText: message.japaneseText });
-  const chineseText = translation.parsed.translation?.trim() || "";
-
-  if (!chineseText) {
-    throw new Error(PIPELINE_REASON_CODES.JOB_EXECUTION_ERROR);
-  }
-
-  const writeResult = await prisma.message.updateMany({
-    where: {
-      id: message.id,
-      chineseText: null,
-    },
-    data: { chineseText },
-  });
-
-  if (writeResult.count === 0) {
-    await finishJob(job.id, AutomationJobStatus.SKIPPED, PIPELINE_REASON_CODES.ALREADY_TRANSLATED);
-    return { ok: true, skipped: true } as const;
-  }
-
-  await publishRealtimeRefresh({
+  const immediate = await translateInboundMessageImmediately({
     customerId: job.customerId,
-    reason: "translation-updated",
-    scopes: ["workspace", "list"],
+    messageId: job.targetMessageId,
+    reason: "automation-job",
   });
+
+  if (!immediate.ok) {
+    throw new Error(immediate.error || PIPELINE_REASON_CODES.JOB_EXECUTION_ERROR);
+  }
+
+  if (!immediate.translated) {
+    await finishJob(
+      job.id,
+      AutomationJobStatus.SKIPPED,
+      immediate.skippedReason || PIPELINE_REASON_CODES.ALREADY_TRANSLATED,
+    );
+    return { ok: true, skipped: true } as const;
+  }
 
   await finishJob(job.id, AutomationJobStatus.DONE, null);
   return { ok: true, skipped: false } as const;
+}
+
+export async function translateInboundMessageImmediately(params: {
+  customerId: string;
+  messageId: string;
+  reason?: string;
+}): Promise<{ ok: boolean; translated?: string; error?: string; skippedReason?: string }> {
+  try {
+    const message = await prisma.message.findUnique({
+      where: { id: params.messageId },
+      select: {
+        id: true,
+        customerId: true,
+        role: true,
+        type: true,
+        japaneseText: true,
+        chineseText: true,
+      },
+    });
+
+    if (!message || message.customerId !== params.customerId || message.role !== "CUSTOMER" || message.type !== MessageType.TEXT) {
+      return { ok: true, skippedReason: PIPELINE_REASON_CODES.MESSAGE_NOT_FOUND };
+    }
+
+    if (message.chineseText?.trim()) {
+      return { ok: true, skippedReason: PIPELINE_REASON_CODES.ALREADY_TRANSLATED };
+    }
+
+    const japaneseText = message.japaneseText?.trim() || "";
+    if (!japaneseText) {
+      return { ok: true, skippedReason: PIPELINE_REASON_CODES.MESSAGE_NOT_FOUND };
+    }
+
+    const translation = await translateCustomerJapaneseMessage({ japaneseText });
+    const chineseText = translation.parsed.translation?.trim() || "";
+
+    if (!chineseText) {
+      return { ok: false, error: PIPELINE_REASON_CODES.JOB_EXECUTION_ERROR };
+    }
+
+    const writeResult = await prisma.message.updateMany({
+      where: {
+        id: message.id,
+        OR: [
+          { chineseText: null },
+          { chineseText: "" },
+        ],
+      },
+      data: { chineseText },
+    });
+
+    if (writeResult.count === 0) {
+      return { ok: true, skippedReason: PIPELINE_REASON_CODES.ALREADY_TRANSLATED };
+    }
+
+    await publishRealtimeRefresh({
+      customerId: params.customerId,
+      reason: "translation-updated",
+      scopes: ["workspace", "list"],
+    });
+
+    return { ok: true, translated: chineseText };
+  } catch (error) {
+    const errorMessage = parsePipelineReasonCode(error instanceof Error ? error.message : String(error))
+      || PIPELINE_REASON_CODES.JOB_EXECUTION_ERROR;
+    return { ok: false, error: errorMessage };
+  }
 }
 
 async function processSpecificJob(jobId: string) {
