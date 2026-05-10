@@ -770,7 +770,6 @@ function HomePageContent() {
   const shouldStickToBottomRef = useRef(true);
   const lastOpenedCustomerIdRef = useRef("");
   const playedInboundMessageIdsRef = useRef<Set<string>>(new Set());
-  const inboundSoundBaselineReadyRef = useRef(false);
   const opNoticeTimerRef = useRef<number | null>(null);
   const audioEnabledRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -825,7 +824,7 @@ function HomePageContent() {
     ])
   );
   const inboundSoundReasonsRef = useRef(
-    new Set(["inbound-message", "bridge-inbound-message", "inbound-message-created"])
+    new Set(["inbound-message"])
   );
   useEffect(() => {
     return () => {
@@ -1106,36 +1105,6 @@ function HomePageContent() {
       items.map((item) => applyReadProtectionToCustomer(item, options)),
     [applyReadProtectionToCustomer]
   );
-  const tryPlayIncomingSoundFromCustomerListDiff = useCallback(
-    (nextItems: CustomerListItem[], previousUnreadMap: Map<string, number>) => {
-      if (!inboundSoundBaselineReadyRef.current) {
-        inboundSoundBaselineReadyRef.current = true;
-        return;
-      }
-      let shouldPlay = false;
-      for (const item of nextItems) {
-        const previousUnread = previousUnreadMap.get(item.id) ?? 0;
-        if (item.unreadCount <= previousUnread) continue;
-        const latestMessage = item.latestMessage;
-        if (!latestMessage || latestMessage.role !== "CUSTOMER") continue;
-        const inboundMessageId = latestMessage.id;
-        if (!inboundMessageId || playedInboundMessageIdsRef.current.has(inboundMessageId)) continue;
-        playedInboundMessageIdsRef.current.add(inboundMessageId);
-        shouldPlay = true;
-      }
-      if (!shouldPlay) return;
-      if (playedInboundMessageIdsRef.current.size > 3000) {
-        const iterator = playedInboundMessageIdsRef.current.values();
-        for (let i = 0; i < 1000; i += 1) {
-          const next = iterator.next();
-          if (next.done) break;
-          playedInboundMessageIdsRef.current.delete(next.value);
-        }
-      }
-      void playDingDongSound();
-    },
-    [playDingDongSound]
-  );
   const scheduleWorkspacePrefetchDrain = useCallback(() => {
     if (workspacePrefetchTimerRef.current != null) return;
     const run = () => {
@@ -1389,7 +1358,6 @@ function HomePageContent() {
             for (const item of prev) merged.set(item.id, item);
             for (const item of list) merged.set(item.id, item);
             const next = sortCustomerList(applyReadProtectionToCustomers(Array.from(merged.values())));
-            tryPlayIncomingSoundFromCustomerListDiff(next, prevUnreadMap);
             debugStateLog("[customers-state] set", { source: "loadCustomers:loadMore", count: next.length });
             for (const item of next) {
               if (item.unreadCount > 0) {
@@ -1418,7 +1386,6 @@ function HomePageContent() {
             : [];
           const replaceBase = [...list, ...preservedRegularTail];
           const next = sortCustomerList(applyReadProtectionToCustomers(replaceBase));
-          tryPlayIncomingSoundFromCustomerListDiff(next, prevUnreadMap);
           debugStateLog("[customers-state] set", { source: "loadCustomers:replace", count: next.length });
           for (const item of next) {
             if (item.unreadCount > 0) {
@@ -1496,7 +1463,7 @@ function HomePageContent() {
         }
       }
     },
-    [applyReadProtectionToCustomers, captureCustomerListAnchor, restoreCustomerListAnchor, tryPlayIncomingSoundFromCustomerListDiff]
+    [applyReadProtectionToCustomers, captureCustomerListAnchor, restoreCustomerListAnchor]
   );
   const loadCustomerStats = useCallback(async (options?: { debounceMs?: number }) => {
     const debounceMs = Math.max(0, options?.debounceMs ?? 0);

@@ -378,15 +378,18 @@ export async function POST(req: NextRequest) {
     }
 
     if (importedCount > 0 || customerUpsert.created || customerUpsert.profileChanged || customerUpsert.relationshipChanged) {
+      const shouldTreatAsRealtimeInbound = importedCount > 0 && mode === "live";
       await publishRealtimeRefresh({
         customerId: customer.id,
         reason:
-          importedCount > 0
-            ? inboundNotifyPolicy.inboundRefreshReason
+          shouldTreatAsRealtimeInbound
+            ? "inbound-message"
+            : importedCount > 0
+              ? inboundNotifyPolicy.inboundRefreshReason
             : customerUpsert.relationshipChanged
               ? "bridge-thread-status"
               : "bridge-customer-updated",
-        ...(importedCount > 0 && inboundNotifyPolicy.shouldNotifyInboundSound && latestCreatedInboundMessageId
+        ...(shouldTreatAsRealtimeInbound && latestCreatedInboundMessageId
           ? { messageId: latestCreatedInboundMessageId }
           : {}),
         scopes: ["workspace", "list"],
