@@ -84,6 +84,21 @@ type UpsertBridgeCustomerResult = {
   relationshipChanged: boolean;
 };
 
+const BRIDGE_REALTIME_MESSAGE_WINDOW_MS = 10 * 60 * 1000;
+
+function isBridgeRealtimeCandidate(params: {
+  mode: "live" | "non_live";
+  sentAt: Date | null;
+  now: number;
+}) {
+  if (params.mode === "live") return true;
+  if (!params.sentAt) return false;
+  const sentAtMs = params.sentAt.getTime();
+  if (!Number.isFinite(sentAtMs)) return false;
+  const deltaMs = Math.abs(params.now - sentAtMs);
+  return deltaMs <= BRIDGE_REALTIME_MESSAGE_WINDOW_MS;
+}
+
 function parseBridgeAuth(req: NextRequest) {
   const header = req.headers.get("x-bridge-secret") || "";
   const expected = process.env.BRIDGE_SHARED_SECRET || "";
@@ -298,8 +313,9 @@ export async function POST(req: NextRequest) {
     validateInboundBridgeMessages(normalizedMessages);
 
     let importedCount = 0;
+    const nowTs = Date.now();
     let latestLiveTextMessageId = "";
-    let latestCreatedInboundMessageId = "";
+    let latestRealtimeInboundMessageId = "";
     const translationQueuedMessageIds: string[] = [];
 
     for (const msg of normalizedMessages) {
@@ -349,15 +365,27 @@ export async function POST(req: NextRequest) {
         created,
         isFirstInboundText,
       });
+      const isRealtimeCandidate = isBridgeRealtimeCandidate({
+        mode,
+        sentAt: createdMessageSentAt,
+        now: nowTs,
+      });
+      const shouldTranslateImmediately =
+        created &&
+        messageType === "TEXT" &&
+        !!createdMessageId &&
+        (triggerDecision.shouldQueueTranslation || isRealtimeCandidate);
 
       if (!created) continue;
 
       importedCount += 1;
       if (createdMessageId) {
-        latestCreatedInboundMessageId = createdMessageId;
+        if (isRealtimeCandidate) {
+          latestRealtimeInboundMessageId = createdMessageId;
+        }
       }
       if (
-        !triggerDecision.shouldQueueTranslation &&
+        !shouldTranslateImmediately &&
         !triggerDecision.shouldQueueWorkflow &&
         triggerDecision.workflowReasonCode === PIPELINE_REASON_CODES.NON_LIVE_MODE &&
         createdMessageId
@@ -369,7 +397,7 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      if (triggerDecision.shouldQueueTranslation && createdMessageId) {
+      if (shouldTranslateImmediately && createdMessageId) {
         translationQueuedMessageIds.push(createdMessageId);
       }
       if (triggerDecision.shouldQueueWorkflow && createdMessageId) {
@@ -378,7 +406,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (importedCount > 0 || customerUpsert.created || customerUpsert.profileChanged || customerUpsert.relationshipChanged) {
-      const shouldTreatAsRealtimeInbound = importedCount > 0 && mode === "live";
+      const shouldTreatAsRealtimeInbound = !!latestRealtimeInboundMessageId;
       await publishRealtimeRefresh({
         customerId: customer.id,
         reason:
@@ -389,8 +417,8 @@ export async function POST(req: NextRequest) {
             : customerUpsert.relationshipChanged
               ? "bridge-thread-status"
               : "bridge-customer-updated",
-        ...(shouldTreatAsRealtimeInbound && latestCreatedInboundMessageId
-          ? { messageId: latestCreatedInboundMessageId }
+        ...(shouldTreatAsRealtimeInbound
+          ? { messageId: latestRealtimeInboundMessageId }
           : {}),
         scopes: ["workspace", "list"],
       });
