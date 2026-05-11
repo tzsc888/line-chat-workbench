@@ -1527,6 +1527,10 @@ function HomePageContent() {
       setIsLoadingTags(false);
     }
   }, []);
+  const getLoadedCustomerRefreshLimit = useCallback(() => {
+    const loadedRegularCount = customersRef.current.filter((item) => !item.pinnedAt).length;
+    return Math.max(loadedRegularCount, CUSTOMER_PAGE_SIZE);
+  }, []);
   const markCustomerRead = useCallback(async (
     customerId: string,
     options?: { reason?: string; previousUnread?: number }
@@ -1568,8 +1572,10 @@ function HomePageContent() {
       void loadCustomers({
         silent: true,
         preserveUi: true,
+        limitOverride: getLoadedCustomerRefreshLimit(),
         search: searchKeywordRef.current,
         debugCustomerId: customerId,
+        excludeCustomerIdFromAnchor: customerId,
       });
     } catch (error) {
       debugStateLog("[mark-read] failed", {
@@ -1583,13 +1589,15 @@ function HomePageContent() {
       void loadCustomers({
         silent: true,
         preserveUi: true,
+        limitOverride: getLoadedCustomerRefreshLimit(),
         search: searchKeywordRef.current,
         debugCustomerId: customerId,
+        excludeCustomerIdFromAnchor: customerId,
       });
     } finally {
       markReadInFlightRef.current.delete(customerId);
     }
-  }, [loadCustomerStats, loadCustomers]);
+  }, [getLoadedCustomerRefreshLimit, loadCustomerStats, loadCustomers]);
   const loadWorkspace = useCallback(
     async (customerId: string, options?: { preserveUi?: boolean; source?: string; cacheOnly?: boolean }) => {
       const source = options?.source || "unknown";
