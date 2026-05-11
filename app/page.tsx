@@ -212,12 +212,13 @@ type MarkReadPendingEntry = {
   startedAt: number;
   startedRequestId: number;
 };
-const CUSTOMER_PAGE_SIZE = 50;
+const CUSTOMER_PAGE_SIZE = 30;
+const CUSTOMER_REFRESH_LIMIT_MAX = 50;
 const OPTIMISTIC_ID_PREFIX = "optimistic:";
 const WORKSPACE_CACHE_MAX = 30;
 const WORKSPACE_CACHE_TTL_MS = 30 * 60 * 1000;
-const WORKSPACE_PREFETCH_TOP_MAX = 12;
-const WORKSPACE_PREFETCH_NEAR_MAX = 12;
+const WORKSPACE_PREFETCH_TOP_MAX = 0;
+const WORKSPACE_PREFETCH_NEAR_MAX = 0;
 const MANUAL_MESSAGE_MAX_CHARS = 4500;
 
 function countManualMessageChars(value: string) {
@@ -1169,6 +1170,13 @@ function HomePageContent() {
   }, [setCachedWorkspace]);
   const enqueueWorkspacePrefetch = useCallback(
     (customerIds: string[], options?: { replacePending?: boolean; selectedId?: string | null }) => {
+      if (WORKSPACE_PREFETCH_NEAR_MAX <= 0) {
+        if (options?.replacePending) {
+          workspacePrefetchQueueRef.current = [];
+          workspacePrefetchBatchIdRef.current += 1;
+        }
+        return;
+      }
       const selectedId = options?.selectedId || null;
       const candidateBatch = customerIds
         .map((item) => item.trim())
@@ -1529,7 +1537,7 @@ function HomePageContent() {
   }, []);
   const getLoadedCustomerRefreshLimit = useCallback(() => {
     const loadedRegularCount = customersRef.current.filter((item) => !item.pinnedAt).length;
-    return Math.max(loadedRegularCount, CUSTOMER_PAGE_SIZE);
+    return Math.min(Math.max(loadedRegularCount, CUSTOMER_PAGE_SIZE), CUSTOMER_REFRESH_LIMIT_MAX);
   }, []);
   const markCustomerRead = useCallback(async (
     customerId: string,
@@ -1843,7 +1851,7 @@ function HomePageContent() {
         await loadCustomers({
           silent: true,
           preserveUi: true,
-          limitOverride: Math.max(loadedRegularCount, CUSTOMER_PAGE_SIZE),
+          limitOverride: Math.min(Math.max(loadedRegularCount, CUSTOMER_PAGE_SIZE), CUSTOMER_REFRESH_LIMIT_MAX),
           search: searchKeywordRef.current,
           excludeCustomerIdFromAnchor: nextTargetCustomerId,
         });

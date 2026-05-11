@@ -5,6 +5,8 @@ import { buildMessagePipelineStatuses } from "@/lib/ai/pipeline-status";
 import { getActiveAiStrategyVersion } from "@/lib/ai/strategy";
 import { resolveFollowupView } from "@/lib/followup-rules";
 
+const WORKSPACE_MESSAGE_LIMIT = 60;
+
 type Props = {
   params: Promise<{ customerId: string }>;
 };
@@ -25,7 +27,7 @@ export async function GET(_: Request, { params }: Props) {
           orderBy: {
             sentAt: "desc",
           },
-          take: 100,
+          take: WORKSPACE_MESSAGE_LIMIT,
         },
         replyDraftSets: {
           orderBy: {
