@@ -1051,7 +1051,7 @@ function HomePageContent() {
     }
     if (markReadAwaitingAuthoritativeRef.current.has(customerId)) {
       const confirmedAt = markReadConfirmedAtRef.current.get(customerId) ?? 0;
-      if (!requestStartedAt || requestStartedAt <= confirmedAt) {
+      if (requestStartedAt && requestStartedAt <= confirmedAt) {
         return "awaiting-authoritative-refresh";
       }
       markReadAwaitingAuthoritativeRef.current.delete(customerId);
@@ -1351,13 +1351,11 @@ function HomePageContent() {
         });
         const nextHasMore = !!data.hasMore;
         const nextPage = Number(data.page || page);
-        const responsePageSize = Number(data.pageSize || limit);
         const nextCursor = typeof data.nextCursor === "string" && data.nextCursor.trim() ? data.nextCursor.trim() : null;
-        const isCappedFullRefresh =
+        const shouldPreserveExistingCustomers =
           !isLoadMore &&
           !isSearching &&
-          shouldPreserveListUi &&
-          limit > responsePageSize;
+          shouldPreserveListUi;
 
         setCustomers((prev) => {
           const prevUnreadMap = new Map(prev.map((item) => [item.id, item.unreadCount]));
@@ -1389,10 +1387,10 @@ function HomePageContent() {
             return next;
           }
           const fetchedIds = new Set(list.map((item) => item.id));
-          const preservedRegularTail = isCappedFullRefresh
+          const preservedExistingCustomers = shouldPreserveExistingCustomers
             ? prev.filter((item) => !item.pinnedAt && !fetchedIds.has(item.id))
             : [];
-          const replaceBase = [...list, ...preservedRegularTail];
+          const replaceBase = [...list, ...preservedExistingCustomers];
           const next = sortCustomerList(applyReadProtectionToCustomers(replaceBase));
           debugStateLog("[customers-state] set", { source: "loadCustomers:replace", count: next.length });
           for (const item of next) {
@@ -1535,10 +1533,6 @@ function HomePageContent() {
       setIsLoadingTags(false);
     }
   }, []);
-  const getLoadedCustomerRefreshLimit = useCallback(() => {
-    const loadedRegularCount = customersRef.current.filter((item) => !item.pinnedAt).length;
-    return Math.min(Math.max(loadedRegularCount, CUSTOMER_PAGE_SIZE), CUSTOMER_REFRESH_LIMIT_MAX);
-  }, []);
   const markCustomerRead = useCallback(async (
     customerId: string,
     options?: { reason?: string; previousUnread?: number }
@@ -1576,15 +1570,8 @@ function HomePageContent() {
       markReadPendingRef.current.delete(customerId);
       markReadConfirmedAtRef.current.set(customerId, Date.now());
       markReadAwaitingAuthoritativeRef.current.add(customerId);
+      recentLocalRefreshAtRef.current[customerId] = Date.now();
       void loadCustomerStats({ debounceMs: 120 });
-      void loadCustomers({
-        silent: true,
-        preserveUi: true,
-        limitOverride: getLoadedCustomerRefreshLimit(),
-        search: searchKeywordRef.current,
-        debugCustomerId: customerId,
-        excludeCustomerIdFromAnchor: customerId,
-      });
     } catch (error) {
       debugStateLog("[mark-read] failed", {
         customerId,
@@ -1594,18 +1581,10 @@ function HomePageContent() {
       markReadPendingRef.current.delete(customerId);
       markReadConfirmedAtRef.current.delete(customerId);
       markReadAwaitingAuthoritativeRef.current.delete(customerId);
-      void loadCustomers({
-        silent: true,
-        preserveUi: true,
-        limitOverride: getLoadedCustomerRefreshLimit(),
-        search: searchKeywordRef.current,
-        debugCustomerId: customerId,
-        excludeCustomerIdFromAnchor: customerId,
-      });
     } finally {
       markReadInFlightRef.current.delete(customerId);
     }
-  }, [getLoadedCustomerRefreshLimit, loadCustomerStats, loadCustomers]);
+  }, [loadCustomerStats]);
   const loadWorkspace = useCallback(
     async (customerId: string, options?: { preserveUi?: boolean; source?: string; cacheOnly?: boolean }) => {
       const source = options?.source || "unknown";
@@ -2842,7 +2821,7 @@ function HomePageContent() {
           source: "post-generate-refresh",
           cacheOnly: selectedCustomerIdRef.current !== customerId,
         }),
-        loadCustomers({ preserveUi: true }),
+        refreshCustomerSummary(customerId, { preserveUi: true }),
       ]);
       const failures = [workspaceResult, customersResult].filter((result) => result.status === "rejected");
       if (failures.length > 0) {
@@ -2858,7 +2837,7 @@ function HomePageContent() {
       }
       setIsPostGenerateSyncing(false);
     })();
-  }, [loadCustomers, loadWorkspace]);
+  }, [loadWorkspace, refreshCustomerSummary]);
   const stopGenerationPollingByCustomer = useCallback((customerId: string) => {
     const poller = generationPollersRef.current[customerId];
     if (!poller) return;
@@ -3599,7 +3578,7 @@ function HomePageContent() {
       setIsSchedulePanelOpen(false);
       setScheduleAtInput(buildDefaultScheduledInputValue());
       await loadWorkspace(workspace.customer.id, { preserveUi: true, source: "schedule-refresh" });
-      await loadCustomers({ preserveUi: true });
+      await refreshCustomerSummary(workspace.customer.id, { preserveUi: true });
     } catch (error) {
       console.error(error);
       window.alert(error instanceof Error ? error.message : "创建定时发送失败");
@@ -3619,7 +3598,7 @@ function HomePageContent() {
         throw new Error(data?.error || "取消定时发送失败");
       }
       await loadWorkspace(workspace.customer.id, { preserveUi: true, source: "schedule-refresh" });
-      await loadCustomers({ preserveUi: true });
+      await refreshCustomerSummary(workspace.customer.id, { preserveUi: true });
     } catch (error) {
       console.error(error);
       window.alert(error instanceof Error ? error.message : "取消定时发送失败");

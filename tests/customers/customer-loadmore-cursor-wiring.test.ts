@@ -45,12 +45,43 @@ test("loadMore path should not trigger customer stats requests directly", () => 
   assert.equal(observerSection.includes("loadCustomerStats"), false);
 });
 
-test("page should preserve long list entries when full refresh request is capped", () => {
+test("page should preserve long list entries during preserve-ui refreshes", () => {
   const page = read("app/page.tsx");
-  assert.match(page, /const isCappedFullRefresh =/);
-  assert.match(page, /limit > responsePageSize/);
-  assert.match(page, /const preservedRegularTail = isCappedFullRefresh/);
-  assert.match(page, /const replaceBase = \[\.\.\.list, \.\.\.preservedRegularTail\]/);
+  assert.match(page, /const shouldPreserveExistingCustomers =/);
+  assert.match(page, /!isSearching/);
+  assert.match(page, /shouldPreserveListUi/);
+  assert.match(page, /const preservedExistingCustomers = shouldPreserveExistingCustomers/);
+  assert.match(page, /const replaceBase = \[\.\.\.list, \.\.\.preservedExistingCustomers\]/);
+  assert.equal(page.includes("limit > responsePageSize"), false);
+});
+
+test("mark-read and local follow-up refreshes should not replace the full customer list", () => {
+  const page = read("app/page.tsx");
+  const markReadStart = page.indexOf("const markCustomerRead = useCallback");
+  assert.notEqual(markReadStart, -1);
+  const markReadEnd = page.indexOf("const loadWorkspace = useCallback", markReadStart);
+  assert.notEqual(markReadEnd, -1);
+  const markReadSection = page.slice(markReadStart, markReadEnd);
+  assert.equal(markReadSection.includes("loadCustomers({"), false);
+  assert.match(markReadSection, /recentLocalRefreshAtRef\.current\[customerId\] = Date\.now\(\)/);
+
+  const postGenerateStart = page.indexOf("const runPostGenerateRefresh = useCallback");
+  assert.notEqual(postGenerateStart, -1);
+  const postGenerateSection = page.slice(postGenerateStart, Math.min(page.length, postGenerateStart + 900));
+  assert.match(postGenerateSection, /refreshCustomerSummary\(customerId, \{ preserveUi: true \}\)/);
+  assert.equal(postGenerateSection.includes("loadCustomers({ preserveUi: true })"), false);
+
+  assert.match(page, /await refreshCustomerSummary\(workspace\.customer\.id, \{ preserveUi: true \}\)/);
+  assert.equal(page.includes("await loadCustomers({ preserveUi: true });"), false);
+});
+
+test("mark-read protection should only suppress stale list responses with request timestamps", () => {
+  const page = read("app/page.tsx");
+  const protectionStart = page.indexOf("const getUnreadProtectionReason = useCallback");
+  assert.notEqual(protectionStart, -1);
+  const protectionSection = page.slice(protectionStart, Math.min(page.length, protectionStart + 900));
+  assert.match(protectionSection, /if \(requestStartedAt && requestStartedAt <= confirmedAt\)/);
+  assert.equal(protectionSection.includes("if (!requestStartedAt || requestStartedAt <= confirmedAt)"), false);
 });
 
 test("schema should include customer composite indexes for cursor sorting", () => {
